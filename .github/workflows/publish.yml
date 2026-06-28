@@ -1,0 +1,38 @@
+name: Publish to npm
+
+# Auto-publishes the getadvantage CLI whenever package.json's version bumps on
+# main. It skips when the version is already on npm, so a push that doesn't bump
+# the version is a safe no-op. Manual runs are available via the Actions tab.
+#
+# ONE-TIME SETUP: add an npm token with publish rights as the repo secret
+# `NPM_TOKEN` (Settings -> Secrets and variables -> Actions). A granular token
+# with "Bypass 2FA" + read/write on packages works well.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish if the version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view "$NAME" version 2>/dev/null || echo "none")
+          echo "name=$NAME local=$LOCAL published=$PUBLISHED"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "Version $LOCAL is already on npm — nothing to publish."
+            exit 0
+          fi
+          npm publish --access public
+          echo "Published $NAME@$LOCAL"
