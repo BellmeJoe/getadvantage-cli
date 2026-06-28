@@ -40,6 +40,8 @@ import { runGauge } from "./gauge.mjs";
 import { runInit } from "./init.mjs";
 import { runSwitch } from "./switch.mjs";
 import { runModels } from "./models.mjs";
+import { runMcp } from "./mcp.mjs";
+import { runFanOut, runFanIn } from "./fanout.mjs";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
@@ -50,7 +52,7 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       // value-taking flags vs boolean flags
-      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out"]);
+      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task"]);
       if (valueFlags.has(key)) {
         flags[key] = argv[++i];
       } else {
@@ -92,6 +94,15 @@ ${c.bold("Commands")}
            AI-tool file, and prints the prompt to start the new session. ${c.dim("(switch <tool>)")}
   ${c.cyan("models")}   A plain-language playbook for choosing + switching AI models (which model
            for which job) — principles, not benchmarks.
+  ${c.cyan("mcp")}      Run a dependency-free Model Context Protocol (MCP) server over stdio so an
+           AI agent (Claude Code, Cursor) can call getAdvantage's brain + checks MID-session
+           — tools: ${c.bold("get_brief")}, ${c.bold("refresh_brief")}, ${c.bold("get_handoff")}, ${c.bold("save_handoff")}, ${c.bold("check")}, ${c.bold("gauge")}.
+           No API keys, no network — same engine as the CLI.
+  ${c.cyan("fan-out")}  Run several AI sessions/models in PARALLEL, all sharing ONE project brain, via
+           git worktrees. ${c.dim("(fan-out <n> [--task \"...\"])")} — opens ${c.bold("N")} lanes (1–8) off HEAD,
+           each with the brain wired; open a different tool/model in each, then review + merge.
+  ${c.cyan("fan-in")}   List the fan-out lanes and print exactly how to review, merge the ones you
+           like, and clean up. Guided ${c.bold("review-and-merge")} — never auto-merges.
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
 
@@ -104,6 +115,9 @@ ${c.bold("Flags")}
   ${c.dim("brief only:")}
   --out <path>            Where to write the brief (default: PROJECT-BRIEF.md at repo root).
   --check                 Report staleness only (no write); warns if missing/stale.
+
+  ${c.dim("fan-out only:")}
+  --task "<text>"         A one-line task to print into each lane's guidance (optional).
 
   ${c.dim("deploy only:")}
   --expect-prefix <p>     Required deployment-host prefix (default: derived from your linked .vercel project; guard skipped if none).
@@ -119,6 +133,10 @@ ${c.bold("Examples")}
   ship-safe handoff                save your place for the next session
   ship-safe switch cursor          move to a new tool/model without losing context
   ship-safe gauge                  is this session getting heavy?
+  getadvantage mcp                 run the MCP server (an agent calls the brain mid-session)
+  getadvantage fan-out 3           open 3 parallel lanes sharing one brain
+  getadvantage fan-out 3 --task "add a settings page"
+  getadvantage fan-in              review + merge the lanes, then clean up
   ship-safe deploy --expect-prefix myproject-
 `);
 }
@@ -129,6 +147,15 @@ async function main() {
   if (cmd === "help" || flags.help) {
     printHelp();
     process.exit(0);
+  }
+
+  // The MCP server is special: stdout is the JSON-RPC protocol channel, so we must
+  // NOT print the header (or anything else) to stdout, and we resolve the repo
+  // per-tool-call (each tool takes an optional `cwd`) — so it can launch from any
+  // directory, not only a git repo. Handle it before the repo-root gate below.
+  if (cmd === "mcp") {
+    const code = await runMcp();
+    process.exit(code);
   }
 
   let cwd;
@@ -196,6 +223,16 @@ async function main() {
   if (cmd === "init") {
     header();
     process.exit(runInit({ cwd }));
+  }
+
+  if (cmd === "fan-out" || cmd === "fanout") {
+    header();
+    process.exit(runFanOut({ cwd, n: arg, task: flags.task }));
+  }
+
+  if (cmd === "fan-in" || cmd === "fanin") {
+    header();
+    process.exit(runFanIn({ cwd }));
   }
 
   if (cmd === "deploy") {
