@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// Ship-Safe — "is this safe to ship?"
+// getAdvantage CLI — run a fleet of AI agents in parallel, land it safely.
 //
-// A local, dependency-free pre-deploy auditor for AI-built apps. Run it in your
-// repo BEFORE you deploy and it gives a plain-language GO / NO-GO:
+// The control layer for AI-built apps: spin up parallel worktree lanes
+// (`fan-out`), then reconcile them into ONE verified main with the SAFE FAN-IN
+// conductor (`fan-in`) — a collision map, a merge-train, and a combined-tree
+// gate so no conflict reaches main un-verified. Plus a local, dependency-free
+// pre-deploy auditor that gives a plain-language GO / NO-GO:
 //
 //   • dirty-tree guard   — `vercel --prod` ships the working tree, so a dirty
 //                          tree (or another session's work) would ship live
@@ -42,6 +45,7 @@ import { runSwitch } from "./switch.mjs";
 import { runModels } from "./models.mjs";
 import { runMcp } from "./mcp.mjs";
 import { runFanOut, runFanIn } from "./fanout.mjs";
+import { runDemo } from "./demo.mjs";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
@@ -52,7 +56,7 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       // value-taking flags vs boolean flags
-      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task"]);
+      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task", "into"]);
       if (valueFlags.has(key)) {
         flags[key] = argv[++i];
       } else {
@@ -67,7 +71,7 @@ function parseArgs(argv) {
 
 function header() {
   console.log(c.bold("┌──────────────────────────────────────────┐"));
-  console.log(c.bold("│  Ship-Safe — is this safe to ship?        │"));
+  console.log(c.bold("│  getAdvantage — run a fleet, land it safe  │"));
   console.log(c.bold("└──────────────────────────────────────────┘"));
 }
 
@@ -101,13 +105,20 @@ ${c.bold("Commands")}
   ${c.cyan("fan-out")}  Run several AI sessions/models in PARALLEL, all sharing ONE project brain, via
            git worktrees. ${c.dim("(fan-out <n> [--task \"...\"])")} — opens ${c.bold("N")} lanes (1–8) off HEAD,
            each with the brain wired; open a different tool/model in each, then review + merge.
-  ${c.cyan("fan-in")}   List the fan-out lanes and print exactly how to review, merge the ones you
-           like, and clean up. Guided ${c.bold("review-and-merge")} — never auto-merges.
+  ${c.cyan("fan-in")}   ${c.bold("The safe fan-in conductor.")} Reconcile the parallel lanes into ONE verified
+           main: a ${c.bold("collision map")} (which files >1 lane touched), a ${c.bold("merge-train")} dry-run
+           (textual conflicts up front), and — only with ${c.bold("--apply")} — actually merge the
+           clean lanes one at a time, re-running the check gate on the COMBINED tree after
+           each so two-green-but-red-together breaks are caught and that lane is quarantined
+           (rolled back), never landed. Ends on one verdict screen. No conflict reaches main un-verified.
+  ${c.cyan("demo")}     Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, two
+           that collide, one that breaks the build) and run the WHOLE fan-in conductor on it —
+           so you can see the entire wow in ONE command, zero setup.
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
 
 ${c.bold("Flags")}
-  --build                 Also run a full ${c.bold("npm run build")} (default: tsc --noEmit only).
+  --build                 Also run the project's ${c.bold("build")} script (default: typecheck only, where it applies).
   --base-ref <ref>        Merge-base ref for the schema-bump diff (default: main).
   --no-overview           Skip the read-only overview maps (API surface, integrations, schedules).
   --no-brief-check        Skip the (non-blocking) brief-staleness warning in ${c.cyan("check")}.
@@ -118,6 +129,11 @@ ${c.bold("Flags")}
 
   ${c.dim("fan-out only:")}
   --task "<text>"         A one-line task to print into each lane's guidance (optional).
+
+  ${c.dim("fan-in only:")}
+  --apply                 Actually merge the clean lanes (default is a safe DRY-RUN preview only).
+  --no-build              Skip the full build in the combined-tree gate (typecheck still runs).
+  --into <branch>         Integration branch to land lanes into (default: your current branch).
 
   ${c.dim("deploy only:")}
   --expect-prefix <p>     Required deployment-host prefix (default: derived from your linked .vercel project; guard skipped if none).
@@ -136,8 +152,10 @@ ${c.bold("Examples")}
   getadvantage mcp                 run the MCP server (an agent calls the brain mid-session)
   getadvantage fan-out 3           open 3 parallel lanes sharing one brain
   getadvantage fan-out 3 --task "add a settings page"
-  getadvantage fan-in              review + merge the lanes, then clean up
-  ship-safe deploy --expect-prefix myproject-
+  getadvantage fan-in              collision map + merge-train DRY-RUN (preview, nothing merged)
+  getadvantage fan-in --apply      actually land the clean+green lanes into main, gated
+  getadvantage demo                see the whole safe fan-in conductor on a throwaway repo
+  getadvantage deploy --expect-prefix myproject-
 `);
 }
 
@@ -162,7 +180,7 @@ async function main() {
   try {
     cwd = repoRoot();
   } catch {
-    console.error(c.red("✗ Not inside a git repository. Ship-Safe must run in your project's repo."));
+    console.error(c.red("✗ Not inside a git repository. getAdvantage must run in your project's repo."));
     process.exit(1);
   }
 
@@ -232,7 +250,23 @@ async function main() {
 
   if (cmd === "fan-in" || cmd === "fanin") {
     header();
-    process.exit(runFanIn({ cwd }));
+    process.exit(
+      await runFanIn({
+        cwd,
+        apply: !!flags.apply,
+        // `--no-build` skips the (slower) full build in the combined-tree gate;
+        // default is to build, since a textual merge can break the build even
+        // when each lane typechecks alone.
+        build: !flags["no-build"],
+        baseRef: flags["base-ref"],
+        into: flags.into,
+      }),
+    );
+  }
+
+  if (cmd === "demo") {
+    header();
+    process.exit(await runDemo({ keep: !!flags.keep }));
   }
 
   if (cmd === "deploy") {
@@ -255,6 +289,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(c.red(`✗ Ship-Safe crashed: ${e?.stack || e}`));
+  console.error(c.red(`✗ getAdvantage crashed: ${e?.stack || e}`));
   process.exit(1);
 });

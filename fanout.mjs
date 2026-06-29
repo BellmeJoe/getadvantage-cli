@@ -28,12 +28,14 @@
 // Node built-ins only. ESM.
 
 import { existsSync, copyFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { c, git, gitSafe, relPath } from "./util.mjs";
+import { c, git, gitSafe, gitRaw, relPath } from "./util.mjs";
 import { runHandoff } from "./handoff.mjs";
 import { runInit } from "./init.mjs";
 import { DEFAULT_OUT } from "./brief.mjs";
 import { DEFAULT_HANDOFF } from "./handoff.mjs";
+import { gateTree } from "./checks-runner.mjs";
 
 const MIN_LANES = 1;
 const MAX_LANES = 8;
@@ -193,91 +195,523 @@ export function runFanOut(o) {
 }
 
 /**
- * `getadvantage fan-in` — list the current lanes and print how to review, merge,
- * and clean up. Guided only; never auto-merges. Read-only.
- * @param {object} o
- * @param {string} o.cwd  repo root
- * @returns {number} exit code (always 0)
+ * Discover the fan-out lane worktrees of a repo (../<repo>-lane-<n>).
+ * @returns {Array<{i:number, dir:string, branch:string|null}>} sorted by lane index
  */
-export function runFanIn(o) {
-  const cwd = o.cwd;
+export function discoverLanes(cwd) {
   const repoName = path.basename(cwd);
-  const currentBranch = gitSafe(["rev-parse", "--abbrev-ref", "HEAD"], { cwd }) || "main";
-
-  // Find lane worktrees: any worktree whose path matches ../<repo>-lane-<n>.
   const all = gitSafe(["worktree", "list", "--porcelain"], { cwd });
   const lanes = [];
   let curPath = null;
   let curBranch = null;
+  const tryPush = () => {
+    if (!curPath) return;
+    const base = path.basename(curPath);
+    const m = base.match(new RegExp(`^${escapeRe(repoName)}-lane-(\\d+)$`));
+    if (m) lanes.push({ i: parseInt(m[1], 10), dir: curPath, branch: curBranch });
+  };
   for (const line of all.split("\n")) {
     if (line.startsWith("worktree ")) {
+      tryPush();
       curPath = path.resolve(line.slice("worktree ".length).trim());
       curBranch = null;
     } else if (line.startsWith("branch ")) {
       curBranch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
-    } else if (line === "" && curPath) {
-      const base = path.basename(curPath);
-      const m = base.match(new RegExp(`^${escapeRe(repoName)}-lane-(\\d+)$`));
-      if (m) lanes.push({ i: parseInt(m[1], 10), dir: curPath, branch: curBranch });
+    } else if (line === "") {
+      tryPush();
       curPath = null;
       curBranch = null;
     }
   }
-  // Catch a trailing record with no blank line after it.
-  if (curPath) {
-    const base = path.basename(curPath);
-    const m = base.match(new RegExp(`^${escapeRe(repoName)}-lane-(\\d+)$`));
-    if (m) lanes.push({ i: parseInt(m[1], 10), dir: curPath, branch: curBranch });
-  }
+  tryPush(); // trailing record with no blank line after it
   lanes.sort((a, b) => a.i - b.i);
+  return lanes;
+}
 
-  console.log(c.bold("\n  Fan-in — review, merge the ones you like, then clean up\n"));
+/**
+ * `getadvantage fan-in` — THE SAFE FAN-IN CONDUCTOR.
+ *
+ * Reconciles the parallel lanes into ONE verified main. In four moves:
+ *   1. COLLISION MAP   — per-file edit overlap across lanes (pure git diff vs the
+ *                        merge-base). Clean lanes vs colliding lanes, instantly.
+ *   2. MERGE-TRAIN     — per lane, a `git merge --no-commit --no-ff` DRY-RUN
+ *                        against an integration branch to surface TEXTUAL
+ *                        conflicts up front, before touching main.
+ *   3. COMBINED GATE   — only with --apply: actually merge the clean lanes one at
+ *                        a time, re-running the check gate on the COMBINED tree
+ *                        after EACH merge. A lane that goes red gets QUARANTINED
+ *                        (its merge rolled back) instead of poisoning main —
+ *                        two green branches can be red together.
+ *   4. VERDICT         — one screen: per-lane status + a plain-language summary.
+ *
+ * Honesty: we DETECT overlap and GATE the combined result; we never claim
+ * "conflict-free". No conflict reaches main un-verified. Without --apply this is
+ * a read-only preview that mutates nothing.
+ *
+ * @param {object} o
+ * @param {string}  o.cwd      repo root
+ * @param {boolean} [o.apply]  actually merge the clean lanes (default: dry-run preview)
+ * @param {boolean} [o.build]  run the full build in the combined gate (default true)
+ * @param {string}  [o.baseRef] schema-bump base ref for the gate
+ * @param {string}  [o.into]   integration branch to land into (default: current branch)
+ * @returns {Promise<number>} exit code (0 unless a usage/precondition error)
+ */
+export async function runFanIn(o) {
+  const cwd = o.cwd;
+  const repoName = path.basename(cwd);
+  const intoBranch = o.into || gitSafe(["rev-parse", "--abbrev-ref", "HEAD"], { cwd }) || "main";
+
+  const lanes = discoverLanes(cwd);
+
+  console.log(c.bold("\n  Safe fan-in — reconcile the lanes into one verified main\n"));
 
   if (lanes.length === 0) {
     console.log(`  ${c.yellow("⚠")} No fan-out lanes found (no \`../${repoName}-lane-*\` worktrees).`);
-    console.log(c.gray(`     Start some with \`getadvantage fan-out <n>\`.`));
+    console.log(c.gray(`     Start some with \`getadvantage fan-out <n>\` — or try \`getadvantage demo\` to see it end-to-end.`));
     return 0;
   }
 
-  console.log(`  ${lanes.length} lane(s) found:\n`);
+  // Only lanes that actually have a branch + at least one commit ahead of the
+  // integration branch are landable. Annotate each.
   for (const lane of lanes) {
-    const dirRel = relPath(lane.dir, cwd);
-    const branch = lane.branch || "(detached)";
-    // Commits this lane has that the current branch doesn't (best-effort).
-    let ahead = "";
+    lane.ahead = 0;
     if (lane.branch) {
-      const cnt = gitSafe(["rev-list", "--count", `${currentBranch}..${lane.branch}`], { cwd });
-      if (cnt) ahead = `${cnt} commit(s) ahead of \`${currentBranch}\``;
+      const cnt = gitSafe(["rev-list", "--count", `${intoBranch}..${lane.branch}`], { cwd });
+      lane.ahead = parseInt(cnt || "0", 10) || 0;
     }
-    console.log(`    ${c.bold("lane " + lane.i)} · branch \`${branch}\` · ${dirRel}${ahead ? `  (${c.cyan(ahead)})` : ""}`);
+    // Best-effort: the tool/model a lane used, if a marker recorded it.
+    lane.tool = laneTool(lane.dir);
+  }
+
+  // ---- 1. COLLISION MAP ----------------------------------------------------
+  // For each landable lane, the files it changed since it diverged from the
+  // integration branch (merge-base). Pure git, instant, no LLM.
+  const landable = lanes.filter((l) => l.branch && l.ahead > 0);
+  const skipped = lanes.filter((l) => !l.branch || l.ahead === 0);
+
+  console.log(c.cyan("  1. Collision map") + c.gray("  (which files more than one lane touched)"));
+  console.log("");
+
+  const fileToLanes = new Map(); // file -> Set(lane index)
+  for (const lane of landable) {
+    // The lane's CODE changes — excluding getAdvantage's own generated brain
+    // artifacts (PROJECT-BRIEF.md / HANDOFF.md / the wired AGENTS.md etc.). Those
+    // are identical tool output copied into every lane by fan-out, so counting
+    // them as "collisions" is noise that buries the real overlaps. They still
+    // merge fine (identical content), so we just don't HIGHLIGHT them.
+    lane.allFiles = laneChangedFiles(cwd, intoBranch, lane.branch);
+    lane.files = lane.allFiles.filter((f) => !isBrainArtifact(f));
+    for (const f of lane.files) {
+      if (!fileToLanes.has(f)) fileToLanes.set(f, new Set());
+      fileToLanes.get(f).add(lane.i);
+    }
+  }
+  // Overlap = any (non-brain) file touched by >1 lane.
+  const overlaps = [...fileToLanes.entries()].filter(([, set]) => set.size > 1);
+  const collidingLaneIds = new Set();
+  for (const [, set] of overlaps) for (const i of set) collidingLaneIds.add(i);
+
+  for (const lane of landable) {
+    lane.colliding = collidingLaneIds.has(lane.i);
+  }
+
+  if (landable.length === 0) {
+    console.log(c.gray("     No landable lanes (none are ahead of the integration branch)."));
+  } else {
+    for (const lane of landable) {
+      const tag = lane.colliding
+        ? c.yellow("collides")
+        : c.green("clean");
+      const toolStr = lane.tool ? c.gray(` · ${lane.tool}`) : "";
+      console.log(
+        `     ${lane.colliding ? c.yellow("◆") : c.green("○")} ${c.bold("lane " + lane.i)} \`${lane.branch}\`${toolStr} — ${lane.files.length} file(s) · ${tag}`,
+      );
+    }
+    console.log("");
+    if (overlaps.length === 0) {
+      console.log(c.gray("     No file is touched by more than one lane — the lanes are disjoint."));
+    } else {
+      console.log(`     ${c.yellow("Overlapping file(s)")} — edited by more than one lane:`);
+      for (const [file, set] of overlaps.slice(0, 30)) {
+        const ids = [...set].sort((a, b) => a - b).map((i) => `lane ${i}`).join(", ");
+        console.log(`       ${c.yellow("•")} ${file}  ${c.gray("(" + ids + ")")}`);
+      }
+      if (overlaps.length > 30) console.log(c.gray(`       …and ${overlaps.length - 30} more overlapping file(s)`));
+      console.log("");
+      console.log(c.gray("     Overlap is not the same as a conflict — two lanes can edit different parts of"));
+      console.log(c.gray("     a file and still merge cleanly. The merge-train below proves which actually conflict."));
+    }
   }
   console.log("");
 
-  console.log(c.cyan("  1. Review a lane's work"));
+  if (skipped.length) {
+    for (const lane of skipped) {
+      const why = !lane.branch ? "detached (no branch)" : "no commits ahead";
+      console.log(c.gray(`     · lane ${lane.i} skipped — ${why}.`));
+    }
+    console.log("");
+  }
+
+  if (landable.length === 0) {
+    console.log(c.gray("  Nothing to land. Do some work in a lane, commit it, then re-run fan-in."));
+    return 0;
+  }
+
+  // ---- 2. MERGE-TRAIN -----------------------------------------------------
+  // Dry-run (default): per lane, a no-commit merge probe to find TEXTUAL
+  // conflicts before touching anything — done in a disposable temp worktree so
+  // the user's checkouts are never disturbed. Apply (--apply): merge for real,
+  // gating the combined tree after each.
+  if (o.apply) {
+    console.log(c.cyan("  2. Merge-train") + c.gray("  (merging for real; gate re-runs on the combined tree after each)"));
+  } else {
+    console.log(c.cyan("  2. Merge-train dry-run") + c.gray("  (textual conflicts, before touching main)"));
+  }
+  console.log("");
+
+  const train = await runMergeTrain({
+    cwd,
+    intoBranch,
+    lanes: landable,
+    apply: !!o.apply,
+    build: o.build !== false,
+    baseRef: o.baseRef,
+  });
+
+  // ---- 4. VERDICT ----------------------------------------------------------
+  printVerdict({ lanes: landable, intoBranch, apply: !!o.apply, train });
+
+  // Exit non-zero if anything is unresolved for the human (a conflict or a
+  // combined-tree failure) so CI / scripts can gate on it.
+  const unresolved = landable.filter((l) => l.outcome === "conflict" || l.outcome === "quarantined").length;
+  return unresolved > 0 ? 1 : 0;
+}
+
+// getAdvantage's OWN generated artifacts — the portable brain + the agent-
+// instruction files `fan-out` writes/wires into every lane. They're identical
+// tool output across lanes, so they're not a meaningful "collision" between the
+// builder's lanes. The internal `.ship-safe/` marker dir is included (path kept
+// for back-compat; it is NOT a user-facing brand name).
+const BRAIN_BASENAMES = new Set([
+  DEFAULT_OUT,        // PROJECT-BRIEF.md
+  DEFAULT_HANDOFF,    // HANDOFF.md
+  "CLAUDE.md",
+  "AGENTS.md",
+  ".cursorrules",
+  ".windsurfrules",
+  ".clinerules",
+]);
+function isBrainArtifact(file) {
+  const norm = String(file).split("\\").join("/");
+  if (norm.startsWith(".ship-safe/")) return true;
+  return BRAIN_BASENAMES.has(path.basename(norm));
+}
+
+/** Files a lane changed since it diverged from the integration branch (merge-base).
+ *  Uses the symmetric `into...branch` range so only the lane's own edits count. */
+function laneChangedFiles(cwd, intoBranch, laneBranch) {
+  const out = gitSafe(["diff", "--name-only", `${intoBranch}...${laneBranch}`], { cwd });
+  return out.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Best-effort: read which tool/model a lane used, if init recorded one. We don't
+ *  fabricate this — return "" when unknown. */
+function laneTool(laneDir) {
+  // A future lane marker could record the tool; today it's not persisted, so we
+  // stay honest and report nothing rather than guess.
+  return "";
+}
+
+/** Run a git command returning {ok, out} instead of throwing — needed for merge
+ *  attempts, where a non-zero exit (a conflict) is an expected outcome, not an
+ *  error. Combines stdout+stderr so conflict messages are captured. */
+function gitTry(args, opts = {}) {
+  // Capture BOTH streams (stdio pipe) so git's own chatter ("Automatic merge
+  // went well…", "Preparing worktree…") never leaks past our own reporting.
+  try {
+    const out = execFileSync("git", args, {
+      encoding: "utf8",
+      cwd: opts.cwd ?? process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { ok: true, out };
+  } catch (e) {
+    const out = `${e.stdout || ""}${e.stderr || ""}`.trim();
+    return { ok: false, out };
+  }
+}
+
+/** The files that are currently in a conflicted (unmerged) state. */
+function conflictedFiles(cwd) {
+  const out = gitSafe(["diff", "--name-only", "--diff-filter=U"], { cwd });
+  return out.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+/** Is the working tree clean (nothing tracked modified/staged)? */
+function treeIsClean(cwd) {
+  return gitRaw(["status", "--porcelain"], { cwd }).trim() === "";
+}
+
+/**
+ * THE MERGE-TRAIN EXECUTOR + COMBINED-TREE GATE.
+ *
+ * Dry-run (default): probe each lane independently against the integration
+ * branch with `git merge --no-commit --no-ff` to detect TEXTUAL conflicts, then
+ * abort each probe — nothing is kept, nothing is committed.
+ *
+ * Apply (--apply): in the user's CURRENT checkout (which is on the integration
+ * branch and has node_modules — so the gate can really typecheck/build), merge
+ * the clean lanes one at a time:
+ *   • textual conflict  → abort the merge cleanly, mark `conflict`, and HALT the
+ *                         train (the remaining lanes are left for the human).
+ *   • merge OK          → run the check gate on the COMBINED tree. Red → roll the
+ *                         merge back (`git reset --hard` to the pre-merge commit)
+ *                         and mark `quarantined`. Green → keep it (`landed`).
+ *
+ * Never leaves a broken half-merge: every failure path aborts/rolls back.
+ *
+ * @returns {{ mode:"dry-run"|"apply", preflight?:string }} (per-lane outcome is
+ *          written onto each lane object: lane.outcome + lane.detail)
+ */
+async function runMergeTrain(o) {
+  const { cwd, intoBranch, lanes } = o;
+
+  if (!o.apply) {
+    // ---- DRY-RUN: probe each lane independently, mutate nothing -------------
+    // We probe in a disposable temp worktree checked out at the integration tip
+    // so the user's real checkout is never touched.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const probeDir = mkdtempSync(path.join(tmpdir(), "ga-fanin-probe-"));
+    let added = false;
+    try {
+      const add = gitTry(["worktree", "add", "--detach", probeDir, intoBranch], { cwd });
+      if (!add.ok) {
+        // Couldn't make a probe worktree — degrade to a name-only report.
+        for (const lane of lanes) {
+          lane.outcome = "unknown";
+          lane.detail = "could not create a probe worktree to dry-run the merge";
+        }
+        return { mode: "dry-run", preflight: "probe-worktree-failed" };
+      }
+      added = true;
+      for (const lane of lanes) {
+        const m = gitTry(["merge", "--no-commit", "--no-ff", lane.branch], { cwd: probeDir });
+        if (m.ok) {
+          lane.outcome = "clean";
+          lane.detail = "merges cleanly (no textual conflict)";
+        } else {
+          const files = conflictedFiles(probeDir);
+          lane.outcome = "conflict";
+          lane.detail = files.length
+            ? `textual conflict in: ${files.join(", ")}`
+            : "merge failed (textual conflict)";
+          lane.conflictFiles = files;
+        }
+        // Reset the probe tree back to the integration tip for the next lane so
+        // each lane is judged independently (not cumulatively) in the preview.
+        gitTry(["merge", "--abort"], { cwd: probeDir });
+        gitTry(["reset", "--hard", intoBranch], { cwd: probeDir });
+        gitTry(["clean", "-fd"], { cwd: probeDir });
+      }
+    } finally {
+      // Tear down the probe worktree (best-effort; never leak it).
+      if (added) gitTry(["worktree", "remove", "--force", probeDir], { cwd });
+      try { rmSync(probeDir, { recursive: true, force: true }); } catch {}
+      gitTry(["worktree", "prune"], { cwd });
+    }
+
+    for (const lane of lanes) {
+      if (lane.outcome === "clean") {
+        console.log(`     ${c.green("✓")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${lane.detail}`);
+      } else if (lane.outcome === "conflict") {
+        console.log(`     ${c.red("✗")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.red(lane.detail)}`);
+      } else {
+        console.log(`     ${c.yellow("?")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${lane.detail}`);
+      }
+    }
+    console.log("");
+    console.log(c.gray("     Dry-run only — nothing was merged. The combined-tree check (does the merged"));
+    console.log(c.gray("     result still build?) runs during the real merge:"));
+    console.log(`       ${c.bold("getadvantage fan-in --apply")}`);
+    console.log("");
+    return { mode: "dry-run" };
+  }
+
+  // ---- APPLY: merge for real, in the user's current checkout ---------------
+  // Precondition: the integration checkout must be clean, or a `vercel --prod`
+  // (or any later step) could ship a half-merged tree. Refuse otherwise.
+  if (!treeIsClean(cwd)) {
+    console.log(`     ${c.red("✗ Refusing to --apply: the working tree is not clean.")}`);
+    console.log(c.gray("       Commit or stash your changes first — the merge-train lands lanes onto"));
+    console.log(c.gray(`       \`${intoBranch}\` and must start from a clean state.`));
+    for (const lane of lanes) {
+      lane.outcome = "skipped";
+      lane.detail = "not attempted (working tree was dirty)";
+    }
+    return { mode: "apply", preflight: "dirty-tree" };
+  }
+
+  const startCommit = gitSafe(["rev-parse", "HEAD"], { cwd });
+  console.log(c.gray(`     Landing onto \`${intoBranch}\` (at ${startCommit.slice(0, 10)}). Gate re-runs after every merge.`));
+  console.log("");
+
+  let halted = false;
   for (const lane of lanes) {
-    if (!lane.branch) continue;
-    console.log(`     git -C . diff ${currentBranch}..${lane.branch}        ${c.gray(`# what lane ${lane.i} changed`)}`);
+    if (halted) {
+      lane.outcome = "skipped";
+      lane.detail = "not attempted (train halted on an earlier conflict)";
+      continue;
+    }
+
+    const preMerge = gitSafe(["rev-parse", "HEAD"], { cwd });
+    const m = gitTry(["merge", "--no-ff", "--no-edit", lane.branch], { cwd });
+
+    if (!m.ok) {
+      // Textual conflict — abort cleanly and HALT the train.
+      const files = conflictedFiles(cwd);
+      gitTry(["merge", "--abort"], { cwd });
+      lane.outcome = "conflict";
+      lane.detail = files.length ? `textual conflict in: ${files.join(", ")}` : "textual conflict";
+      lane.conflictFiles = files;
+      console.log(`     ${c.red("✗")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.red("conflict")}; aborted, tree restored.`);
+      if (files.length) console.log(c.gray(`        conflicting: ${files.join(", ")}`));
+      halted = true;
+      continue;
+    }
+
+    // Merge succeeded textually — now the NOVEL part: gate the COMBINED tree.
+    process.stdout.write(`     ${c.gray("…")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` merged — gating the combined tree`);
+    const gate = gateTree({ cwd, baseRef: o.baseRef, build: o.build });
+    if (gate.ok) {
+      lane.outcome = "landed";
+      lane.detail = "merged + combined-tree gate green";
+      console.log(`\r     ${c.green("✓")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.green("landed")} (combined tree builds + checks pass).            `);
+    } else {
+      // Two green branches can be red together — quarantine: roll this merge back.
+      gitTry(["reset", "--hard", preMerge], { cwd });
+      lane.outcome = "quarantined";
+      const why = gate.fails.map((f) => f.label).join(", ");
+      lane.detail = `combined-tree gate went red (${why}) — merge rolled back`;
+      lane.gateFails = gate.fails;
+      console.log(`\r     ${c.yellow("⚠")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.yellow("quarantined")}: combined tree failed (${why}); rolled back.            `);
+    }
   }
   console.log("");
+  // Safety net: never leave a half-merge behind.
+  if (!treeIsClean(cwd)) {
+    gitTry(["merge", "--abort"], { cwd });
+    gitTry(["reset", "--hard", startCommit], { cwd });
+    console.log(c.yellow("     ⚠ Detected a non-clean tree after the train — restored to the starting commit."));
+  }
+  return { mode: "apply", startCommit };
+}
 
-  console.log(c.cyan("  2. Merge the lane(s) you want (you choose — nothing is automatic)"));
-  console.log(c.gray(`     From your main checkout (on \`${currentBranch}\`):`));
+/** THE VERDICT — one screen. Per-lane rows + a plain-language summary. */
+function printVerdict({ lanes, intoBranch, apply, train }) {
+  console.log(c.cyan("  3. Verdict"));
+  console.log("");
+
+  const icon = (o) => {
+    switch (o) {
+      case "landed": return c.green("✓");
+      case "clean": return c.green("○");
+      case "quarantined": return c.yellow("⚠");
+      case "conflict": return c.red("✗");
+      case "skipped": return c.gray("·");
+      default: return c.gray("?");
+    }
+  };
+  const word = (o) => {
+    switch (o) {
+      case "landed": return c.green("landed");
+      case "clean": return c.green("ready (clean)");
+      case "quarantined": return c.yellow("quarantined");
+      case "conflict": return c.red("needs you (conflict)");
+      case "skipped": return c.gray("skipped");
+      default: return c.gray("unknown");
+    }
+  };
+
   for (const lane of lanes) {
-    if (!lane.branch) continue;
-    console.log(`     git merge --no-ff ${lane.branch}        ${c.gray(`# bring lane ${lane.i} in`)}`);
+    const toolStr = lane.tool ? c.gray(` · ${lane.tool}`) : "";
+    console.log(`     ${icon(lane.outcome)} ${c.bold("lane " + lane.i)} \`${lane.branch}\`${toolStr} — ${word(lane.outcome)}`);
+    if (lane.detail) console.log(c.gray(`         ${lane.detail}`));
   }
   console.log("");
 
-  console.log(c.cyan("  3. Clean up the lanes (after merging, or to discard)"));
-  for (const lane of lanes) {
-    const dirRel = relPath(lane.dir, cwd);
-    console.log(`     git worktree remove ${dirRel}${lane.branch ? `  &&  git branch -d ${lane.branch}` : ""}`);
-  }
-  console.log(c.gray("     (Use `git branch -D <branch>` to discard an unmerged lane you don't want.)"));
-  console.log("");
-  console.log(c.gray("  Guided on purpose: you read the diffs and decide — fan-in never merges for you."));
+  const total = lanes.length;
+  const landed = lanes.filter((l) => l.outcome === "landed").length;
+  const clean = lanes.filter((l) => l.outcome === "clean").length;
+  const quarantined = lanes.filter((l) => l.outcome === "quarantined");
+  const conflicts = lanes.filter((l) => l.outcome === "conflict");
+  const needsYou = [...quarantined, ...conflicts].map((l) => l.i).sort((a, b) => a - b);
 
-  return 0;
+  // The gut-punch line.
+  if (apply) {
+    if (train && train.preflight === "dirty-tree") {
+      console.log("  " + c.red(c.bold("Nothing landed — the working tree wasn't clean.")));
+      console.log(c.gray("  Commit or stash, then re-run `getadvantage fan-in --apply`."));
+      console.log("");
+      return;
+    }
+    if (landed === total) {
+      console.log("  " + c.green(c.bold(`All ${total} lane(s) landed clean and green into \`${intoBranch}\`.`)));
+      console.log(c.gray("  Nothing reached main un-verified — the combined tree builds and passes every check."));
+    } else if (landed === 0) {
+      console.log("  " + c.red(c.bold(`0 of ${total} landed.`)) + c.red(` ${describeBlockers(needsYou)} need you.`));
+    } else {
+      const lanesWord = needsYou.length === 1 ? "lane" : "lanes";
+      console.log(
+        "  " + c.green(c.bold(`${landed} of ${total} landed clean and green`)) +
+        c.yellow(` — ${lanesWord} ${needsYou.join(" and ")} need you.`),
+      );
+    }
+    if (quarantined.length) {
+      console.log("");
+      console.log(c.yellow("  Quarantined (rolled back — NOT on main):"));
+      for (const l of quarantined) console.log(c.gray(`    • lane ${l.i}: ${l.detail}`));
+      console.log(c.gray("    These each pass on their own but break the COMBINED tree. Reconcile them by hand."));
+    }
+    if (conflicts.length) {
+      console.log("");
+      console.log(c.red("  Textual conflict (train halted here):"));
+      for (const l of conflicts) {
+        console.log(c.gray(`    • lane ${l.i}: ${l.detail}`));
+        console.log(`      ${c.gray("resolve:")} git merge --no-ff ${l.branch}   ${c.gray("# then fix the markers + commit")}`);
+      }
+    }
+  } else {
+    // Dry-run summary.
+    const ready = clean;
+    const blocked = conflicts.length;
+    if (blocked === 0) {
+      console.log("  " + c.green(c.bold(`${ready} of ${total} lane(s) merge cleanly`)) + c.gray(" (textually)."));
+      console.log(c.gray("  Run with --apply to land them — each is gated on the COMBINED tree as it merges,"));
+      console.log(c.gray("  so a 'both-green-but-red-together' break is caught and quarantined, never landed."));
+    } else {
+      console.log(
+        "  " + c.green(c.bold(`${ready} clean`)) + c.gray(" · ") + c.red(c.bold(`${blocked} conflicting`)) +
+        c.gray(` of ${total} lane(s).`),
+      );
+      console.log(c.gray(`  ${describeBlockers(conflicts.map((l) => l.i))} have textual conflicts to resolve first.`));
+      console.log(c.gray("  --apply will land the clean ones (gated on the combined tree) and halt at the first conflict."));
+    }
+    console.log("");
+    console.log(c.gray("  Honest by design: we DETECT overlap + GATE the combined result. No conflict reaches"));
+    console.log(c.gray("  main un-verified — but we don't magically make incompatible work compatible."));
+  }
+  console.log("");
+}
+
+/** "lane 2" / "lanes 2 and 3" / "lanes 2, 3 and 4". */
+function describeBlockers(ids) {
+  const xs = [...ids].sort((a, b) => a - b);
+  if (xs.length === 0) return "no lanes";
+  if (xs.length === 1) return `lane ${xs[0]}`;
+  if (xs.length === 2) return `lanes ${xs[0]} and ${xs[1]}`;
+  return `lanes ${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
 }
 
 /**

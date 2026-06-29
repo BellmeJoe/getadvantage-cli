@@ -14,9 +14,14 @@ Run it in your repo. It reads your project and gives you:
   session (or switch models) with zero loss.
 - **An MCP server** (`getadvantage mcp`) — so an AI agent (Claude Code, Cursor)
   can call the brain + checks *mid-session*, without leaving the chat.
-- **Fan-out / fan-in** (`getadvantage fan-out <n>`) — run several models in
-  parallel on the same project, each in its own git worktree, all sharing one
-  brain; then review and merge the ones you like.
+- **Fan-out + the safe fan-in conductor** (`getadvantage fan-out <n>` ·
+  `fan-in`) — run a FLEET of AI agents in parallel (each in its own git worktree,
+  all sharing one brain), then reconcile them into ONE verified main: a
+  **collision map** (which files >1 lane touched), a **merge-train** (textual
+  conflicts up front), and a **combined-tree gate** that re-runs your checks after
+  each merge so a "both-green-but-red-together" break is caught and that lane is
+  quarantined — never landed. No conflict reaches main un-verified. Try it in one
+  command: `getadvantage demo`.
 
 Your context lives in your **repo**, not your tool. Switch from Claude to Cursor
 to Qwen and keep going — and start a clean, fast session instead of dragging a
@@ -64,7 +69,8 @@ whichever reads better to you.
 | `ship-safe ledger` | Show the session ledger — the running log of save-points each `handoff` records. |
 | `getadvantage mcp` | Run a dependency-free **MCP server** over stdio so an AI agent (Claude Code, Cursor) can call the brain + checks mid-session. Tools: `get_brief`, `refresh_brief`, `get_handoff`, `save_handoff`, `check`, `gauge`. Same engine as the CLI — no API keys, no network. |
 | `getadvantage fan-out <n>` | Open **N parallel lanes** (1–8) as git worktrees off `HEAD`, each with the brain copied in + wired. Add `--task "..."` to print a shared task into each lane's guidance. Open a different model/tool per lane, work in parallel. |
-| `getadvantage fan-in` | List the fan-out lanes and print exactly how to **review, merge** the ones you like, and **clean up**. A guided "review-and-merge" — it never merges for you. |
+| `getadvantage fan-in` | **The safe fan-in conductor.** Reconcile the lanes into one verified main: a **collision map**, a **merge-train** dry-run (textual conflicts up front), and — with `--apply` — actually merge the clean lanes one at a time, re-running the check gate on the **combined tree** after each so a lane that's green alone but red merged is **quarantined** (rolled back), never landed. Default is a read-only preview; `--apply` to land. |
+| `getadvantage demo` | Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, one that breaks the build, one that conflicts) and run the **whole conductor** on it — the entire wow in one command, zero setup. |
 | `ship-safe deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
 
 ## Use it as an MCP server (call the brain mid-session)
@@ -127,14 +133,30 @@ model/tool in each lane (ChatGPT, Claude, Gemini, Cursor, Qwen…), let them wor
 then:
 
 ```bash
-npx getadvantage fan-in
+npx getadvantage fan-in           # preview: collision map + merge-train dry-run
+npx getadvantage fan-in --apply   # land the clean + green lanes, gated
 ```
 
-…which lists the lanes and prints the exact commands to **review the diffs,
-merge the ones you like, and clean up** the worktrees. Merging stays a guided
-"review and merge" — nothing is merged automatically. It's all git-native: no
-API keys, no network. You bring the models; the CLI holds the brain and the
-orchestration ground.
+`fan-in` is **the safe fan-in conductor**. It first draws a **collision map**
+(which files more than one lane touched), then runs a **merge-train** dry-run to
+find textual conflicts *before* anything is merged. With `--apply` it merges the
+clean lanes one at a time onto your current branch and — the part nobody else
+does — **re-runs your check gate on the combined tree after each merge**. Two
+branches can each be green and still be red together; when that happens the
+offending lane is **quarantined** (its merge rolled back) instead of poisoning
+main. It ends on one verdict screen telling you exactly which lanes landed and
+which need you.
+
+Honest by design: we *detect* overlap and *gate* the combined result — we don't
+claim to make incompatible work compatible. **No conflict reaches main
+un-verified.** It's all git-native: no API keys, no network. You bring the
+models; the CLI holds the brain and the orchestration ground.
+
+See the whole thing on a throwaway repo in one command:
+
+```bash
+npx getadvantage demo
+```
 
 ## What it is — and isn't
 

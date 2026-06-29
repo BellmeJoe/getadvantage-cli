@@ -16,6 +16,7 @@ import {
   overviewSchedules,
 } from "./overviews.mjs";
 import { briefStaleness } from "./brief.mjs";
+import { detectProject } from "./detect.mjs";
 
 /**
  * Run every check and print a clean summary.
@@ -35,7 +36,13 @@ export async function runChecks(o) {
   const cwd = o.cwd;
   const results = [];
 
+  // Detect the project's shape ONCE so every stack-specific check (tsc,
+  // schema-bump, build) can decide whether it applies on THIS repo — keeping the
+  // gate trustworthy on a stranger's plain-Node repo, not just a Next.js app.
+  const project = detectProject(cwd);
+
   section("Checks");
+  console.log(`  ${c.gray("detected:")} ${c.bold(project.label)}`);
 
   // a. Dirty-tree guard
   results.push(safe(() => checkDirtyTree(cwd), "Dirty-tree guard"));
@@ -45,16 +52,16 @@ export async function runChecks(o) {
   results.push(safe(() => checkSecrets(cwd), "Secret scan"));
   printResult(results[results.length - 1]);
 
-  // c. Typecheck (always) + optional full build
-  results.push(safe(() => checkTypecheck(cwd), "Typecheck (tsc --noEmit)"));
+  // c. Typecheck (only where it applies) + optional full build
+  results.push(safe(() => checkTypecheck(cwd, project), "Typecheck"));
   printResult(results[results.length - 1]);
   if (o.runBuild) {
-    results.push(safe(() => checkBuild(cwd), "Production build (npm run build)"));
+    results.push(safe(() => checkBuild(cwd, project), "Build"));
     printResult(results[results.length - 1]);
   }
 
-  // d. Schema-bump check
-  results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main"), "Schema-bump check"));
+  // d. Schema-bump check (only on the SCHEMA_VERSION-sentinel pattern)
+  results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
   printResult(results[results.length - 1]);
 
   // ---- v1.1 OVERVIEW SCANNERS (read-only maps) ----------------------------
@@ -119,6 +126,40 @@ export async function runChecks(o) {
   }
   console.log("\n" + c.green(c.bold("  GO")) + c.green(" — all checks clear. Safe to ship."));
   return { exitCode: 0, results };
+}
+
+/**
+ * Run the BLOCKING gate on a tree, SILENTLY, and return a structured verdict.
+ * Used by the fan-in merge-train to judge the COMBINED tree after each merge —
+ * the novel "two green branches can be red together" check. We deliberately run
+ * the real correctness checks (secret scan + typecheck + build + schema-bump),
+ * NOT the dirty-tree guard (the merge train commits each step, so a clean
+ * committed tree is expected) and NOT the informational overview maps.
+ *
+ * `--build`-equivalent is FORCED on here: a textual merge can leave code that
+ * typechecks per-file but fails to build together, so the combined gate must
+ * actually build to be honest about semantic breaks.
+ *
+ * @param {object} o
+ * @param {string} o.cwd       tree to gate (a worktree or the integration checkout)
+ * @param {string} [o.baseRef] schema-bump base ref
+ * @param {boolean} [o.build]  run the full build (default true — catches semantic breaks)
+ * @returns {{ ok: boolean, fails: any[], results: any[] }}
+ */
+export function gateTree(o) {
+  const cwd = o.cwd;
+  const project = detectProject(cwd);
+  const results = [];
+
+  results.push(safe(() => checkSecrets(cwd), "Secret scan"));
+  results.push(safe(() => checkTypecheck(cwd, project), "Typecheck"));
+  if (o.build !== false) {
+    results.push(safe(() => checkBuild(cwd, project), "Build"));
+  }
+  results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
+
+  const fails = results.filter((r) => r.status === "fail");
+  return { ok: fails.length === 0, fails, results };
 }
 
 /** Never let one check throwing crash the whole gate — surface it as a fail. */

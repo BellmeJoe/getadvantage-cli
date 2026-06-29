@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { result, fingerprint, git, gitRaw, gitSafe } from "./util.mjs";
+import { detectProject } from "./detect.mjs";
 
 // ===========================================================================
 // a. DIRTY-TREE GUARD
@@ -230,7 +231,26 @@ function tail(text, n = 25) {
   return lines.slice(-n);
 }
 
-export function checkTypecheck(cwd) {
+export function checkTypecheck(cwd, project = null) {
+  const p = project || detectProject(cwd);
+
+  // Only run tsc on a repo that is actually typecheckable: a tsconfig.json AND a
+  // `typescript` dependency. On a plain-Node repo, blindly running `npx tsc`
+  // would download TypeScript and either fail (no config) or flag JS files —
+  // a FALSE NO-GO. Degrade to a clearly-labelled skip instead.
+  if (!p.typecheckable) {
+    const why = !p.hasTsConfig && !p.hasTypeScript
+      ? "no tsconfig.json and no typescript dependency"
+      : !p.hasTsConfig
+        ? "no tsconfig.json"
+        : "typescript is not a dependency";
+    return result(
+      "pass",
+      "Typecheck",
+      `Skipped — this is a ${p.label} (${why}). Nothing to typecheck.`,
+    );
+  }
+
   const r = runCapture("npx", ["--yes", "tsc", "--noEmit"], cwd);
   if (r.ok) {
     return result("pass", "Typecheck (tsc --noEmit)", "TypeScript compiled with no type errors.");
@@ -243,15 +263,29 @@ export function checkTypecheck(cwd) {
   );
 }
 
-export function checkBuild(cwd) {
+// Run the project's OWN `build` script (whatever it is — Next, Vite, tsc -b, a
+// plain `node build.js`). We don't assume Next.js. If there is no build script,
+// that's not a failure — many libraries/CLIs have nothing to build — so we skip
+// honestly rather than invent a NO-GO.
+export function checkBuild(cwd, project = null) {
+  const p = project || detectProject(cwd);
+
+  if (!p.hasBuildScript) {
+    return result(
+      "pass",
+      "Build",
+      `Skipped — no "build" script in package.json${p.hasPackageJson ? "" : " (no package.json)"}. Nothing to build.`,
+    );
+  }
+
   const r = runCapture("npm", ["run", "build"], cwd);
   if (r.ok) {
-    return result("pass", "Production build (npm run build)", "Next build completed successfully.");
+    return result("pass", `Production build (npm run build)`, `\`${p.buildCmd}\` completed successfully.`);
   }
   return result(
     "fail",
     "Production build (npm run build)",
-    "The production build failed — fix it before shipping.",
+    "The build failed — fix it before shipping.",
     tail(r.out, 30),
   );
 }
@@ -266,11 +300,25 @@ export function checkBuild(cwd) {
 // merge-base with main, PLUS any uncommitted edits): if DDL-ish lines changed
 // but the `const SCHEMA_VERSION = N;` line did NOT, WARN loudly.
 
-const DB_PATH = "app/lib/server/db.ts";
 const DDL_RE = /\b(CREATE\s+TABLE|ADD\s+COLUMN|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+(?:TABLE|COLUMN|INDEX))\b/i;
 const VERSION_RE = /SCHEMA_VERSION\s*=\s*\d+/;
 
-export function checkSchemaBump(cwd, baseRef = "main") {
+export function checkSchemaBump(cwd, baseRef = "main", project = null) {
+  const p = project || detectProject(cwd);
+
+  // This check is specific to the SCHEMA_VERSION-sentinel pattern (a db file
+  // whose additive DDL is gated behind a version constant). A repo that doesn't
+  // use that pattern can't have this bug, so asserting it there would be a
+  // false signal. Skip honestly when the pattern isn't present.
+  if (!p.hasSchemaVersionPattern) {
+    return result(
+      "pass",
+      "Schema-bump check",
+      "Skipped — no SCHEMA_VERSION-sentinel db file in this repo (pattern doesn't apply).",
+    );
+  }
+  const DB_PATH = p.schemaDbPath;
+
   // Combined diff = (merge-base…HEAD committed) + (working-tree uncommitted).
   // Use `git diff base...HEAD` for the committed delta on this lane, then a
   // plain `git diff HEAD` for anything not yet committed. We never EDIT db.ts —
