@@ -147,6 +147,12 @@ offending lane is **quarantined** (its merge rolled back) instead of poisoning
 main. It ends on one verdict screen telling you exactly which lanes landed and
 which need you.
 
+`--apply` starts only from a **clean working tree** (so a half-merge can never
+ship) and is **safe for automation**: it exits `0` only when every landable lane
+landed green, and non-zero if a lane needs you *or* the run was refused (e.g. a
+dirty tree) — so `fan-in --apply && deploy` never proceeds on a no-op. `fan-out`
+commits its own brain refresh for you, so that clean-tree start is the default.
+
 Honest by design: we *detect* overlap and *gate* the combined result — we don't
 claim to make incompatible work compatible. **No conflict reaches main
 un-verified.** It's all git-native: no API keys, no network. You bring the

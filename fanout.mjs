@@ -100,13 +100,30 @@ export function runFanOut(o) {
 
   console.log(c.bold(`\n  Fan-out — ${n} parallel lane(s) sharing one project brain\n`));
 
+  // Was the tree clean BEFORE we touched it? If so, we'll tidily commit the
+  // brain refresh we're about to write — otherwise fan-out's OWN output dirties
+  // main and the very next `fan-in --apply` would refuse on a tree the user
+  // never touched. (If the tree was already dirty, we leave it strictly alone.)
+  const treeWasCleanBeforeFanout = treeIsClean(cwd);
+
   // ---- 1. Refresh the brain so every lane starts current. -----------------
   console.log(c.cyan("  1. Refreshing the project brain (so every lane reads the same thing)"));
   runHandoff({ cwd, quiet: true }); // writes PROJECT-BRIEF.md + HANDOFF.md (+ marker)
+  // Commit just the brain refresh (only when we started clean) so the headline
+  // flow — fan-out → work in lanes → fan-in --apply — doesn't trip the
+  // clean-tree guard on fan-out's own writes. Best-effort + honest: we stage
+  // ONLY the known brain artifacts, and only commit if that's all that changed.
+  if (treeWasCleanBeforeFanout) {
+    const committed = commitBrainRefresh(cwd);
+    if (committed) console.log(c.gray("     Committed the brain refresh so the tree stays clean for fan-in --apply."));
+  }
   console.log("");
 
   // ---- 2. Create each lane (idempotent). ----------------------------------
-  console.log(c.cyan(`  2. Creating ${n} worktree(s) off \`${head.slice(0, 10)}\``));
+  // Re-read HEAD: a brain-refresh commit above may have advanced it, and the
+  // lanes branch off the CURRENT HEAD (so they already carry the same brain).
+  const headNow = gitSafe(["rev-parse", "HEAD"], { cwd }) || head;
+  console.log(c.cyan(`  2. Creating ${n} worktree(s) off \`${headNow.slice(0, 10)}\``));
   const knownWorktrees = new Set(listWorktreePaths(cwd));
   const created = [];
   const skipped = [];
@@ -381,8 +398,21 @@ export async function runFanIn(o) {
   // ---- 4. VERDICT ----------------------------------------------------------
   printVerdict({ lanes: landable, intoBranch, apply: !!o.apply, train });
 
-  // Exit non-zero if anything is unresolved for the human (a conflict or a
-  // combined-tree failure) so CI / scripts can gate on it.
+  // ---- EXIT CODE — must never lie to automation. --------------------------
+  // This tool's whole pitch is being the SAFE gate in front of `vercel --prod`.
+  // A wrapper doing `fan-in --apply && deploy` reads exit 0 as "go". So:
+  //   • Any --apply that was PREFLIGHT-BLOCKED and landed nothing (dirty tree,
+  //     or a probe-worktree failure that degraded the run) → non-zero. A refusal
+  //     is NOT a success — automation must NOT proceed.
+  //   • Any unresolved lane (textual conflict OR a quarantined combined-tree
+  //     break) → non-zero, so the human reconciles before anything ships.
+  // A clean dry-run preview, or an --apply where every landable lane landed
+  // green, is the only path to exit 0.
+  if (o.apply && train && train.preflight) {
+    // A preflight stopped the apply before anything could land. Even if there
+    // were zero lanes, signalling success here would let `&& deploy` proceed.
+    return 1;
+  }
   const unresolved = landable.filter((l) => l.outcome === "conflict" || l.outcome === "quarantined").length;
   return unresolved > 0 ? 1 : 0;
 }
@@ -648,38 +678,53 @@ function printVerdict({ lanes, intoBranch, apply, train }) {
   const conflicts = lanes.filter((l) => l.outcome === "conflict");
   const needsYou = [...quarantined, ...conflicts].map((l) => l.i).sort((a, b) => a - b);
 
-  // The gut-punch line.
+  // The headline — calm and exact. "I ran a crew and nothing broke."
   if (apply) {
     if (train && train.preflight === "dirty-tree") {
-      console.log("  " + c.red(c.bold("Nothing landed — the working tree wasn't clean.")));
-      console.log(c.gray("  Commit or stash, then re-run `getadvantage fan-in --apply`."));
+      console.log("  " + c.yellow(c.bold("Nothing landed — your working tree wasn't clean.")));
+      console.log(c.gray("  Safe by design: the train only starts from a clean tree, so a half-merge can never ship."));
+      console.log(c.gray("  Commit or stash your changes, then re-run `getadvantage fan-in --apply`."));
+      console.log("");
+      return;
+    }
+    if (train && train.preflight) {
+      // Any other preflight that blocked the apply (e.g. couldn't prepare the
+      // merge). Nothing landed; say so plainly and exit non-zero (handled above).
+      console.log("  " + c.yellow(c.bold("Nothing landed — the merge couldn't start.")));
+      console.log(c.gray("  Your tree is untouched. Re-run once the issue above is cleared."));
       console.log("");
       return;
     }
     if (landed === total) {
-      console.log("  " + c.green(c.bold(`All ${total} lane(s) landed clean and green into \`${intoBranch}\`.`)));
-      console.log(c.gray("  Nothing reached main un-verified — the combined tree builds and passes every check."));
+      // The wow. A whole crew of lanes, reconciled, every combined state verified.
+      const crew = total === 1 ? "the lane" : `all ${total} lanes`;
+      console.log("  " + c.green(c.bold(`✓ ${cap(crew)} landed clean and green into \`${intoBranch}\`.`)));
+      console.log(c.green("    You ran a crew in parallel and nothing broke."));
+      console.log(c.gray("    Every merge was gated on the COMBINED tree — no conflict, and no semantic"));
+      console.log(c.gray("    break that builds alone but breaks together, ever reached main un-verified."));
     } else if (landed === 0) {
-      console.log("  " + c.red(c.bold(`0 of ${total} landed.`)) + c.red(` ${describeBlockers(needsYou)} need you.`));
+      console.log("  " + c.yellow(c.bold(`✗ 0 of ${total} landed`)) + c.yellow(` — ${needPhrase(needsYou)}.`));
+      console.log(c.gray("    Main is untouched — nothing unsafe slipped through. Reconcile below, then re-run."));
     } else {
-      const lanesWord = needsYou.length === 1 ? "lane" : "lanes";
       console.log(
-        "  " + c.green(c.bold(`${landed} of ${total} landed clean and green`)) +
-        c.yellow(` — ${lanesWord} ${needsYou.join(" and ")} need you.`),
+        "  " + c.green(c.bold(`✓ ${landed} of ${total} landed clean and green`)) +
+        c.yellow(` — ${needPhrase(needsYou)}.`),
       );
+      console.log(c.gray(`    The green ${landed === 1 ? "lane is" : "lanes are"} on \`${intoBranch}\` and verified; the rest are exactly where you left them.`));
     }
     if (quarantined.length) {
       console.log("");
-      console.log(c.yellow("  Quarantined (rolled back — NOT on main):"));
-      for (const l of quarantined) console.log(c.gray(`    • lane ${l.i}: ${l.detail}`));
-      console.log(c.gray("    These each pass on their own but break the COMBINED tree. Reconcile them by hand."));
+      console.log("  " + c.yellow(c.bold("Quarantined")) + c.gray("  — merged cleanly, but broke the combined tree. Rolled back, NOT on main:"));
+      for (const l of quarantined) console.log(`     ${c.yellow("⚠")} lane ${l.i} \`${l.branch}\` ${c.gray("— " + l.detail)}`);
+      console.log(c.gray("     Each passes alone but red together — the kind of break a textual merge can't see."));
+      console.log(c.gray("     Reconcile by hand, or re-run the lane against the now-updated main."));
     }
     if (conflicts.length) {
       console.log("");
-      console.log(c.red("  Textual conflict (train halted here):"));
+      console.log("  " + c.red(c.bold("Textual conflict")) + c.gray("  — the train halted here so nothing downstream auto-merged:"));
       for (const l of conflicts) {
-        console.log(c.gray(`    • lane ${l.i}: ${l.detail}`));
-        console.log(`      ${c.gray("resolve:")} git merge --no-ff ${l.branch}   ${c.gray("# then fix the markers + commit")}`);
+        console.log(`     ${c.red("✗")} lane ${l.i} \`${l.branch}\` ${c.gray("— " + l.detail)}`);
+        console.log(`        ${c.gray("resolve:")} ${c.bold("git merge --no-ff " + l.branch)}   ${c.gray("# fix the markers, commit, then re-run fan-in --apply")}`);
       }
     }
   } else {
@@ -691,11 +736,13 @@ function printVerdict({ lanes, intoBranch, apply, train }) {
       console.log(c.gray("  Run with --apply to land them — each is gated on the COMBINED tree as it merges,"));
       console.log(c.gray("  so a 'both-green-but-red-together' break is caught and quarantined, never landed."));
     } else {
+      const conflIds = conflicts.map((l) => l.i);
+      const conflVerb = conflIds.length === 1 ? "has a textual conflict" : "have textual conflicts";
       console.log(
         "  " + c.green(c.bold(`${ready} clean`)) + c.gray(" · ") + c.red(c.bold(`${blocked} conflicting`)) +
         c.gray(` of ${total} lane(s).`),
       );
-      console.log(c.gray(`  ${describeBlockers(conflicts.map((l) => l.i))} have textual conflicts to resolve first.`));
+      console.log(c.gray(`  ${cap(describeBlockers(conflIds))} ${conflVerb} to resolve first.`));
       console.log(c.gray("  --apply will land the clean ones (gated on the combined tree) and halt at the first conflict."));
     }
     console.log("");
@@ -714,6 +761,18 @@ function describeBlockers(ids) {
   return `lanes ${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
 }
 
+/** Grammatically-correct "lane 4 needs you" / "lanes 2 and 3 need you". */
+function needPhrase(ids) {
+  const xs = [...ids].sort((a, b) => a - b);
+  const verb = xs.length === 1 ? "needs" : "need";
+  return `${describeBlockers(xs)} ${verb} you`;
+}
+
+/** Capitalise the first letter (for sentence-leading lane phrases). */
+function cap(s) {
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
 /**
  * Copy the freshly-generated brain artifacts (PROJECT-BRIEF.md + HANDOFF.md) from
  * the main repo into a lane worktree, so the lane physically HAS the brain. We
@@ -730,6 +789,50 @@ function copyBrainInto(srcRepo, laneDir) {
       /* best-effort — init still points the agent at the brain */
     }
   }
+}
+
+/**
+ * Commit ONLY the brain artifacts fan-out just refreshed, so the tree returns to
+ * clean for a subsequent `fan-in --apply`. Called only when the tree was clean
+ * BEFORE fan-out ran, so the only possible changes are getAdvantage's own
+ * generated files. We stage by explicit pathspec (never `git add -A`), then bail
+ * without committing if anything OUTSIDE the brain set is dirty (belt-and-braces:
+ * we won't sweep a user's stray edit into a commit). Best-effort: returns true
+ * iff a commit was actually made.
+ */
+function commitBrainRefresh(cwd) {
+  // Nothing changed? (e.g. brain was already current) — nothing to commit.
+  if (treeIsClean(cwd)) return false;
+
+  // Confirm every dirty path is a brain artifact before we touch the index.
+  const porcelain = gitRaw(["status", "--porcelain"], { cwd });
+  const dirtyPaths = porcelain
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => l.slice(3).trim())
+    // Handle rename "old -> new" by taking the destination path.
+    .map((p) => (p.includes(" -> ") ? p.split(" -> ")[1] : p))
+    // Strip surrounding quotes git adds for paths with special chars.
+    .map((p) => p.replace(/^"(.*)"$/, "$1"));
+  if (dirtyPaths.length === 0) return false;
+  if (!dirtyPaths.every((p) => isBrainArtifact(p))) {
+    // Something non-brain is dirty too — don't auto-commit; leave it for the user.
+    return false;
+  }
+
+  // Stage exactly the brain pathspecs (NOT -A) and commit.
+  const stage = gitTry(["add", "--", ...dirtyPaths], { cwd });
+  if (!stage.ok) return false;
+  const commit = gitTry(
+    ["commit", "--no-verify", "-q", "-m", "chore(getadvantage): refresh project brain for fan-out lanes"],
+    { cwd },
+  );
+  if (!commit.ok) {
+    // Roll the staging back so we don't leave a half-staged index behind.
+    gitTry(["reset", "-q", "HEAD", "--", ...dirtyPaths], { cwd });
+    return false;
+  }
+  return true;
 }
 
 /** Escape a string for use inside a RegExp. */
