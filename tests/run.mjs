@@ -20,8 +20,10 @@
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
+//  13. --report connector           — opt-in POST matches the ingest contract
+//                                     (hermetic mock server); nothing sent without it
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,17 +41,55 @@ function scenario(name, fn) {
   scenarios.push({ name, fn });
 }
 
+/** Hermetic child env: the runner's own GITHUB_* / GETADVANTAGE_* vars must never
+ *  leak into a scenario (a user's global GETADVANTAGE_REPORT=1 would otherwise
+ *  make every scenario's `check` attempt the network). `extra` layers on top. */
+function buildEnv(extra) {
+  const env = { NO_COLOR: "1" };
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("GITHUB_") || k.startsWith("GETADVANTAGE_")) continue;
+    env[k] = v;
+  }
+  return Object.assign(env, extra || {});
+}
+
 /** Spawn the real CLI in a repo; capture code + both streams (never throws). */
-function run(args, cwd) {
+function run(args, cwd, envExtra) {
   const r = spawnSync(process.execPath, [INDEX, ...args], {
     cwd,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 300_000,
-    env: { ...process.env, NO_COLOR: "1" },
+    env: buildEnv(envExtra),
   });
   if (r.error) throw r.error;
   return { code: r.status ?? -1, stdout: r.stdout || "", stderr: r.stderr || "" };
+}
+
+/** Async variant of run() — REQUIRED when the scenario also hosts an in-process
+ *  server: spawnSync blocks the event loop, so the mock server could never
+ *  answer the child's request. */
+function runAsync(args, cwd, envExtra) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [INDEX, ...args], {
+      cwd,
+      env: buildEnv(envExtra),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    const timer = setTimeout(() => child.kill(), 300_000);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, stdout, stderr });
+    });
+  });
 }
 
 /** Run git in a dir, throwing on failure (test setup must be deterministic). */
@@ -520,6 +560,79 @@ scenario("marker dir: legacy .ship-safe/ still read (with note); writes → .get
     assert.equal(r3.code, 0, r3.stderr);
     assert.ok(!/legacy \.ship-safe\//.test(r3.stderr), "new marker present — the legacy note must stop");
   } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13. --report connector — hermetic mock ingest server
+// ---------------------------------------------------------------------------
+scenario("--report: opt-in POST matches the ingest contract; nothing sent without it", async () => {
+  const base = freshBase();
+  const { createServer } = await import("node:http");
+  const requests = []; // every request the mock ingest endpoint receives
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        auth: req.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "run_t1",
+          publicToken: "tok_t1",
+          url: `http://127.0.0.1:${server.address().port}/r/tok_t1`,
+        }),
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const repo = scaffold(base);
+    g(["remote", "add", "origin", "git@github.com:acme/widget.git"], repo);
+    // Assembled at runtime so this test file never trips the secret scanner.
+    const key = ["adv", "live", "k7f2m9x4p1q8r3s6t0uv"].join("_");
+    const env = { GETADVANTAGE_API_URL: `http://127.0.0.1:${port}`, GETADVANTAGE_API_KEY: key };
+
+    // LOCAL BY DEFAULT: without --report (and no GETADVANTAGE_REPORT), even with
+    // a key + endpoint configured, the CLI must make ZERO network requests.
+    const r0 = await runAsync(["check", "--json"], repo, env);
+    assert.equal(r0.code, 0, r0.stderr);
+    assert.equal(requests.length, 0, "nothing may be POSTed without explicit --report");
+
+    // WITH --report (the exact command the GitHub Action runs): one POST,
+    // matching the ingest contract.
+    const r1 = await runAsync(["check", "--ci", "--report", "--json"], repo, env);
+    assert.equal(r1.code, 0, r1.stderr);
+    const doc = parseJson(r1); // stdout still carries exactly one JSON document
+    assert.equal(doc.verdict, "GO");
+    assert.equal(requests.length, 1, "exactly one POST with --report");
+    const q = requests[0];
+    assert.equal(q.method, "POST");
+    assert.equal(q.url, "/api/v1/runs");
+    assert.equal(q.auth, `Bearer ${key}`, "the key rides only in the Authorization header");
+    const sent = JSON.parse(q.body);
+    assert.equal(sent.kind, "check");
+    assert.equal(sent.verdict, "GO");
+    assert.equal(sent.exitCode, 0);
+    assert.equal(sent.project.repo, "acme/widget", "owner/name normalized from the git@ remote");
+    assert.ok(sent.payload && sent.payload.command === "check", "payload = the full --json report");
+    assert.ok(Array.isArray(sent.payload.checks) && sent.payload.checks.length > 0);
+    assert.equal(sent.ref.branch, "main");
+    assert.equal(sent.ref.sha, g(["rev-parse", "HEAD"], repo));
+    // The CLI prints the returned report url (human channel = stderr under --json).
+    assert.ok(/verdict posted/.test(r1.stderr), r1.stderr);
+    assert.ok(r1.stderr.includes(`http://127.0.0.1:${port}/r/tok_t1`), r1.stderr);
+    // HONESTY: verdict + metadata only — the repo's source never rides along.
+    assert.ok(!q.body.includes("hello from sample"), "source code must never be sent");
+  } finally {
+    server.close();
     cleanup(base);
   }
 });
