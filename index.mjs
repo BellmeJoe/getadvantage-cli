@@ -26,6 +26,11 @@
 // explicit `deploy` subcommand performs an action, and it deploys from a clean
 // detached worktree of the target commit.
 //
+// LOCAL BY DEFAULT (the core promise): no command touches the network unless
+// you explicitly opt in with `--report` / GETADVANTAGE_REPORT=1, which posts
+// the run's VERDICT + metadata (the --json report — never your source code)
+// to your getAdvantage account. See report.mjs.
+//
 // Usage:
 //   node cli/ship-safe/index.mjs [check] [--build]
 //   node cli/ship-safe/index.mjs deploy [--expect-prefix getadvantage-] [--scope <s>]
@@ -46,6 +51,8 @@ import { runModels } from "./models.mjs";
 import { runMcp } from "./mcp.mjs";
 import { runFanOut, runFanIn } from "./fanout.mjs";
 import { runDemo } from "./demo.mjs";
+import { envReportOn, reportRun, lanesForIngest, ciDefaultBaseRef, runLogin, runLogout } from "./report.mjs";
+import { runGithubAction } from "./action.mjs";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
@@ -140,6 +147,12 @@ ${c.bold("Commands")}
   ${c.cyan("demo")}     Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, two
            that collide, one that breaks the build) and run the WHOLE fan-in conductor on it —
            so you can see the entire wow in ONE command, zero setup.
+  ${c.cyan("login")}    Connect this machine to your getAdvantage account: store an ${c.bold("adv_live_")} API key
+           in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
+           GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
+  ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — run ${c.bold("check --ci --report")} on every
+           push + pull request (reporting needs the GETADVANTAGE_API_KEY repo secret).
+           Idempotent; ${c.bold("--force")} to replace a differing existing file. ${c.dim("(also: init --github-action)")}
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
 
@@ -151,6 +164,18 @@ ${c.bold("Flags")}
   --json                  (${c.cyan("check")} + ${c.cyan("fan-in")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
+  --ci                    (${c.cyan("check")} + ${c.cyan("fan-in")}) Non-interactive CI mode: never prompts, tolerates a
+                          detached HEAD (CI checks out a sha), and defaults the base comparison to
+                          origin/main (or GITHUB_BASE_REF). Exit codes stay CI-honest: 0 = GO.
+  --report                (${c.cyan("check")} + ${c.cyan("fan-in")}) OPT-IN: after the verdict, post the run REPORT — the
+                          --json document (verdict, exit code, checks / lane outcomes) plus repo
+                          name, branch + commit id, ${c.bold("never your source code")} — to your getAdvantage
+                          account. Also enabled by GETADVANTAGE_REPORT=1. Needs a key (env
+                          GETADVANTAGE_API_KEY or ${c.cyan("login")}); endpoint override: GETADVANTAGE_API_URL.
+                          Without --report, nothing ever leaves your machine.
+  --report-required       Reporting is best-effort by default (a failed post never changes the gate
+                          verdict / exit code). This flag makes a failed post exit non-zero. Implies
+                          --report.
 
   ${c.dim("brief only:")}
   --out <path>            Where to write the brief (default: PROJECT-BRIEF.md at repo root).
@@ -184,6 +209,9 @@ ${c.bold("Examples")}
   getadvantage fan-in              collision map + merge-train DRY-RUN (preview, nothing merged)
   getadvantage fan-in --apply      actually land the clean+green lanes into main, gated
   getadvantage demo                see the whole safe fan-in conductor on a throwaway repo
+  getadvantage login               store your adv_live_ key for --report (once per machine)
+  getadvantage check --ci --report CI gate + post the verdict to your account (what the Action runs)
+  getadvantage github-action       write the GitHub Actions workflow for the line above
   getadvantage deploy --expect-prefix myproject-
 `);
 }
@@ -205,6 +233,17 @@ async function main() {
     process.exit(code);
   }
 
+  // login / logout manage the PER-USER key store (~/.getadvantage/config.json)
+  // — they are not repo-bound, so they run before the repo-root gate.
+  if (cmd === "login") {
+    header();
+    process.exit(await runLogin());
+  }
+  if (cmd === "logout") {
+    header();
+    process.exit(runLogout());
+  }
+
   let cwd;
   try {
     cwd = repoRoot();
@@ -213,33 +252,50 @@ async function main() {
     process.exit(1);
   }
 
+  // --report / GETADVANTAGE_REPORT=1 → post the run (check · fan-in) to the
+  // platform. --report-required implies --report and makes a FAILED post exit
+  // non-zero; otherwise reporting is best-effort and the gate verdict alone
+  // owns the exit code (a network hiccup must not turn a GO into a failed CI
+  // step).
+  const reportWanted = !!flags.report || !!flags["report-required"] || envReportOn();
+  const reportRequired = !!flags["report-required"];
+
   if (cmd === "check") {
     const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
+    // --ci: non-interactive CI mode. `check` never prompts and already tolerates
+    // a detached HEAD; the observable difference is the base-ref default —
+    // origin/<GITHUB_BASE_REF> / origin/main instead of local `main`, which a CI
+    // checkout usually doesn't have.
+    const baseRef = flags["base-ref"] || (flags.ci ? ciDefaultBaseRef(cwd) : undefined);
     const { exitCode, results } = await runChecks({
       cwd,
       runBuild: !!flags.build,
-      baseRef: flags["base-ref"],
+      baseRef,
       // Overviews are default-on; `--no-overview` turns them off.
       overview: !flags["no-overview"],
       // Brief-staleness warning is default-on; `--no-brief-check` turns it off.
       briefCheck: !flags["no-brief-check"],
     });
-    if (restore) {
-      emitJson(restore, {
-        command: "check",
-        verdict: exitCode === 0 ? "GO" : "NO-GO",
-        exitCode,
-        checks: results.map((r) => ({
-          status: r.status,
-          label: r.label,
-          detail: r.detail,
-          extra: r.extra || [],
-        })),
-        generatedAt: new Date().toISOString(),
-      });
+    const doc = {
+      command: "check",
+      verdict: exitCode === 0 ? "GO" : "NO-GO",
+      exitCode,
+      checks: results.map((r) => ({
+        status: r.status,
+        label: r.label,
+        detail: r.detail,
+        extra: r.extra || [],
+      })),
+      generatedAt: new Date().toISOString(),
+    };
+    let finalExit = exitCode;
+    if (reportWanted) {
+      const rep = await reportRun({ cwd, kind: "check", doc, required: reportRequired });
+      if (!rep.ok && reportRequired) finalExit = finalExit || 1;
     }
-    process.exit(exitCode);
+    if (restore) emitJson(restore, doc);
+    process.exit(finalExit);
   }
 
   if (cmd === "brief") {
@@ -282,6 +338,14 @@ async function main() {
     process.exit(runLedger({ cwd }));
   }
 
+  // `github-action` (alias: `init --github-action`) writes the CI workflow that
+  // runs `check --ci --report` on push + pull_request. Idempotent; --force to
+  // replace a differing existing file.
+  if (cmd === "github-action" || (cmd === "init" && flags["github-action"])) {
+    header();
+    process.exit(runGithubAction({ cwd, force: !!flags.force }));
+  }
+
   if (cmd === "init") {
     header();
     process.exit(runInit({ cwd }));
@@ -295,6 +359,8 @@ async function main() {
   if (cmd === "fan-in" || cmd === "fanin") {
     const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
+    // fan-in accepts --ci too: it is already non-interactive; the flag defaults
+    // the base comparison to origin/main / GITHUB_BASE_REF like `check --ci`.
     const { exitCode, report } = await runFanIn({
       cwd,
       apply: !!flags.apply,
@@ -302,23 +368,33 @@ async function main() {
       // default is to build, since a textual merge can break the build even
       // when each lane typechecks alone.
       build: !flags["no-build"],
-      baseRef: flags["base-ref"],
+      baseRef: flags["base-ref"] || (flags.ci ? ciDefaultBaseRef(cwd) : undefined),
       into: flags.into,
     });
-    if (restore) {
-      emitJson(restore, {
-        command: "fan-in",
-        verdict: exitCode === 0 ? "GO" : "NO-GO",
-        exitCode,
-        mode: report.mode,
-        into: report.into,
-        ...(report.preflight ? { preflight: report.preflight } : {}),
-        ...(report.postTrainDirty ? { postTrainDirty: true } : {}),
-        lanes: report.lanes,
-        generatedAt: new Date().toISOString(),
+    const doc = {
+      command: "fan-in",
+      verdict: exitCode === 0 ? "GO" : "NO-GO",
+      exitCode,
+      mode: report.mode,
+      into: report.into,
+      ...(report.preflight ? { preflight: report.preflight } : {}),
+      ...(report.postTrainDirty ? { postTrainDirty: true } : {}),
+      lanes: report.lanes,
+      generatedAt: new Date().toISOString(),
+    };
+    let finalExit = exitCode;
+    if (reportWanted) {
+      const rep = await reportRun({
+        cwd,
+        kind: "fan-in",
+        doc,
+        lanes: lanesForIngest(report.lanes),
+        required: reportRequired,
       });
+      if (!rep.ok && reportRequired) finalExit = finalExit || 1;
     }
-    process.exit(exitCode);
+    if (restore) emitJson(restore, doc);
+    process.exit(finalExit);
   }
 
   if (cmd === "demo") {
