@@ -23,17 +23,27 @@
 //
 // MAINTENANCE: every generated brief carries a small staleness marker (the HEAD
 // sha + a timestamp) in BOTH the markdown frontmatter and a machine-readable
-// .ship-safe/brief.json. `ship-safe brief --check` (and the hook the main
-// `check` calls) WARNS — never blocks — if the brief is missing or the repo has
-// moved on since it was generated.
+// .getadvantage/brief.json (legacy .ship-safe/ is still read — see util.mjs).
+// `ship-safe brief --check` (and the hook the main `check` calls) WARNS — never
+// blocks — if the brief is missing or the repo has moved on since it was
+// generated.
 //
 // Node built-ins only. ESM. Generating the brief WRITES two files (the brief +
 // the marker); `--check` reads only.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { c, git, gitSafe, relPath } from "./util.mjs";
+import {
+  c,
+  git,
+  gitSafe,
+  relPath,
+  MARKER_DIR,
+  LEGACY_MARKER_DIR,
+  markerFileForRead,
+  markerFileForWrite,
+} from "./util.mjs";
 import {
   scanApiSurface,
   apiRowTag,
@@ -43,7 +53,6 @@ import {
 } from "./overviews.mjs";
 
 const DEFAULT_OUT = "PROJECT-BRIEF.md";
-const MARKER_DIR = ".ship-safe";
 const MARKER_FILE = "brief.json";
 // A stable banner so a model/tool can recognise this file by its first lines.
 const BANNER = "<!-- ship-safe:project-brief -->";
@@ -441,23 +450,21 @@ function renderBrief(cwd) {
 }
 
 // ===========================================================================
-// staleness marker (.ship-safe/brief.json) + detection
+// staleness marker (.getadvantage/brief.json; legacy .ship-safe/ read) + detection
 // ===========================================================================
-
-function markerPath(cwd) {
-  return path.join(cwd, MARKER_DIR, MARKER_FILE);
-}
 
 /**
  * The brief's OWN artifacts — the files a `ship-safe brief` run writes. Staleness
  * must IGNORE changes to these (otherwise committing the freshly-generated brief
  * would immediately mark it stale, because committing it advances HEAD past the
- * sha the brief stamped). Paths are repo-relative, forward-slashed.
+ * sha the brief stamped). Paths are repo-relative, forward-slashed. Both the new
+ * and the legacy marker locations are excluded so a half-migrated repo stays stable.
  */
 function briefArtifactPaths(cwd, out) {
   return new Set([
     relPath(path.resolve(cwd, out), cwd),
     `${MARKER_DIR}/${MARKER_FILE}`,
+    `${LEGACY_MARKER_DIR}/${MARKER_FILE}`,
   ]);
 }
 
@@ -518,8 +525,6 @@ function codeInputsHash(cwd, out) {
 }
 
 function writeMarker(cwd, out, head, generatedAt, branch) {
-  const dir = path.join(cwd, MARKER_DIR);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const marker = {
     schema: 2,
     out: relPath(path.resolve(cwd, out), cwd),
@@ -531,11 +536,11 @@ function writeMarker(cwd, out, head, generatedAt, branch) {
     branch: branch || null,
     generated_at: generatedAt,
   };
-  writeFileSync(markerPath(cwd), JSON.stringify(marker, null, 2) + "\n", "utf8");
+  writeFileSync(markerFileForWrite(cwd, MARKER_FILE), JSON.stringify(marker, null, 2) + "\n", "utf8");
 }
 
 function readMarker(cwd) {
-  return readJson(markerPath(cwd));
+  return readJson(markerFileForRead(cwd, MARKER_FILE));
 }
 
 /**

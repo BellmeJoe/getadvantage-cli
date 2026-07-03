@@ -11,9 +11,8 @@
 //
 // Node built-ins only. ESM. Read-only (writes nothing).
 
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { c, gitSafe } from "./util.mjs";
+import { readFileSync } from "node:fs";
+import { c, gitSafe, markerFileForRead } from "./util.mjs";
 
 function readJson(abs) {
   try {
@@ -43,7 +42,7 @@ function fmtAge(hours) {
 
 export function runGauge(o) {
   const cwd = o.cwd;
-  const marker = readJson(path.join(cwd, ".ship-safe", "handoff.json"));
+  const marker = readJson(markerFileForRead(cwd, "handoff.json"));
   const head = gitSafe(["rev-parse", "HEAD"], { cwd });
 
   // No save-point yet → can't gauge drift; nudge to set a baseline.

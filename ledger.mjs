@@ -2,21 +2,19 @@
 //
 // The append-only continuity changelog. Every `ship-safe handoff` adds (or, if
 // you re-run it in the same session, updates) one compact entry to
-// `.ship-safe/ledger.md`: date · branch @ sha · commits since last · next step.
-// Over time it becomes the project's session history — the thread that lets any
-// model/session see not just WHERE the project is, but HOW it got there.
+// `.getadvantage/ledger.md`: date · branch @ sha · commits since last · next
+// step. (A legacy `.ship-safe/ledger.md` is still read and its history carries
+// forward on the next write — see util.mjs.) Over time it becomes the project's
+// session history — the thread that lets any model/session see not just WHERE
+// the project is, but HOW it got there.
 //
 // Node built-ins only. ESM. Writes one repo-resident file.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { c, gitSafe, relPath } from "./util.mjs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
 
 const HEAD_MARK = "<!-- ship-safe:ledger -->";
-
-function ledgerPath(cwd) {
-  return path.join(cwd, ".ship-safe", "ledger.md");
-}
+const LEDGER_FILE = "ledger.md";
 
 /** Pull the first real "next step" line out of a handoff notes block. Returns
  *  "—" when it's still the placeholder or empty. */
@@ -43,11 +41,13 @@ function extractNext(notes) {
  * @returns {string} repo-relative ledger path (for the caller to mention).
  */
 export function appendLedger(cwd, { headSha, branch, lastHead, notes, now }) {
-  const abs = ledgerPath(cwd);
-  const dir = path.dirname(abs);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  // Read the existing history from wherever it lives (new dir, else legacy
+  // .ship-safe/) — but always WRITE to .getadvantage/, so the history migrates
+  // forward on the first append instead of silently restarting.
+  const readAbs = markerFileForRead(cwd, LEDGER_FILE);
+  const abs = markerFileForWrite(cwd, LEDGER_FILE);
 
-  let body = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+  let body = existsSync(readAbs) ? readFileSync(readAbs, "utf8") : "";
   if (!body.includes(HEAD_MARK)) {
     body =
       `${HEAD_MARK}\n# Session ledger\n\n` +
@@ -89,7 +89,7 @@ export function appendLedger(cwd, { headSha, branch, lastHead, notes, now }) {
 /** `ship-safe ledger` — print the recent session history. */
 export function runLedger(o) {
   const cwd = o.cwd;
-  const abs = ledgerPath(cwd);
+  const abs = markerFileForRead(cwd, LEDGER_FILE);
   if (!existsSync(abs)) {
     console.log(`  ${c.yellow("⚠")} No session ledger yet — run ${c.cyan("ship-safe handoff")} to start one.`);
     return 0;
@@ -106,5 +106,3 @@ export function runLedger(o) {
   }
   return 0;
 }
-
-export { ledgerPath };

@@ -2,7 +2,7 @@
 // Node built-ins only. No npm deps.
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 // --- ANSI color, degrading gracefully ---------------------------------------
@@ -139,4 +139,51 @@ export function readText(abs) {
 /** Forward-slash a path and make it relative to the repo root for display. */
 export function relPath(abs, cwd) {
   return path.relative(cwd, abs).split(path.sep).join("/");
+}
+
+// --- the marker directory (.getadvantage/, with .ship-safe/ back-compat) ----
+// The CLI keeps its small machine-readable state (brief.json, handoff.json,
+// ledger.md) in ONE repo-resident dir. It was `.ship-safe/` historically;
+// renamed to `.getadvantage/` to match the product. Back-compat contract:
+//   • WRITES always go to .getadvantage/ (created on demand).
+//   • READS prefer .getadvantage/<file>, falling back to .ship-safe/<file>
+//     (per file, so a half-migrated repo never silently loses history).
+//   • When the legacy dir is still being read, a one-time migration note is
+//     printed to stderr (stderr so it can never pollute --json stdout).
+
+export const MARKER_DIR = ".getadvantage";
+export const LEGACY_MARKER_DIR = ".ship-safe";
+
+let legacyMarkerNoteShown = false;
+function noteLegacyMarkerDir() {
+  if (legacyMarkerNoteShown) return;
+  legacyMarkerNoteShown = true;
+  console.error(
+    c.gray(
+      `  (Found legacy ${LEGACY_MARKER_DIR}/ state — still readable, but new state now writes to ` +
+        `${MARKER_DIR}/. Move or delete ${LEGACY_MARKER_DIR}/ whenever convenient.)`,
+    ),
+  );
+}
+
+/** Absolute path to READ a marker file from: `.getadvantage/<file>` when present,
+ *  else the legacy `.ship-safe/<file>` (with a one-time migration note), else the
+ *  canonical (absent) new path — callers already handle a missing file. */
+export function markerFileForRead(cwd, file) {
+  const newAbs = path.join(cwd, MARKER_DIR, file);
+  if (existsSync(newAbs)) return newAbs;
+  const oldAbs = path.join(cwd, LEGACY_MARKER_DIR, file);
+  if (existsSync(oldAbs)) {
+    noteLegacyMarkerDir();
+    return oldAbs;
+  }
+  return newAbs;
+}
+
+/** Absolute path to WRITE a marker file to — always `.getadvantage/<file>`,
+ *  creating the directory if needed. */
+export function markerFileForWrite(cwd, file) {
+  const dir = path.join(cwd, MARKER_DIR);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return path.join(dir, file);
 }

@@ -18,16 +18,16 @@
 // didn't create: if one exists without our marker, we refuse and suggest --out.
 //
 // Node built-ins only. ESM. Writes two repo-resident files (the handoff + its
-// .ship-safe/handoff.json marker); refreshing the brief writes its files too.
+// .getadvantage/handoff.json marker — legacy .ship-safe/ still read, see
+// util.mjs); refreshing the brief writes its files too.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { c, gitSafe, relPath } from "./util.mjs";
+import { c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
 import { runBrief, briefStaleness } from "./brief.mjs";
 import { appendLedger } from "./ledger.mjs";
 
 const DEFAULT_HANDOFF = "HANDOFF.md";
-const MARKER_DIR = ".ship-safe";
 const MARKER_FILE = "handoff.json";
 // Recognisable first-lines marker so we can tell OUR handoff from a hand-written
 // HANDOFF.md (and so a tool can recognise the file).
@@ -77,10 +77,6 @@ function between(text, start, end) {
   const j = text.indexOf(end, i + start.length);
   if (j === -1) return null;
   return text.slice(i + start.length, j).replace(/^\n+/, "").replace(/\n+$/, "");
-}
-
-function markerPath(cwd) {
-  return path.join(cwd, MARKER_DIR, MARKER_FILE);
 }
 
 /**
@@ -200,7 +196,7 @@ export function runHandoff(o) {
   const firstTime = !prevNotes;
   const notes = prevNotes && prevNotes.trim() ? prevNotes : DEFAULT_NOTES;
 
-  const marker = readJson(markerPath(cwd));
+  const marker = readJson(markerFileForRead(cwd, MARKER_FILE));
   const lastHead = marker && typeof marker.head_sha === "string" ? marker.head_sha : null;
 
   const auto = autoBlock(cwd, lastHead);
@@ -246,8 +242,6 @@ export function runHandoff(o) {
   writeFileSync(handoffAbs, L.join("\n"), "utf8");
 
   // ---- 3. Marker, so the NEXT handoff can diff "since last". ---------------
-  const dir = path.join(cwd, MARKER_DIR);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const m = {
     schema: 1,
     out: relPath(handoffAbs, cwd),
@@ -255,7 +249,7 @@ export function runHandoff(o) {
     branch: auto.branch,
     generated_at: now,
   };
-  writeFileSync(markerPath(cwd), JSON.stringify(m, null, 2) + "\n", "utf8");
+  writeFileSync(markerFileForWrite(cwd, MARKER_FILE), JSON.stringify(m, null, 2) + "\n", "utf8");
 
   // ---- 3b. Append a compact entry to the session ledger (the continuity log).
   const ledgerRel = appendLedger(cwd, { headSha: auto.head, branch: auto.branch, lastHead, notes, now });

@@ -466,8 +466,8 @@ function laneReport(l) {
 // getAdvantage's OWN generated artifacts — the portable brain + the agent-
 // instruction files `fan-out` writes/wires into every lane. They're identical
 // tool output across lanes, so they're not a meaningful "collision" between the
-// builder's lanes. The internal `.ship-safe/` marker dir is included (path kept
-// for back-compat; it is NOT a user-facing brand name).
+// builder's lanes. Both the current `.getadvantage/` marker dir and the legacy
+// `.ship-safe/` one are included.
 const BRAIN_BASENAMES = new Set([
   DEFAULT_OUT,        // PROJECT-BRIEF.md
   DEFAULT_HANDOFF,    // HANDOFF.md
@@ -479,7 +479,7 @@ const BRAIN_BASENAMES = new Set([
 ]);
 function isBrainArtifact(file) {
   const norm = String(file).split("\\").join("/");
-  if (norm.startsWith(".ship-safe/")) return true;
+  if (norm.startsWith(".getadvantage/") || norm.startsWith(".ship-safe/")) return true;
   return BRAIN_BASENAMES.has(path.basename(norm));
 }
 
