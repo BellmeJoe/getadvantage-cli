@@ -7,6 +7,9 @@
     "getadvantage": "index.mjs",
     "ship-safe": "index.mjs"
   },
+  "scripts": {
+    "test": "node tests/run.mjs"
+  },
   "files": [
     "*.mjs",
     "README.md"
