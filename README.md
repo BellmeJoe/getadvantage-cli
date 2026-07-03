@@ -23,6 +23,11 @@ Run it in your repo. It reads your project and gives you:
   each merge so a "both-green-but-red-together" break is caught and that lane is
   quarantined — never landed. No conflict reaches main un-verified. Try it in one
   command: `getadvantage demo`.
+- **Opt-in run reporting** (`--report`) — `getadvantage login` once, then
+  `check --report` / `fan-in --report` posts each run's **verdict + metadata**
+  (the `--json` report — never your source code) to your getAdvantage account.
+  `getadvantage github-action` wires the same gate into CI. Without `--report`,
+  nothing ever leaves your machine.
 
 Your context lives in your **repo**, not your tool. Switch from Claude to Cursor
 to Qwen and keep going — and start a clean, fast session instead of dragging a
@@ -72,6 +77,8 @@ whichever reads better to you.
 | `getadvantage fan-out <n>` | Open **N parallel lanes** (1–8) as git worktrees off `HEAD`, each with the brain copied in + wired. Add `--task "..."` to print a shared task into each lane's guidance. Open a different model/tool per lane, work in parallel. |
 | `getadvantage fan-in` | **The safe fan-in conductor.** Reconcile the lanes into one verified main: a **collision map**, a **merge-train** dry-run (textual conflicts up front), and — with `--apply` — actually merge the clean lanes one at a time, re-running the check gate on the **combined tree** after each so a lane that's green alone but red merged is **quarantined** (rolled back), never landed. Default is a read-only preview; `--apply` to land. |
 | `getadvantage demo` | Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, one that breaks the build, one that conflicts) and run the **whole conductor** on it — the entire wow in one command, zero setup. |
+| `getadvantage login` / `logout` | Store (or remove) your `adv_live_` API key in `~/.getadvantage/config.json` — per-user, owner-only file, never inside a repo. Used by `--report`; the `GETADVANTAGE_API_KEY` env var always wins over the stored key. The key is never printed back. |
+| `getadvantage github-action` | Write `.github/workflows/getadvantage.yml`: run `getadvantage check --ci --report` on every push + pull request (reporting uses the `GETADVANTAGE_API_KEY` repo secret). Idempotent — it never clobbers a differing existing file without `--force`. Alias: `init --github-action`. |
 | `ship-safe deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
 
 ## Use it as an MCP server (call the brain mid-session)
@@ -172,14 +179,60 @@ npx getadvantage fan-in --apply --json
 
 Honest by design: we *detect* overlap and *gate* the combined result — we don't
 claim to make incompatible work compatible. **No conflict reaches main
-un-verified.** It's all git-native: no API keys, no network. You bring the
-models; the CLI holds the brain and the orchestration ground.
+un-verified.** It's all git-native: no API keys, and no network unless you
+explicitly opt in with `--report` (below). You bring the models; the CLI holds
+the brain and the orchestration ground.
 
 See the whole thing on a throwaway repo in one command:
 
 ```bash
 npx getadvantage demo
 ```
+
+## Report runs to your getAdvantage account (opt-in)
+
+**Local by default.** No command ever touches the network unless you explicitly
+opt in with `--report` (or `GETADVANTAGE_REPORT=1`). When you do, `check` and
+`fan-in` post the finished run to your getAdvantage account, so your dashboard
+shows every gate that ran — in CI and on your machine.
+
+**What is sent — exactly:** the run **report**, i.e. the same `--json` document
+the command prints (verdict, exit code, check results / lane outcomes), plus the
+repo name (`owner/name`), branch and commit id. **Never your source code, your
+diffs, or your files.** Without `--report`, nothing is sent, ever.
+
+```bash
+npx getadvantage login                    # store your adv_live_ key once (owner-only file in ~/.getadvantage/)
+npx getadvantage check --report           # gate as usual + post the verdict
+npx getadvantage fan-in --apply --report  # land the lanes + post the fan-in outcome
+npx getadvantage logout                   # remove the stored key
+```
+
+On success the CLI prints the run's report URL: `→ verdict posted: https://…`.
+
+- **Key:** `GETADVANTAGE_API_KEY` (env — always wins) or the key stored by
+  `login`. It is only ever sent as the `Authorization` header — never printed,
+  logged, or written into a repo.
+- **Endpoint:** `https://getadvantage.app`; override with `GETADVANTAGE_API_URL`
+  (staging/self-hosted).
+- **Best-effort by design:** a failed post is a loud warning, never a changed
+  verdict — the exit code stays the gate's GO / NO-GO, so a network hiccup can't
+  fail your CI. Pass `--report-required` if you *want* a failed post to exit
+  non-zero.
+
+### In CI (GitHub Actions)
+
+```bash
+npx getadvantage github-action     # writes .github/workflows/getadvantage.yml
+```
+
+The workflow runs `npx getadvantage check --ci --report` on every push and pull
+request. `--ci` is the non-interactive mode: it never prompts, tolerates the
+detached-HEAD checkout CI uses, and defaults base comparisons to `origin/main`
+(or the PR's `GITHUB_BASE_REF`) — `--base-ref <ref>` overrides. Add your key as
+the `GETADVANTAGE_API_KEY` repo secret; without it the gate still runs and
+reporting degrades to a warning. Exit codes stay CI-honest: `0` = GO, non-zero
+= NO-GO / refusal.
 
 ## What it is — and isn't
 
@@ -188,6 +241,10 @@ npx getadvantage demo
 - It's **dependency-free** (Node built-ins only) and **read-only**, except for the
   explicit `brief` / `handoff` writes (your two repo-resident files) and the
   explicit `deploy` command.
-- Nothing leaves your machine.
+- It's **local by default** — nothing leaves your machine unless you explicitly
+  pass `--report` (or set `GETADVANTAGE_REPORT=1`). Reporting sends exactly the
+  run report — the `--json` document (verdict, exit code, check results / lane
+  outcomes) plus repo name, branch and commit id — to your getAdvantage account.
+  It **never** sends your source code, your diffs, or your files.
 
 Requires **Node ≥ 18**. Built by [getAdvantage](https://getadvantage.app).
