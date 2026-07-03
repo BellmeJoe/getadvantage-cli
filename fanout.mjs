@@ -478,6 +478,64 @@ function gitTry(args, opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// merged-dependency install (the Bug-B fix)
+// ---------------------------------------------------------------------------
+// The combined-tree gate BUILDS the merged result — but node_modules still
+// reflects the pre-merge state. A lane that adds a dependency would therefore
+// build red and be falsely quarantined even though it's fine once installed.
+// So: if a merge changed package.json or a lockfile, run the project's install
+// before gating — and if the INSTALL fails, report that as the reason (a
+// dependency problem), never as a generic build failure.
+
+const DEPENDENCY_FILES = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lockb",
+]);
+
+/** Dependency-manifest files this merge changed (repo-relative paths). */
+function mergeChangedDependencyFiles(cwd, preMerge) {
+  const out = gitSafe(["diff", "--name-only", `${preMerge}..HEAD`], { cwd });
+  return out
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((f) => DEPENDENCY_FILES.has(path.basename(f.split("\\").join("/"))));
+}
+
+/** Run a non-git command, capturing both streams, never throwing. On Windows
+ *  npm is a .cmd shim, so shell:true lets it resolve (same as checks.mjs). */
+function runCmd(cmd, args, cwd) {
+  try {
+    const out = execFileSync(cmd, args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 32 * 1024 * 1024,
+      shell: process.platform === "win32",
+    });
+    return { ok: true, out };
+  } catch (e) {
+    const out = `${e.stdout || ""}${e.stderr || ""}`.trim();
+    return { ok: false, out: out || String(e.message || e) };
+  }
+}
+
+/** Install the merged tree's dependencies: `npm ci` when a lockfile is present
+ *  (reads, never writes), else `npm install`. Dependency-free (child_process). */
+function installMergedDependencies(cwd) {
+  const hasLock =
+    existsSync(path.join(cwd, "package-lock.json")) ||
+    existsSync(path.join(cwd, "npm-shrinkwrap.json"));
+  const sub = hasLock ? "ci" : "install";
+  const r = runCmd("npm", [sub, "--no-audit", "--no-fund"], cwd);
+  return { ok: r.ok, cmd: `npm ${sub}`, out: r.out };
+}
+
 /** The files that are currently in a conflicted (unmerged) state. */
 function conflictedFiles(cwd) {
   const out = gitSafe(["diff", "--name-only", "--diff-filter=U"], { cwd });
@@ -639,7 +697,38 @@ async function runMergeTrain(o) {
       continue;
     }
 
-    // Merge succeeded textually — now the NOVEL part: gate the COMBINED tree.
+    // Merge succeeded textually. If it changed package.json / a lockfile, the
+    // gate's build would run against STALE node_modules — install first so a
+    // lane that adds a dependency isn't falsely quarantined (and an install
+    // failure is reported as exactly that, not a generic build fail).
+    const depFiles = existsSync(path.join(cwd, "package.json"))
+      ? mergeChangedDependencyFiles(cwd, preMerge)
+      : [];
+    if (depFiles.length > 0) {
+      console.log(
+        `     ${c.gray("…")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` merged — installing merged dependencies ${c.gray("(" + depFiles.join(", ") + ")")}`,
+      );
+      const inst = installMergedDependencies(cwd);
+      if (!inst.ok) {
+        // Roll back ONLY this in-flight merge (to the pre-merge commit — never
+        // behind landed lanes) and report the INSTALL as the reason.
+        gitTry(["reset", "--hard", preMerge], { cwd });
+        lane.outcome = "quarantined";
+        lane.detail = `dependency install failed after merge (\`${inst.cmd}\`) — merge rolled back`;
+        lane.installError = inst.out.split("\n").filter(Boolean).slice(-8).join("\n");
+        console.log(
+          `     ${c.yellow("⚠")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.yellow("quarantined")}: \`${inst.cmd}\` failed on the merged dependencies; rolled back.`,
+        );
+        for (const ln of inst.out.split("\n").filter(Boolean).slice(-5)) {
+          console.log(c.gray(`        ${ln}`));
+        }
+        console.log(c.gray("        (node_modules may have been partially modified by the failed install.)"));
+        continue;
+      }
+      console.log(c.gray(`        dependencies installed (\`${inst.cmd}\`).`));
+    }
+
+    // Now the NOVEL part: gate the COMBINED tree.
     process.stdout.write(`     ${c.gray("…")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` merged — gating the combined tree`);
     const gate = gateTree({ cwd, baseRef: o.baseRef, build: o.build });
     if (gate.ok) {
