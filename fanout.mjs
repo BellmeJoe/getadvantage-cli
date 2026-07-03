@@ -40,9 +40,10 @@ import { gateTree } from "./checks-runner.mjs";
 const MIN_LANES = 1;
 const MAX_LANES = 8;
 
-/** A lane's branch name. Stable + predictable so fan-in can find them. */
+/** A lane's branch name. Stable + predictable, and NAMESPACED (`ga/…`) so it can
+ *  never squat on or shadow a user's own branch names like `lane-1`. */
 function laneBranch(repoName, i) {
-  return `lane-${i}`;
+  return `ga/lane-${i}`;
 }
 
 /** A lane's worktree directory (sibling of the repo). Absolute path. */
@@ -141,15 +142,21 @@ export function runFanOut(o) {
       continue;
     }
 
-    // Reuse an existing lane branch if present (don't try to recreate it); else
-    // create a fresh branch off HEAD. `git worktree add -b` makes the branch; if
-    // the branch already exists we attach the worktree to it instead.
+    // NEVER silently reuse a pre-existing lane branch: a leftover branch from an
+    // earlier fan-out carries stale work, and quietly attaching a new lane to it
+    // would present old commits as this lane's output. Error clearly instead.
+    if (branchExists(cwd, branch)) {
+      hadError = true;
+      console.error(c.red(`     ✗ lane ${i}: branch \`${branch}\` already exists — refusing to silently reuse it.`));
+      console.error(c.gray(`        If it's a leftover from an old fan-out, inspect/merge it first, then delete it:`));
+      console.error(c.gray(`          git branch -D ${branch}`));
+      console.error(c.gray(`        and re-run fan-out.`));
+      continue;
+    }
+
+    // Create a FRESH branch off HEAD for this lane's worktree.
     try {
-      if (branchExists(cwd, branch)) {
-        git(["worktree", "add", dir, branch], { cwd });
-      } else {
-        git(["worktree", "add", "-b", branch, dir, "HEAD"], { cwd });
-      }
+      git(["worktree", "add", "-b", branch, dir, "HEAD"], { cwd });
     } catch (e) {
       hadError = true;
       console.error(c.red(`     ✗ lane ${i}: could not create worktree — ${String(e.message || e).split("\n")[0]}`));

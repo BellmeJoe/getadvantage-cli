@@ -106,7 +106,7 @@ export async function runDemo(o = {}) {
     // ---- 2. Three divergent lanes via the real fan-out machinery would create
     //         sibling worktrees; for a hermetic demo we build the lane branches
     //         + their worktrees directly (same shape fan-in discovers:
-    //         ../sample-app-lane-N on branch lane-N). ----------------------------
+    //         ../sample-app-lane-N on branch ga/lane-N). -------------------------
     console.log(c.cyan("  Opening 3 lanes with pre-made divergent edits:"));
 
     const readmeIntro = (line) => [
@@ -186,12 +186,12 @@ export async function runDemo(o = {}) {
 }
 
 /**
- * Create one demo lane: a worktree at ../sample-app-lane-N on branch lane-N,
+ * Create one demo lane: a worktree at ../sample-app-lane-N on branch ga/lane-N,
  * apply an edit, and commit it — exactly the shape `fan-in` discovers.
  */
 function makeLane(repo, base, i, edit, message) {
   const laneDir = path.join(base, `sample-app-lane-${i}`);
-  g(["worktree", "add", "-q", "-b", `lane-${i}`, laneDir, "HEAD"], repo);
+  g(["worktree", "add", "-q", "-b", `ga/lane-${i}`, laneDir, "HEAD"], repo);
   edit(laneDir);
   g(["add", "-A"], laneDir);
   g(["commit", "-q", "-m", message], laneDir);

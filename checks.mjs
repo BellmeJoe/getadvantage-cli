@@ -69,8 +69,8 @@ export function checkDirtyTree(cwd) {
 // ===========================================================================
 // What we scan for: OpenAI sk-, Stripe sk_live_/rk_live_, Stripe webhook whsec_,
 // Vercel vcp_, KV/Redis REST creds, AWS AKIA, GitHub PATs (classic +
-// fine-grained), Google OAuth, Slack, SendGrid, "Bearer <token>" literals, and
-// private-key blocks.
+// fine-grained), Google OAuth, Slack, SendGrid, getAdvantage's own platform
+// keys (adv_live_), "Bearer <token>" literals, and private-key blocks.
 // A match BLOCKS (✗); we print the file + a masked FINGERPRINT, never the
 // full secret. Binary/lockfiles/node_modules/.git are skipped.
 
@@ -86,6 +86,10 @@ const SECRET_PATTERNS = [
   { id: "slack", label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
   { id: "private-key", label: "Private key block", re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },
   { id: "sendgrid", label: "SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/ },
+  // getAdvantage's OWN platform key format: adv_live_ + lowercase base36. A
+  // dedicated pattern because the generic Bearer heuristic below requires MIXED
+  // case + a digit and would miss an all-lowercase token like this one.
+  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /\badv_live_[a-z0-9]{16,}\b/ },
   // --- deploy / CI secrets ---
   { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /\bwhsec_[A-Za-z0-9]{20,}/ },
   { id: "vercel-token", label: "Vercel token (vcp_)", re: /\bvcp_[A-Za-z0-9]{20,}/ },

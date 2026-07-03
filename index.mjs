@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// getAdvantage CLI — run a fleet of AI agents in parallel, land it safely.
+// getAdvantage CLI — land the fleet safely: parallel AI agents, one verified main.
 //
 // The control layer for AI-built apps: spin up parallel worktree lanes
 // (`fan-out`), then reconcile them into ONE verified main with the SAFE FAN-IN
@@ -70,9 +70,9 @@ function parseArgs(argv) {
 }
 
 function header() {
-  console.log(c.bold("┌──────────────────────────────────────────┐"));
-  console.log(c.bold("│  getAdvantage — run a fleet, land it safe  │"));
-  console.log(c.bold("└──────────────────────────────────────────┘"));
+  console.log(c.bold("┌────────────────────────────────────────┐"));
+  console.log(c.bold("│  getAdvantage — land the fleet safely  │"));
+  console.log(c.bold("└────────────────────────────────────────┘"));
 }
 
 // ---------------------------------------------------------------------------

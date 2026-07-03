@@ -15,8 +15,9 @@ Run it in your repo. It reads your project and gives you:
 - **An MCP server** (`getadvantage mcp`) — so an AI agent (Claude Code, Cursor)
   can call the brain + checks *mid-session*, without leaving the chat.
 - **Fan-out + the safe fan-in conductor** (`getadvantage fan-out <n>` ·
-  `fan-in`) — run a FLEET of AI agents in parallel (each in its own git worktree,
-  all sharing one brain), then reconcile them into ONE verified main: a
+  `fan-in`) — **land a fleet of AI agents safely.** Anyone can run agents in
+  parallel (each in its own git worktree, all sharing one brain); the hard part
+  is landing what they produce. The conductor reconciles them into ONE verified main: a
   **collision map** (which files >1 lane touched), a **merge-train** (textual
   conflicts up front), and a **combined-tree gate** that re-runs your checks after
   each merge so a "both-green-but-red-together" break is caught and that lane is
@@ -117,10 +118,10 @@ or in your MCP config JSON:
 Each tool takes an optional `cwd` (defaults to where the server runs) so you can
 point it at any project repo on your machine.
 
-## Run several models in parallel (fan-out / fan-in)
+## Land the fleet safely (fan-out / fan-in)
 
 Because your brain lives in the repo, you can run **several models at once** on
-the same project without them colliding:
+the same project — and, the part that actually matters, **land their work safely**:
 
 ```bash
 npx getadvantage fan-out 3 --task "add a settings page"
@@ -152,6 +153,22 @@ ship) and is **safe for automation**: it exits `0` only when every landable lane
 landed green, and non-zero if a lane needs you *or* the run was refused (e.g. a
 dirty tree) — so `fan-in --apply && deploy` never proceeds on a no-op. `fan-out`
 commits its own brain refresh for you, so that clean-tree start is the default.
+Cleanup is conservative by design: rollbacks only ever undo the in-flight merge —
+**a landed lane is never reverted** — and if unexpected working-tree changes
+appear after the train, it stops and tells you exactly where you are instead of
+resetting anything. If a merge brings **new dependencies** (package.json / a
+lockfile changed), the conductor runs your install (`npm ci` with a lockfile,
+else `npm install`) before gating, and reports an install failure as exactly
+that.
+
+For CI and tooling, both `check` and `fan-in` take **`--json`**: stdout carries
+exactly one JSON document — `{ command, verdict, exitCode, checks?/lanes?,
+generatedAt }` — with the human rendering routed to stderr:
+
+```bash
+npx getadvantage check --json
+npx getadvantage fan-in --apply --json
+```
 
 Honest by design: we *detect* overlap and *gate* the combined result — we don't
 claim to make incompatible work compatible. **No conflict reaches main
