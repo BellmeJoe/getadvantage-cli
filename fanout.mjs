@@ -413,6 +413,12 @@ export async function runFanIn(o) {
     // were zero lanes, signalling success here would let `&& deploy` proceed.
     return 1;
   }
+  if (o.apply && train && train.postTrainDirty) {
+    // Unexpected tracked changes remained after the train (see the STOP report).
+    // The landed lanes are safe, but the tree is not clean — automation must not
+    // proceed to a deploy that would ship un-reviewed working-tree state.
+    return 1;
+  }
   const unresolved = landable.filter((l) => l.outcome === "conflict" || l.outcome === "quarantined").length;
   return unresolved > 0 ? 1 : 0;
 }
@@ -481,6 +487,24 @@ function conflictedFiles(cwd) {
 /** Is the working tree clean (nothing tracked modified/staged)? */
 function treeIsClean(cwd) {
   return gitRaw(["status", "--porcelain"], { cwd }).trim() === "";
+}
+
+/** The TRACKED dirt in the working tree — modified/staged/deleted tracked files
+ *  (porcelain lines that are not `??` untracked). Returned as `XY path` strings.
+ *  Untracked files are deliberately excluded: they can't be "restored" by a
+ *  reset, and they may be another session's scratch we must never touch. */
+function trackedDirt(cwd) {
+  return gitRaw(["status", "--porcelain"], { cwd })
+    .split("\n")
+    .filter((l) => l.length > 0 && !l.startsWith("??"))
+    .map((l) => l.trimEnd());
+}
+
+/** Is a merge currently in progress (MERGE_HEAD present)? */
+function mergeInProgress(cwd) {
+  const gitDir = gitSafe(["rev-parse", "--git-dir"], { cwd });
+  if (!gitDir) return false;
+  return existsSync(path.resolve(cwd, gitDir, "MERGE_HEAD"));
 }
 
 /**
@@ -587,6 +611,10 @@ async function runMergeTrain(o) {
   console.log(c.gray(`     Landing onto \`${intoBranch}\` (at ${startCommit.slice(0, 10)}). Gate re-runs after every merge.`));
   console.log("");
 
+  // The last VERIFIED-GOOD commit. Starts at the pre-train tip and only ever
+  // advances when a lane lands green. Any rollback below may go back to this —
+  // NEVER behind it — so a landed lane can never be silently discarded.
+  let lastGood = startCommit;
   let halted = false;
   for (const lane of lanes) {
     if (halted) {
@@ -617,6 +645,7 @@ async function runMergeTrain(o) {
     if (gate.ok) {
       lane.outcome = "landed";
       lane.detail = "merged + combined-tree gate green";
+      lastGood = gitSafe(["rev-parse", "HEAD"], { cwd }) || lastGood;
       console.log(`\r     ${c.green("✓")} ${c.bold("lane " + lane.i)} \`${lane.branch}\` — ${c.green("landed")} (combined tree builds + checks pass).            `);
     } else {
       // Two green branches can be red together — quarantine: roll this merge back.
@@ -629,13 +658,53 @@ async function runMergeTrain(o) {
     }
   }
   console.log("");
-  // Safety net: never leave a half-merge behind.
-  if (!treeIsClean(cwd)) {
-    gitTry(["merge", "--abort"], { cwd });
-    gitTry(["reset", "--hard", startCommit], { cwd });
-    console.log(c.yellow("     ⚠ Detected a non-clean tree after the train — restored to the starting commit."));
+  // ---- POST-TRAIN SAFETY NET ------------------------------------------------
+  // Never leave a half-merge behind — and NEVER discard landed lanes. (The old
+  // net here hard-reset to startCommit on ANY dirt, which silently reverted
+  // lanes the verdict had just reported "landed". That must never happen again:
+  // cleanup only ever rolls back the IN-FLIGHT merge, to `lastGood` at worst —
+  // the last verified-landed commit — and anything else STOPS with an honest
+  // report instead of guessing with the user's repo.)
+  let postTrainDirty = false;
+  if (trackedDirt(cwd).length > 0) {
+    if (mergeInProgress(cwd)) {
+      // An in-flight merge the loop somehow didn't finish — aborting is safe:
+      // it can only discard the un-committed merge attempt, never a commit.
+      gitTry(["merge", "--abort"], { cwd });
+      if (trackedDirt(cwd).length > 0) {
+        // Abort left residue — roll back to the last verified-good commit.
+        // lastGood only ever advances on a green landing, so this can never
+        // travel behind a landed lane.
+        gitTry(["reset", "--hard", lastGood], { cwd });
+      }
+      if (trackedDirt(cwd).length === 0) {
+        console.log(c.yellow(`     ⚠ Cleaned up an in-flight merge the train left behind — rolled back to the last`));
+        console.log(c.yellow(`       verified commit (${lastGood.slice(0, 10)}). Landed lanes are intact.`));
+      }
+    }
+    const leftover = trackedDirt(cwd);
+    if (leftover.length > 0) {
+      // Unexpected dirt with NO merge in progress (e.g. a build step that writes
+      // a tracked file, or a concurrent session's edits). We do NOT reset — that
+      // could destroy work that isn't ours to discard. Stop and say exactly
+      // where things stand.
+      postTrainDirty = true;
+      const headNow = gitSafe(["rev-parse", "HEAD"], { cwd });
+      const landedCount = lanes.filter((l) => l.outcome === "landed").length;
+      console.log(`     ${c.red("✗ STOPPED — unexpected working-tree changes after the merge-train.")}`);
+      console.log(c.gray(`       Where you are: \`${intoBranch}\` @ ${headNow ? headNow.slice(0, 10) : "?"}.`));
+      if (landedCount > 0) {
+        console.log(c.gray(`       Your ${landedCount} landed lane(s) are SAFE — real merge commits on \`${intoBranch}\`; nothing was rolled back.`));
+      }
+      console.log(c.gray("       These tracked files changed outside the train's own merges:"));
+      for (const f of leftover.slice(0, 10)) console.log(c.gray(`         ${f}`));
+      if (leftover.length > 10) console.log(c.gray(`         …and ${leftover.length - 10} more`));
+      console.log(c.gray("       Nothing was auto-reset — this could be a build side-effect or another session's work,"));
+      console.log(c.gray("       and it is not ours to discard. Inspect with `git status`, then commit, stash, or"));
+      console.log(c.gray("       revert those changes yourself before shipping."));
+    }
   }
-  return { mode: "apply", startCommit };
+  return { mode: "apply", startCommit, lastGood, postTrainDirty };
 }
 
 /** THE VERDICT — one screen. Per-lane rows + a plain-language summary. */
@@ -711,6 +780,14 @@ function printVerdict({ lanes, intoBranch, apply, train }) {
         c.yellow(` — ${needPhrase(needsYou)}.`),
       );
       console.log(c.gray(`    The green ${landed === 1 ? "lane is" : "lanes are"} on \`${intoBranch}\` and verified; the rest are exactly where you left them.`));
+    }
+    if (train && train.postTrainDirty) {
+      console.log("");
+      console.log(
+        "  " + c.red(c.bold("Working tree not clean")) +
+        c.gray("  — unexpected tracked changes remained after the train (see the STOP report"),
+      );
+      console.log(c.gray("  above). Landed lanes are safe; resolve those changes before shipping. Exit is non-zero."));
     }
     if (quarantined.length) {
       console.log("");
