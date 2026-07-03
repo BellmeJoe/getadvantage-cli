@@ -271,21 +271,33 @@ export function discoverLanes(cwd) {
  * @param {boolean} [o.build]  run the full build in the combined gate (default true)
  * @param {string}  [o.baseRef] schema-bump base ref for the gate
  * @param {string}  [o.into]   integration branch to land into (default: current branch)
- * @returns {Promise<number>} exit code (0 unless a usage/precondition error)
+ * @returns {Promise<{exitCode: number, report: object}>} exitCode (0 unless a
+ *          usage/precondition error or an unresolved lane) + a structured report
+ *          of the run — the machine-readable payload behind `--json`.
  */
 export async function runFanIn(o) {
   const cwd = o.cwd;
   const repoName = path.basename(cwd);
   const intoBranch = o.into || gitSafe(["rev-parse", "--abbrev-ref", "HEAD"], { cwd }) || "main";
+  const mode = o.apply ? "apply" : "dry-run";
 
   const lanes = discoverLanes(cwd);
+
+  // Structured report of this run — one stable shape for every exit path.
+  const makeReport = (train) => ({
+    mode,
+    into: intoBranch,
+    ...(train && train.preflight ? { preflight: train.preflight } : {}),
+    ...(train && train.postTrainDirty ? { postTrainDirty: true } : {}),
+    lanes: lanes.map(laneReport),
+  });
 
   console.log(c.bold("\n  Safe fan-in — reconcile the lanes into one verified main\n"));
 
   if (lanes.length === 0) {
     console.log(`  ${c.yellow("⚠")} No fan-out lanes found (no \`../${repoName}-lane-*\` worktrees).`);
     console.log(c.gray(`     Start some with \`getadvantage fan-out <n>\` — or try \`getadvantage demo\` to see it end-to-end.`));
-    return 0;
+    return { exitCode: 0, report: makeReport(null) };
   }
 
   // Only lanes that actually have a branch + at least one commit ahead of the
@@ -364,6 +376,8 @@ export async function runFanIn(o) {
   if (skipped.length) {
     for (const lane of skipped) {
       const why = !lane.branch ? "detached (no branch)" : "no commits ahead";
+      lane.outcome = "skipped";
+      lane.detail = why;
       console.log(c.gray(`     · lane ${lane.i} skipped — ${why}.`));
     }
     console.log("");
@@ -371,7 +385,7 @@ export async function runFanIn(o) {
 
   if (landable.length === 0) {
     console.log(c.gray("  Nothing to land. Do some work in a lane, commit it, then re-run fan-in."));
-    return 0;
+    return { exitCode: 0, report: makeReport(null) };
   }
 
   // ---- 2. MERGE-TRAIN -----------------------------------------------------
@@ -411,16 +425,35 @@ export async function runFanIn(o) {
   if (o.apply && train && train.preflight) {
     // A preflight stopped the apply before anything could land. Even if there
     // were zero lanes, signalling success here would let `&& deploy` proceed.
-    return 1;
+    return { exitCode: 1, report: makeReport(train) };
   }
   if (o.apply && train && train.postTrainDirty) {
     // Unexpected tracked changes remained after the train (see the STOP report).
     // The landed lanes are safe, but the tree is not clean — automation must not
     // proceed to a deploy that would ship un-reviewed working-tree state.
-    return 1;
+    return { exitCode: 1, report: makeReport(train) };
   }
   const unresolved = landable.filter((l) => l.outcome === "conflict" || l.outcome === "quarantined").length;
-  return unresolved > 0 ? 1 : 0;
+  return { exitCode: unresolved > 0 ? 1 : 0, report: makeReport(train) };
+}
+
+/** One lane's entry in the structured report — a stable, machine-readable shape. */
+function laneReport(l) {
+  return {
+    lane: l.i,
+    branch: l.branch || null,
+    dir: l.dir,
+    ahead: l.ahead ?? 0,
+    colliding: !!l.colliding,
+    files: l.files ?? [],
+    outcome: l.outcome || "skipped",
+    detail: l.detail || "",
+    ...(l.conflictFiles && l.conflictFiles.length ? { conflictFiles: l.conflictFiles } : {}),
+    ...(l.gateFails && l.gateFails.length
+      ? { gateFails: l.gateFails.map((f) => ({ label: f.label, detail: f.detail })) }
+      : {}),
+    ...(l.installError ? { installError: l.installError } : {}),
+  };
 }
 
 // getAdvantage's OWN generated artifacts — the portable brain + the agent-

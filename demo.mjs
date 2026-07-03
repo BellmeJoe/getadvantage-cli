@@ -159,7 +159,7 @@ export async function runDemo(o = {}) {
 
     console.log(c.cyan("  Now landing for real (--apply):"));
     console.log(c.gray("  " + "─".repeat(56)));
-    const code = await runFanIn({ cwd: repo, apply: true, build: true });
+    const { exitCode: code } = await runFanIn({ cwd: repo, apply: true, build: true });
 
     console.log(c.bold("  That's the whole wow:"));
     console.log("     " + c.gray("• the collision map flagged README.md (lanes 1 + 3),"));

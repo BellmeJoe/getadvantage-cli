@@ -75,6 +75,32 @@ function header() {
   console.log(c.bold("└──────────────────────────────────────────┘"));
 }
 
+// ---------------------------------------------------------------------------
+// --json plumbing — the platform bridge payload.
+// ---------------------------------------------------------------------------
+// With --json, stdout carries EXACTLY ONE JSON document (stable schema:
+// { command, verdict, exitCode, lanes?/checks?, generatedAt }) so CI and the
+// platform can parse it. The human rendering is NOT suppressed — it is routed
+// wholesale to stderr (same information, other channel), which also keeps
+// progress visible in a terminal. console.error already targets stderr.
+function routeHumanOutputToStderr() {
+  const origWrite = process.stdout.write.bind(process.stdout);
+  console.log = (...args) =>
+    process.stderr.write(args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") + "\n");
+  // Progress lines (e.g. fan-in's "gating the combined tree…") write to stdout
+  // directly — reroute those too.
+  process.stdout.write = (chunk, ...rest) => process.stderr.write(chunk, ...rest);
+  return () => {
+    process.stdout.write = origWrite;
+  };
+}
+
+/** Print the single JSON document to the REAL stdout (restoring it first). */
+function emitJson(restoreStdout, doc) {
+  restoreStdout();
+  process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
+}
+
 function printHelp() {
   header();
   console.log(`
@@ -122,6 +148,9 @@ ${c.bold("Flags")}
   --base-ref <ref>        Merge-base ref for the schema-bump diff (default: main).
   --no-overview           Skip the read-only overview maps (API surface, integrations, schedules).
   --no-brief-check        Skip the (non-blocking) brief-staleness warning in ${c.cyan("check")}.
+  --json                  (${c.cyan("check")} + ${c.cyan("fan-in")}) Print ONE machine-readable JSON document to stdout
+                          — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
+                          human rendering routed to stderr. For CI and tooling.
 
   ${c.dim("brief only:")}
   --out <path>            Where to write the brief (default: PROJECT-BRIEF.md at repo root).
@@ -185,8 +214,9 @@ async function main() {
   }
 
   if (cmd === "check") {
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
-    const { exitCode } = await runChecks({
+    const { exitCode, results } = await runChecks({
       cwd,
       runBuild: !!flags.build,
       baseRef: flags["base-ref"],
@@ -195,6 +225,20 @@ async function main() {
       // Brief-staleness warning is default-on; `--no-brief-check` turns it off.
       briefCheck: !flags["no-brief-check"],
     });
+    if (restore) {
+      emitJson(restore, {
+        command: "check",
+        verdict: exitCode === 0 ? "GO" : "NO-GO",
+        exitCode,
+        checks: results.map((r) => ({
+          status: r.status,
+          label: r.label,
+          detail: r.detail,
+          extra: r.extra || [],
+        })),
+        generatedAt: new Date().toISOString(),
+      });
+    }
     process.exit(exitCode);
   }
 
@@ -249,19 +293,32 @@ async function main() {
   }
 
   if (cmd === "fan-in" || cmd === "fanin") {
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
-    process.exit(
-      await runFanIn({
-        cwd,
-        apply: !!flags.apply,
-        // `--no-build` skips the (slower) full build in the combined-tree gate;
-        // default is to build, since a textual merge can break the build even
-        // when each lane typechecks alone.
-        build: !flags["no-build"],
-        baseRef: flags["base-ref"],
-        into: flags.into,
-      }),
-    );
+    const { exitCode, report } = await runFanIn({
+      cwd,
+      apply: !!flags.apply,
+      // `--no-build` skips the (slower) full build in the combined-tree gate;
+      // default is to build, since a textual merge can break the build even
+      // when each lane typechecks alone.
+      build: !flags["no-build"],
+      baseRef: flags["base-ref"],
+      into: flags.into,
+    });
+    if (restore) {
+      emitJson(restore, {
+        command: "fan-in",
+        verdict: exitCode === 0 ? "GO" : "NO-GO",
+        exitCode,
+        mode: report.mode,
+        into: report.into,
+        ...(report.preflight ? { preflight: report.preflight } : {}),
+        ...(report.postTrainDirty ? { postTrainDirty: true } : {}),
+        lanes: report.lanes,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+    process.exit(exitCode);
   }
 
   if (cmd === "demo") {
