@@ -22,6 +22,9 @@
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
 //  13. --report connector           — opt-in POST matches the ingest contract
 //                                     (hermetic mock server); nothing sent without it
+//  14. architecture scanner         — oversized + duplicated files flagged with the
+//                                     right signals; a small repo stays quiet; the
+//                                     check advisory never changes the verdict
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -633,6 +636,108 @@ scenario("--report: opt-in POST matches the ingest contract; nothing sent withou
     assert.ok(!q.body.includes("hello from sample"), "source code must never be sent");
   } finally {
     server.close();
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 14. architecture scanner — accretion flagged; small repo quiet; advisory inert
+// ---------------------------------------------------------------------------
+scenario("architecture: oversized + duplicated flagged; small repo quiet; check advisory never gates", () => {
+  const base = freshBase();
+  try {
+    // ---- an ACCRETED repo --------------------------------------------------
+    const repo = scaffold(base);
+
+    // (a) OVERSIZED: 1900 unique, meaningful lines — flag tier (>1800) — with
+    //     churn: committed once, then grown twice (changed in 3 commits).
+    const bigLines = [];
+    for (let i = 0; i < 1900; i++) bigLines.push(`export const value${i} = compute(${i}) + offsets[${i % 7}];`);
+    write(repo, "big.js", bigLines.join("\n") + "\n");
+    commitAll(repo, "feat: big module");
+    write(repo, "big.js", bigLines.join("\n") + "\nexport const tail1 = 1;\n");
+    commitAll(repo, "feat: grow big module");
+    write(repo, "big.js", bigLines.join("\n") + "\nexport const tail2 = 2;\n");
+    commitAll(repo, "feat: grow big module again");
+
+    // (b) DUPLICATION: one 18-line meaningful block, 3 occurrences across 2
+    //     files (once in dup-a.js, twice in dup-b.js) — >= 3, the threshold.
+    const block = [];
+    for (let i = 0; i < 18; i++) block.push(`const rendered${i} = renderRow(items[${i}], formatPrice(prices[${i}], currency), locale);`);
+    write(repo, "dup-a.js", [...block, "const onlyInA = finalizeA(rendered0);"].join("\n") + "\n");
+    write(
+      repo,
+      "dup-b.js",
+      [
+        "const openingUniqueToB = prepare(context);",
+        ...block,
+        "const fillerOne = betweenCopies(1);",
+        "const fillerTwo = betweenCopies(2);",
+        "const fillerThree = betweenCopies(3);",
+        ...block,
+        "const closingUniqueToB = finalizeB(rendered0);",
+      ].join("\n") + "\n",
+    );
+    commitAll(repo, "feat: duplicated renderers");
+
+    const r = run(["architecture", "--json"], repo);
+    assert.equal(r.code, 0, `architecture is ADVISORY — must exit 0\n${r.stderr}`);
+    const doc = parseJson(r);
+    assert.equal(doc.command, "architecture");
+    assert.equal(doc.exitCode, 0);
+    assert.ok(typeof doc.generatedAt === "string" && doc.generatedAt.includes("T"));
+    assert.ok(doc.summary.oversized.flag >= 1, JSON.stringify(doc.summary));
+    assert.ok(doc.summary.duplicateBlocks >= 3, `expected >=3 merged duplicate blocks, got ${doc.summary.duplicateBlocks}`);
+    assert.equal(doc.summary.band, "severe");
+
+    // big.js: the TOP candidate, with the size + churn signals spelled out.
+    assert.ok(doc.candidates.length >= 3, JSON.stringify(doc.candidates.map((x) => x.file)));
+    assert.equal(doc.candidates[0].file, "big.js", "the big × hot file must rank first");
+    const big = doc.candidates[0];
+    assert.ok(big.lines >= 1900, `lines: ${big.lines}`);
+    assert.equal(big.sizeTier, "flag");
+    assert.equal(big.churn, 3, `big.js was committed 3 times, churn: ${big.churn}`);
+    assert.ok(big.signals.some((s) => /\d{4} lines/.test(s)), JSON.stringify(big.signals));
+    assert.ok(big.signals.some((s) => /changed in 3 of the last \d+ commits/.test(s)), JSON.stringify(big.signals));
+
+    // the duplicated block: flagged in BOTH files, cross-referenced.
+    const dupA = doc.candidates.find((x) => x.file === "dup-a.js");
+    const dupB = doc.candidates.find((x) => x.file === "dup-b.js");
+    assert.ok(dupA && dupA.duplicateBlocks >= 1, `dup-a.js must be flagged: ${JSON.stringify(doc.candidates.map((x) => x.file))}`);
+    assert.ok(dupB && dupB.duplicateBlocks >= 2, `dup-b.js holds TWO copies, got: ${JSON.stringify(dupB)}`);
+    assert.ok(dupA.sharedWith.includes("dup-b.js"), JSON.stringify(dupA.sharedWith));
+    assert.ok(dupA.duplicateRanges.length >= 1 && /^\d+-\d+$/.test(dupA.duplicateRanges[0]));
+
+    // HONESTY: the human report frames this as measurement, and advisory.
+    assert.ok(/measurement/.test(r.stderr), "expected the measurement-not-judgment framing");
+    assert.ok(/never blocks a ship/.test(r.stderr), "expected the advisory framing");
+
+    // `check` on the same repo: the quiet advisory line appears on the human
+    // channel, but the verdict, exit code, and checks array are UNTOUCHED.
+    const rc = run(["check", "--json"], repo);
+    assert.equal(rc.code, 0, `advisory must never flip check's exit code\n${rc.stderr}`);
+    const cdoc = parseJson(rc);
+    assert.equal(cdoc.verdict, "GO");
+    assert.ok(/architecture: \d+ large\/hot file/.test(rc.stderr), `expected the quiet advisory line:\n${rc.stderr}`);
+    assert.ok(!cdoc.checks.some((ch) => /architecture/i.test(ch.label)), "the advisory must NOT be a check result");
+
+    // ---- a small, quiet repo ------------------------------------------------
+    const quiet = path.join(base, "quiet");
+    initRepo(quiet);
+    write(quiet, "package.json", JSON.stringify({ name: "quiet", version: "1.0.0", private: true, type: "module" }, null, 2) + "\n");
+    write(quiet, "app.js", APP_JS);
+    commitAll(quiet, "chore: tiny repo");
+
+    const rq = run(["architecture", "--json"], quiet);
+    assert.equal(rq.code, 0, rq.stderr);
+    const qdoc = parseJson(rq);
+    assert.equal(qdoc.candidates.length, 0, JSON.stringify(qdoc.candidates));
+    assert.equal(qdoc.summary.band, "quiet");
+    // HONESTY: quiet ≠ clean — the report must say the heuristics found
+    // nothing, and must NOT claim the architecture is good.
+    assert.ok(/found nothing to flag/.test(rq.stderr), rq.stderr);
+    assert.ok(/not.*that the architecture is clean/.test(rq.stderr), rq.stderr);
+  } finally {
     cleanup(base);
   }
 });

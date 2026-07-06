@@ -50,6 +50,7 @@ import { runSwitch } from "./switch.mjs";
 import { runModels } from "./models.mjs";
 import { runMcp } from "./mcp.mjs";
 import { runFanOut, runFanIn } from "./fanout.mjs";
+import { runArchitecture } from "./architecture.mjs";
 import { runDemo } from "./demo.mjs";
 import { envReportOn, reportRun, lanesForIngest, ciDefaultBaseRef, runLogin, runLogout } from "./report.mjs";
 import { runGithubAction } from "./action.mjs";
@@ -63,7 +64,7 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       // value-taking flags vs boolean flags
-      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task", "into"]);
+      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task", "into", "top"]);
       if (valueFlags.has(key)) {
         flags[key] = argv[++i];
       } else {
@@ -147,6 +148,11 @@ ${c.bold("Commands")}
   ${c.cyan("demo")}     Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, two
            that collide, one that breaks the build) and run the WHOLE fan-in conductor on it —
            so you can see the entire wow in ONE command, zero setup.
+  ${c.cyan("architecture")}  The ACCRETION scanner — where is the code rotting by being built OVER instead
+           of collapsed? Ranks the top collapse candidates by ${c.bold("size × churn × duplication")}
+           (oversized files, git-churn hotspots, repeated ≥15-line blocks, approximate
+           complexity). Surfaces the signal an AI coding agent is missing; it never
+           refactors and never claims your code is clean. ${c.bold("Advisory — always exits 0.")}
   ${c.cyan("login")}    Connect this machine to your getAdvantage account: store an ${c.bold("adv_live_")} API key
            in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
            GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
@@ -189,6 +195,11 @@ ${c.bold("Flags")}
   --no-build              Skip the full build in the combined-tree gate (typecheck still runs).
   --into <branch>         Integration branch to land lanes into (default: your current branch).
 
+  ${c.dim("architecture only:")}
+  --top <n>               How many collapse candidates to rank (default 10, max 50).
+  --json                  One machine-readable JSON document on stdout:
+                          { command:"architecture", summary, candidates, generatedAt }.
+
   ${c.dim("deploy only:")}
   --expect-prefix <p>     Required deployment-host prefix (default: derived from your linked .vercel project; guard skipped if none).
   --scope <scope>         Vercel team scope, passed through to vercel.
@@ -209,6 +220,8 @@ ${c.bold("Examples")}
   getadvantage fan-in              collision map + merge-train DRY-RUN (preview, nothing merged)
   getadvantage fan-in --apply      actually land the clean+green lanes into main, gated
   getadvantage demo                see the whole safe fan-in conductor on a throwaway repo
+  getadvantage architecture        where is the code accreting? ranked collapse candidates
+  getadvantage architecture --json --top 5   machine-readable, top 5 only
   getadvantage login               store your adv_live_ key for --report (once per machine)
   getadvantage check --ci --report CI gate + post the verdict to your account (what the Action runs)
   getadvantage github-action       write the GitHub Actions workflow for the line above
@@ -395,6 +408,24 @@ async function main() {
     }
     if (restore) emitJson(restore, doc);
     process.exit(finalExit);
+  }
+
+  // `architecture` — the ACCRETION scanner. Read-only + ADVISORY: it surfaces
+  // ranked collapse candidates (size × churn × duplication) and always exits 0
+  // — where the code is rotting is a signal for a human, not a ship gate.
+  if (cmd === "architecture" || cmd === "arch") {
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
+    header();
+    const { exitCode, report } = runArchitecture({ cwd, top: flags.top });
+    const doc = {
+      command: "architecture",
+      exitCode,
+      summary: report.summary,
+      candidates: report.candidates,
+      generatedAt: new Date().toISOString(),
+    };
+    if (restore) emitJson(restore, doc);
+    process.exit(exitCode);
   }
 
   if (cmd === "demo") {

@@ -17,6 +17,7 @@ import {
 } from "./overviews.mjs";
 import { briefStaleness } from "./brief.mjs";
 import { detectProject } from "./detect.mjs";
+import { architectureAdvisory } from "./architecture.mjs";
 
 /**
  * Run every check and print a clean summary.
@@ -81,6 +82,12 @@ export async function runChecks(o) {
 
     results.push(safe(() => overviewSchedules(cwd), "Schedules & jobs map"));
     printResult(results[results.length - 1]);
+
+    // Quiet accretion advisory (size+churn only — the cheap half of the
+    // `architecture` scan). Deliberately NOT a result: it never appears in the
+    // --json checks array and never changes the verdict or exit code.
+    const advisory = architectureAdvisory(cwd);
+    if (advisory) console.log(`  ${c.gray("(" + advisory + ")")}`);
   }
 
   // ---- PROJECT BRAIN staleness (non-blocking) -----------------------------
