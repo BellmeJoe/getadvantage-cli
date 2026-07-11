@@ -17,6 +17,10 @@
 //   7. Bug B regression             — a lane adding a dependency lands, not quarantined
 //   8. plain-Node repo              — `check` gives no false NO-GO
 //   9. own-key secret scan          — adv_live_ (lowercase base36) blocks
+//  9b. tracked .env                 — committed .env BLOCKS by itself; contents scanned too
+//  9c. clean repo / false positives — placeholder DB URL, CSS class, gitignored .env all pass;
+//                                     sk-ant- labeled "Anthropic secret key", not OpenAI
+//  9d. oversized file (>2MB)        — head+tail partial scan finds a trailing secret, discloses it
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
@@ -485,6 +489,122 @@ scenario("secret scan: a committed adv_live_ platform key blocks (NO-GO)", () =>
     assert.ok(secret.extra.join("\n").includes("getAdvantage platform key"));
     // The report must FINGERPRINT, never echo, the token.
     assert.ok(!JSON.stringify(doc).includes(token), "the full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9b. tracked .env — committed .env BLOCKS by itself, whatever it contains
+// ---------------------------------------------------------------------------
+scenario("tracked .env: a committed .env blocks (NO-GO), plus its contents are scanned", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    // Assembled at runtime (string concatenation) so this TEST FILE never
+    // trips the scanner itself.
+    const stripeKey = "sk_live_" + "0".repeat(26);
+    write(repo, "package.json", JSON.stringify({ name: "leaky-env", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, ".env", `STRIPE_KEY=${stripeKey}\n`);
+    commitAll(repo, "chore: oops committed .env");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, "a committed .env must be a NO-GO");
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const trackedEnv = doc.checks.find((c) => c.label === "Tracked .env file");
+    assert.ok(trackedEnv && trackedEnv.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(trackedEnv.extra.join("\n").includes(".env"));
+    // The .env's CONTENTS are still scanned (no .env basename skip anymore).
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(secret.extra.join("\n").includes(".env"), "the secret scan must report the .env file by name");
+    assert.ok(!JSON.stringify(doc).includes(stripeKey), "the full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9c. clean repo — zero false positives from docs/CSS; sk-ant labeled correctly
+// ---------------------------------------------------------------------------
+scenario("clean repo: GO with zero false positives (docs URL, CSS class, gitignored .env); sk-ant labeled Anthropic", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    // A doc-shaped DB URL with an obvious placeholder password — must NOT block.
+    write(repo, "SETUP.md", "Connect with `postgres://myuser:mypassword@localhost:5432/mydb`.\n");
+    // A CSS class chain shaped like an OpenAI key but with no digit — must NOT block.
+    write(repo, "styles.css", ".sk-circle-fade-dot-before-anim { animation: fade 1s; }\n");
+    write(repo, "package.json", JSON.stringify({ name: "clean-repo", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, ".gitignore", ".env\n");
+    commitAll(repo, "chore: clean repo");
+    // Local gitignored .env with a real-looking key — must NOT be read or flagged.
+    write(repo, ".env", "STRIPE_KEY=sk_live_" + "1".repeat(26) + "\n");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `expected GO, zero false positives\n${r.stderr}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    assert.ok(doc.checks.every((c) => c.status !== "fail"), JSON.stringify(doc.checks, null, 2));
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "pass", JSON.stringify(secret));
+    const trackedEnv = doc.checks.find((c) => c.label === "Tracked .env file");
+    assert.equal(trackedEnv.status, "pass");
+    assert.ok(/No \.env files tracked by git/.test(trackedEnv.detail));
+
+    // Now prove a REAL Anthropic key IS labeled correctly (assembled at runtime
+    // so this test file never trips the scanner itself), committed in a
+    // separate throwaway repo so the clean-repo assertion above stays proof
+    // of zero false positives.
+    const anthropicKey = ["sk", "ant", "a1b2c3d4e5f6g7h8i9j0k1l2"].join("-");
+    const antRepo = path.join(base, "ant-check");
+    initRepo(antRepo);
+    write(antRepo, "config.js", `export const KEY = "${anthropicKey}";\n`);
+    write(antRepo, "package.json", JSON.stringify({ name: "ant", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(antRepo, "chore: anthropic key committed");
+    const ra = run(["check", "--json"], antRepo);
+    assert.equal(ra.code, 1, "a committed Anthropic key must NO-GO");
+    const adoc = parseJson(ra);
+    const asecret = adoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(asecret.extra.join("\n").includes("Anthropic secret key"), JSON.stringify(asecret));
+    assert.ok(!asecret.extra.join("\n").includes("OpenAI secret key"), "must not double-label as OpenAI");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9d. oversized file (>2MB) — head+tail partial scan, never silently skipped
+// ---------------------------------------------------------------------------
+scenario("oversized file (>2MB): secret at the tail is found via head+tail partial scan, disclosed by name", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    const awsKey = "AKIA" + "0".repeat(16);
+    // 5 MB filler + the secret appended at the very end — the classic silent miss
+    // if a naive scanner skips or truncates oversized files.
+    write(repo, "package.json", JSON.stringify({ name: "big-file-repo", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "big-log.txt", "x".repeat(5 * 1024 * 1024) + `\nAWS_KEY=${awsKey}\n`);
+    commitAll(repo, "chore: oversized file with trailing secret");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, "a secret in the tail of an oversized file must NO-GO");
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(secret.extra.join("\n").includes("big-log.txt"), "the oversized file must be named as the hit");
+    assert.ok(secret.extra.join("\n").includes("AWS access key id"));
+    assert.ok(
+      /oversized file\(s\) >2 MB scanned partially/.test(secret.extra.join("\n")) &&
+        secret.extra.join("\n").includes("big-log.txt"),
+      "the partial-scan note must disclose it scanned partially AND name the file",
+    );
+    assert.ok(!JSON.stringify(doc).includes(awsKey), "the full secret must never be echoed");
   } finally {
     cleanup(base);
   }

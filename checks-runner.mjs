@@ -6,6 +6,7 @@ import { c, GLYPH, printResult, section } from "./util.mjs";
 import {
   checkDirtyTree,
   checkSecrets,
+  checkTrackedEnv,
   checkTypecheck,
   checkBuild,
   checkSchemaBump,
@@ -51,6 +52,10 @@ export async function runChecks(o) {
 
   // b. Secret scan
   results.push(safe(() => checkSecrets(cwd), "Secret scan"));
+  printResult(results[results.length - 1]);
+
+  // b2. Tracked .env file — a committed .env is a leak by itself (BLOCKS).
+  results.push(safe(() => checkTrackedEnv(cwd), "Tracked .env file"));
   printResult(results[results.length - 1]);
 
   // c. Typecheck (only where it applies) + optional full build
@@ -159,6 +164,7 @@ export function gateTree(o) {
   const results = [];
 
   results.push(safe(() => checkSecrets(cwd), "Secret scan"));
+  results.push(safe(() => checkTrackedEnv(cwd), "Tracked .env file"));
   results.push(safe(() => checkTypecheck(cwd, project), "Typecheck"));
   if (o.build !== false) {
     results.push(safe(() => checkBuild(cwd, project), "Build"));

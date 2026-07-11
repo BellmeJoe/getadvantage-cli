@@ -7,7 +7,7 @@
 // app/lib/safety.ts) so the gate matches what the project already enforces.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { result, fingerprint, git, gitRaw, gitSafe } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
@@ -67,57 +67,115 @@ export function checkDirtyTree(cwd) {
 // ===========================================================================
 // b. SECRET SCAN
 // ===========================================================================
-// What we scan for: OpenAI sk-, Stripe sk_live_/rk_live_, Stripe webhook whsec_,
-// Vercel vcp_, KV/Redis REST creds, AWS AKIA, GitHub PATs (classic +
-// fine-grained), Google OAuth, Slack, SendGrid, getAdvantage's own platform
-// keys (adv_live_), "Bearer <token>" literals, and private-key blocks.
+// What we scan for: OpenAI, Anthropic, Stripe (live/restricted/webhook), AWS,
+// GitHub (classic + fine-grained), Google OAuth, Slack, SendGrid, npm access
+// tokens, bare JWTs (header-validated), database URLs with embedded passwords,
+// getAdvantage's own platform keys (adv_live_), Vercel tokens, KV/Redis REST
+// credentials, "Bearer <token>" literals, and private-key blocks.
 // A match BLOCKS (✗); we print the file + a masked FINGERPRINT, never the
 // full secret. Binary/lockfiles/node_modules/.git are skipped.
 
+// All patterns carry the /g flag: we matchAll and report the hit COUNT per
+// file, not just the first occurrence.
+// Shared validator: real API keys contain at least one digit; CSS class-name
+// chains ("sk-circle-fade-dot-before-anim") and prose practically never do.
+const hasDigit = (tok) => /[0-9]/.test(tok);
+
 const SECRET_PATTERNS = [
-  // --- common provider key formats ---
-  { id: "openai", label: "OpenAI secret key", re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/ },
-  { id: "stripe-live", label: "Stripe live secret key", re: /\bsk_live_[A-Za-z0-9]{20,}/ },
-  { id: "stripe-restricted", label: "Stripe restricted key", re: /\brk_live_[A-Za-z0-9]{20,}/ },
-  { id: "aws", label: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/ },
-  { id: "github-pat", label: "GitHub personal access token", re: /\bghp_[A-Za-z0-9]{36}\b/ },
-  { id: "github-fine", label: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/ },
-  { id: "google-oauth", label: "Google OAuth secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/ },
-  { id: "slack", label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
-  { id: "private-key", label: "Private key block", re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },
-  { id: "sendgrid", label: "SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/ },
+  // --- from app/lib/safety.ts ---
+  // Anthropic BEFORE OpenAI: `sk-ant-…` also matches the broader sk- shape, so
+  // the specific pattern must claim it first (and openai's validator skips it).
+  { id: "anthropic", label: "Anthropic secret key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g, validate: hasDigit },
+  {
+    id: "openai",
+    label: "OpenAI secret key",
+    re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
+    // Digit required (kills CSS-class false positives); sk-ant- is Anthropic's.
+    validate: (tok) => hasDigit(tok) && !tok.startsWith("sk-ant-"),
+  },
+  { id: "stripe-live", label: "Stripe live secret key", re: /\bsk_live_[A-Za-z0-9]{20,}/g },
+  { id: "stripe-restricted", label: "Stripe restricted key", re: /\brk_live_[A-Za-z0-9]{20,}/g },
+  { id: "aws", label: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/g },
+  { id: "github-pat", label: "GitHub personal access token", re: /\bghp_[A-Za-z0-9]{36}\b/g },
+  { id: "github-fine", label: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g },
+  { id: "google-oauth", label: "Google OAuth secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/g },
+  { id: "slack", label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  { id: "private-key", label: "Private key block", re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/g },
+  { id: "sendgrid", label: "SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g },
+  // --- from CLAUDE.md hard-rule #2 (the pre-commit scan literals) ---
+  { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /\bwhsec_[A-Za-z0-9]{20,}/g },
+  { id: "vercel-token", label: "Vercel token (vcp_)", re: /\bvcp_[A-Za-z0-9]{20,}/g },
+  { id: "kv-rest", label: "KV/Redis REST credential", re: /\bKV_REST_API_(?:URL|TOKEN|READ_ONLY_TOKEN)\s*=\s*\S+/g },
   // getAdvantage's OWN platform key format: adv_live_ + lowercase base36. A
   // dedicated pattern because the generic Bearer heuristic below requires MIXED
   // case + a digit and would miss an all-lowercase token like this one.
-  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /\badv_live_[a-z0-9]{16,}\b/ },
-  // --- deploy / CI secrets ---
-  { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /\bwhsec_[A-Za-z0-9]{20,}/ },
-  { id: "vercel-token", label: "Vercel token (vcp_)", re: /\bvcp_[A-Za-z0-9]{20,}/ },
-  { id: "kv-rest", label: "KV/Redis REST credential", re: /\bKV_REST_API_(?:URL|TOKEN|READ_ONLY_TOKEN)\s*=\s*\S+/ },
-  // "Bearer <token>" literal — a common tell for a leaked credential. We capture
-  // the token and only flag it if it LOOKS like a real
+  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /\badv_live_[a-z0-9]{16,}\b/g },
+  // --- coverage additions (v0.6.0) ---
+  // npm access/automation token (the `.npmrc _authToken=npm_…` leak).
+  { id: "npm-token", label: "npm access token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  // Bare JWT (three base64url segments, no "Bearer" prefix needed). To keep
+  // false positives near zero we only flag it if the FIRST segment decodes to
+  // a JSON object with an `alg` or `typ` field — i.e. a real JWT header.
+  {
+    id: "jwt",
+    label: "JSON Web Token (JWT)",
+    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    validate: (tok) => {
+      try {
+        const header = JSON.parse(Buffer.from(tok.split(".")[0], "base64url").toString("utf8"));
+        return typeof header === "object" && header !== null && ("alg" in header || "typ" in header);
+      } catch {
+        return false;
+      }
+    },
+  },
+  // Database URL with an embedded password (postgres://user:PASS@host).
+  // The validator runs on the captured password + host and skips (a) obvious
+  // placeholder / interpolated passwords ("mypassword", "changeme3", …) and
+  // (b) ANY URL whose host is a local dev target (localhost, 127.0.0.1,
+  // 0.0.0.0, ::1, host.docker.internal) — a dev URL is not a production leak.
+  // So docs + examples never trip a NO-GO, while a real credential still does.
+  {
+    id: "db-url-password",
+    label: "Database URL with embedded password",
+    re: /\bpostgres(?:ql)?:\/\/[^\s:/@'"]+:([^@\s'"]{8,})@([^\s'"/]+)/g,
+    validate: (pw, m) => {
+      if (/[<>{}$%]/.test(pw)) return false;
+      if (/^(?:pass(?:word)?|passwd|secret|example|changeme|test|postgres|admin|root|1234(?:5678?9?)?|x{4,}|\*{4,})$/i.test(pw)) return false;
+      // Placeholder passwords: my/your/… + pass(word)/passwd/pwd/secret/changeme (+digits).
+      if (/^(?:my|your|db|dummy|sample|local|test|example|demo)?(?:pass(?:word)?|passwd|pwd|secret|changeme)\d*$/i.test(pw)) return false;
+      // Local/dev hosts are never a production leak.
+      const host = String(m?.[2] ?? "").replace(/:\d+$/, "").toLowerCase();
+      if (["localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"].includes(host)) return false;
+      return true;
+    },
+  },
+  // "Bearer <token>" literal. The CLAUDE.md pre-commit scan lists "Bearer " as a
+  // tell. We capture the token and only flag it if it LOOKS like a real
   // credential (mixed case + a digit, ≥20 chars) — so legitimate test fixtures
   // and placeholders like `Bearer test_cron_secret...` or `Bearer ${token}`
   // don't trip a false NO-GO. The `validate` predicate runs on the captured group.
   {
     id: "bearer",
     label: "Bearer auth token literal",
-    re: /\bBearer\s+([A-Za-z0-9_\-.]{20,})/,
+    re: /\bBearer\s+([A-Za-z0-9_\-.]{20,})/g,
     validate: (tok) => /[a-z]/.test(tok) && /[A-Z]/.test(tok) && /[0-9]/.test(tok),
   },
 ];
 
-// Files we never scan (binary-ish, generated, vendored, or the env files that
-// are gitignored by design and legitimately hold secrets locally).
+// Files we never scan (binary-ish, generated, vendored).
+//
+// ⚠ Deliberately NOT skipped anymore: .env* files. A gitignored .env never
+// reaches filesToScan() in the first place (git ls-files honours .gitignore),
+// so a basename skip here could only ever suppress the DANGEROUS case — a
+// tracked/committed .env, which is exactly the classic vibe-coder leak.
+// That was a real hole in ≤0.5.0; fixed in 0.6.0 (plus the dedicated
+// tracked-.env check below).
 const SKIP_DIR = new Set([".git", "node_modules", ".next", ".vercel", ".data", "dist", "build", "coverage"]);
 const SKIP_BASENAME = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
-  ".env",
-  ".env.local",
-  ".env.development.local",
-  ".env.production.local",
 ]);
 const SKIP_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".pdf",
@@ -125,13 +183,30 @@ const SKIP_EXT = new Set([
   ".lock", ".map",
 ]);
 
-const MAX_FILE_BYTES = 2_000_000; // skip very large files (same cap as safety.ts corpus)
+const MAX_FILE_BYTES = 2_000_000; // full-scan cap (same cap as safety.ts corpus)
+const PARTIAL_CHUNK_BYTES = 262_144; // oversized files: scan first + last 256 KB
 
 /** Heuristic: does this buffer look binary? (null byte in the first 4KB) */
 function looksBinary(buf) {
   const n = Math.min(buf.length, 4096);
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
   return false;
+}
+
+/** Read the first and last PARTIAL_CHUNK_BYTES of an oversized file without
+ *  loading the whole thing. Returns { head, tail } buffers (tail may be null
+ *  if reading it fails). Read-only. */
+function readHeadTail(abs, size) {
+  const fd = openSync(abs, "r");
+  try {
+    const head = Buffer.alloc(PARTIAL_CHUNK_BYTES);
+    const hn = readSync(fd, head, 0, PARTIAL_CHUNK_BYTES, 0);
+    const tail = Buffer.alloc(PARTIAL_CHUNK_BYTES);
+    const tn = readSync(fd, tail, 0, PARTIAL_CHUNK_BYTES, Math.max(0, size - PARTIAL_CHUNK_BYTES));
+    return { head: head.subarray(0, hn), tail: tail.subarray(0, tn) };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Files to scan: tracked + staged + (added) untracked-but-not-ignored, deduped.
@@ -148,7 +223,11 @@ function filesToScan(cwd) {
 
 export function checkSecrets(cwd) {
   const files = filesToScan(cwd);
-  const hits = []; // { file, label, fp }
+  // (file,label) → { fp, count } so repeated hits are COUNTED, not dropped.
+  const hits = new Map();
+  let scanned = 0;
+  let partial = 0; // oversized files scanned head+tail only
+  const partialFiles = []; // relative paths of those files (named in the note)
 
   for (const rel of files) {
     const base = path.basename(rel);
@@ -159,50 +238,130 @@ export function checkSecrets(cwd) {
     if (rel.split(/[\\/]/).some((seg) => SKIP_DIR.has(seg))) continue;
 
     const abs = path.join(cwd, rel);
-    let buf;
+    let text;
+    let isPartial = false;
     try {
       const st = statSync(abs);
-      if (!st.isFile() || st.size > MAX_FILE_BYTES) continue;
-      buf = readFileSync(abs);
+      if (!st.isFile()) continue;
+      if (st.size > MAX_FILE_BYTES) {
+        // Oversized: NEVER skip silently. Scan the first + last 256 KB and
+        // say so in the summary — a secret appended to a giant file is a
+        // classic miss.
+        const { head, tail } = readHeadTail(abs, st.size);
+        if (looksBinary(head)) continue;
+        text = `${head.toString("utf8")}\n${tail.toString("utf8")}`;
+        isPartial = true;
+      } else {
+        const buf = readFileSync(abs);
+        if (looksBinary(buf)) continue;
+        text = buf.toString("utf8");
+      }
     } catch {
       continue; // unreadable / deleted-but-staged etc.
     }
-    if (looksBinary(buf)) continue;
-    const text = buf.toString("utf8");
+    scanned++;
+    if (isPartial) {
+      partial++;
+      partialFiles.push(rel);
+    }
 
     for (const p of SECRET_PATTERNS) {
-      const m = text.match(p.re);
-      if (!m) continue;
-      // If the pattern has a capture group + validator (e.g. Bearer), apply the
-      // validator to the captured token so test fixtures/placeholders don't trip.
-      const token = m[1] ?? m[0];
-      if (p.validate && !p.validate(token)) continue;
-      hits.push({ file: rel, label: p.label, fp: fingerprint(token) });
+      for (const m of text.matchAll(p.re)) {
+        // If the pattern has a capture group + validator (e.g. Bearer, JWT,
+        // DB URL), apply the validator to the captured token so test
+        // fixtures/placeholders don't trip. The full match array is passed
+        // too, for validators that need more context (e.g. the DB-URL host).
+        const token = m[1] ?? m[0];
+        if (p.validate && !p.validate(token, m)) continue;
+        const k = `${rel}::${p.label}`;
+        const prev = hits.get(k);
+        if (prev) prev.count++;
+        else hits.set(k, { file: rel, label: p.label, fp: fingerprint(m[0]), count: 1 });
+      }
     }
   }
 
-  if (hits.length === 0) {
+  const partialNames =
+    partialFiles.slice(0, 5).join(", ") + (partial > 5 ? `, …and ${partial - 5} more` : "");
+  const partialNote =
+    partial > 0
+      ? [`${partial} oversized file(s) >2 MB scanned partially (first + last 256 KB each; scanned partially: ${partialNames}) — move giant blobs out of git for a full scan.`]
+      : [];
+
+  if (hits.size === 0) {
     return result(
       "pass",
       "Secret scan",
-      `Scanned ${files.length} tracked/staged file(s) — no leaked-secret patterns matched.`,
+      `Scanned ${scanned} tracked/staged file(s) — no leaked-secret patterns matched.`,
+      partialNote,
     );
   }
 
-  // De-dupe identical (file,label) pairs for a tidy report.
-  const seen = new Set();
-  const lines = [];
-  for (const h of hits) {
-    const k = `${h.file}::${h.label}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    lines.push(`${h.file} → ${h.label}: ${h.fp}`);
-  }
+  const lines = [...hits.values()].map(
+    (h) => `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}`,
+  );
   return result(
     "fail",
     "Secret scan",
     `${lines.length} possible secret(s) in committed/staged files — remove + rotate before shipping.`,
-    lines.slice(0, 30),
+    [...lines.slice(0, 30), ...partialNote],
+  );
+}
+
+// ===========================================================================
+// b2. TRACKED .ENV FILE
+// ===========================================================================
+// A committed .env is a leak BY ITSELF, whatever it contains — git history
+// keeps every value it ever held, and every clone gets a copy. This is the
+// single most common vibe-coder leak (Lovable/Bolt/v0 templates read from
+// .env, the first `git add .` commits it). BLOCK on any tracked .env*;
+// WARN if a local .env exists but is not gitignored (one `git add .` away).
+// Template files (.env.example / .sample / .template / .dist) are fine —
+// their CONTENTS are still covered by the secret scan above.
+
+const ENV_TEMPLATE_SUFFIX = /\.(?:example|sample|template|dist)$/i;
+
+function isRealEnvFile(basename) {
+  if (ENV_TEMPLATE_SUFFIX.test(basename)) return false;
+  return basename === ".env" || basename.startsWith(".env.");
+}
+
+export function checkTrackedEnv(cwd) {
+  const tracked = gitSafe(["ls-files"], { cwd })
+    .split("\n")
+    .filter(Boolean)
+    .filter((f) => isRealEnvFile(path.basename(f)));
+
+  if (tracked.length > 0) {
+    return result(
+      "fail",
+      "Tracked .env file",
+      `${tracked.length} .env file(s) tracked by git — a committed .env is a leak by itself, whatever it contains.`,
+      [
+        ...tracked.slice(0, 10),
+        "Remove it from git (git rm --cached <file>), add it to .gitignore, and ROTATE every key that file ever held — git history keeps old values.",
+      ],
+    );
+  }
+
+  const untrackedEnv = gitSafe(["ls-files", "--others", "--exclude-standard"], { cwd })
+    .split("\n")
+    .filter(Boolean)
+    .filter((f) => isRealEnvFile(path.basename(f)));
+
+  if (untrackedEnv.length > 0) {
+    return result(
+      "warn",
+      "Tracked .env file",
+      `${untrackedEnv.length} local .env file(s) are NOT gitignored — one 'git add .' away from committing your keys.`,
+      [...untrackedEnv.slice(0, 10), "Add them to .gitignore so they can never be committed."],
+    );
+  }
+
+  return result(
+    "pass",
+    "Tracked .env file",
+    "No .env files tracked by git (gitignored local .env files are fine and are never read).",
   );
 }
 

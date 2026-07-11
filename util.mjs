@@ -74,9 +74,14 @@ export function gitSafe(args, opts = {}) {
   }
 }
 
-/** Repo root (absolute). */
+/** Repo root (absolute). Suppresses git's own stderr noise — the caller
+ *  prints ONE clean "not a git repository" line instead. */
 export function repoRoot(cwd = process.cwd()) {
-  return git(["rev-parse", "--show-toplevel"], { cwd });
+  return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf8",
+    cwd,
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
 }
 
 /** Mask a matched secret to a recognisable fingerprint — NEVER echo the full

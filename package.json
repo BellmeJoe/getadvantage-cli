@@ -1,6 +1,6 @@
 {
   "name": "getadvantage",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "The getAdvantage CLI — a local, dependency-free pre-deploy gate + portable project brain for AI-built apps. Plain-language GO / NO-GO, a repo-resident PROJECT-BRIEF.md any model reads first, and a session handoff so you can switch models or tools without re-explaining your project.",
   "type": "module",
   "bin": {

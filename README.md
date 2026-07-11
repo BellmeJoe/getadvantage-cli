@@ -5,8 +5,9 @@ built with AI — Claude Code, Cursor, Lovable, Bolt, v0, Replit, and friends.
 
 Run it in your repo. It reads your project and gives you:
 
-- **A plain-language GO / NO-GO before you deploy** — no secrets in code, a clean
-  working tree, build + typecheck, a schema-version check.
+- **A plain-language GO / NO-GO before you deploy** — no secrets in code, no
+  committed `.env`, a clean working tree, build + typecheck, a schema-version
+  check.
 - **A portable project brain** (`PROJECT-BRIEF.md`) — a one-page, model-agnostic
   memory of your project that *any* model, session, or tool reads first, so you
   never re-explain it.
@@ -81,6 +82,26 @@ whichever reads better to you.
 | `getadvantage login` / `logout` | Store (or remove) your `adv_live_` API key in `~/.getadvantage/config.json` — per-user, owner-only file, never inside a repo. Used by `--report`; the `GETADVANTAGE_API_KEY` env var always wins over the stored key. The key is never printed back. |
 | `getadvantage github-action` | Write `.github/workflows/getadvantage.yml`: run `getadvantage check --ci --report` on every push + pull request (reporting uses the `GETADVANTAGE_API_KEY` repo secret). Idempotent — it never clobbers a differing existing file without `--force`. Alias: `init --github-action`. |
 | `ship-safe deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
+
+## The gate (what `check` actually does)
+
+| Check | Verdict | Detail |
+|---|---|---|
+| Dirty-tree guard | **BLOCKS** | Tracked files modified/staged would ship with `vercel --prod`. Untracked-only files warn instead. |
+| Secret scan | **BLOCKS** | Leaked-secret patterns over every tracked + staged file: OpenAI, Anthropic, Stripe (live/restricted/webhook), AWS, GitHub (classic + fine-grained), Google OAuth, Slack, SendGrid, npm tokens, bare JWTs, database URLs with embedded passwords, Vercel tokens, KV/REST credentials, private-key blocks, Bearer literals, and getAdvantage's own platform keys (`adv_live_`). Hits are reported as **masked fingerprints with a per-file count**; the full value is never printed. Files over 2 MB are scanned partially (first + last 256 KB), the partial scan is disclosed and the partially scanned files are named, never silent. |
+| Tracked .env file | **BLOCKS** | A committed `.env` is a leak by itself, whatever it contains, because git history keeps every value. Local `.env` files that are *not* gitignored warn instead. Gitignored `.env` files are never read. Templates (`.env.example` etc.) are fine. |
+| Typecheck | **BLOCKS** | `tsc --noEmit`, only when the project actually has a `tsconfig.json` plus a local TypeScript dependency (project-aware, via the same detection `fan-in`'s combined-tree gate uses). Plain-JS projects get an honest skip, not a fake failure. |
+| Build | **BLOCKS** | Runs the project's own `build` script, only with `--build` and only if one exists. |
+| Schema-bump check | **WARNS** | DDL changed without a `SCHEMA_VERSION` bump (skipped honestly if the project doesn't carry that convention). |
+| Overview maps | **WARNS** | Read-only maps of your API surface, integrations, and schedules. Informational, never blocking. |
+
+- The database-URL pattern deliberately ignores placeholder passwords
+  (`mypassword`, `changeme`, …) and URLs pointing at local dev hosts
+  (`localhost`, `127.0.0.1`, `0.0.0.0`, `::1`, `host.docker.internal`) — so a
+  real production credential that happens to use one of those shapes would not
+  be flagged.
+- A pattern scan can miss a secret that matches no known shape, and the middle
+  of files over 2 MB is not scanned (only the first + last 256 KB).
 
 ## Use it as an MCP server (call the brain mid-session)
 
@@ -247,5 +268,27 @@ reporting degrades to a warning. Exit codes stay CI-honest: `0` = GO, non-zero
   run report — the `--json` document (verdict, exit code, check results / lane
   outcomes) plus repo name, branch and commit id — to your getAdvantage account.
   It **never** sends your source code, your diffs, or your files.
+
+It also ships its own proof: `npm test` runs an integration suite (including a
+self-test that plants leaks in a throwaway fixture repo — a committed `.env`,
+an oversized file with a trailing key, docs/CSS false-positive bait — and
+asserts the gate catches every real leak while staying quiet on the rest).
+
+### 0.6.0: secret-scan hardening
+
+- **Committed `.env` files are no longer skipped by the secret scan.** Earlier
+  versions skipped `.env*` basenames on the theory that they're gitignored.
+  But gitignored files never reach the scanner anyway, so the skip only ever
+  suppressed the dangerous case. Fixed, plus a dedicated **tracked-.env check**
+  that blocks a committed `.env` outright (and warns if a local one isn't
+  gitignored yet).
+- **Oversized files (>2 MB) are no longer skipped silently.** The first and
+  last 256 KB are scanned and the partial scan is disclosed in the output,
+  naming the files it applies to.
+- **New patterns:** Anthropic keys (checked before the broader OpenAI shape so
+  `sk-ant-…` is never mislabeled), npm access tokens, bare JWTs
+  (header-validated to avoid false positives), and database URLs with
+  embedded passwords (placeholder passwords and local dev hosts are ignored).
+- **All occurrences are counted** per file, not just the first match.
 
 Requires **Node ≥ 18**. Built by [getAdvantage](https://getadvantage.app).
