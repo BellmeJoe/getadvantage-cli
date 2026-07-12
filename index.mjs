@@ -37,8 +37,9 @@
 //                                       [--commit <ref>] [--token-env VERCEL_TOKEN]
 //                                       [--build] [--force]
 
-import { c } from "./util.mjs";
+import { c, printResult, section } from "./util.mjs";
 import { repoRoot } from "./util.mjs";
+import { overviewApiSurface, overviewIntegrations, overviewSchedules } from "./overviews.mjs";
 import { runChecks } from "./checks-runner.mjs";
 import { deploy } from "./deploy.mjs";
 import { runBrief } from "./brief.mjs";
@@ -113,6 +114,10 @@ function printHelp() {
   header();
   console.log(`
 ${c.bold("Commands")}
+  ${c.cyan("ship")}     The full gate, including the production build: is this safe to ship?
+           Exits 0 on GO, 1 on NO-GO. Same as ${c.bold("check --build")} — the name you remember.
+  ${c.cyan("map")}      A read-only map of what your app has: API surface (what is gated, what
+           mutates), agents & integrations, schedules & jobs. Orientation, never a verdict.
   ${c.cyan("check")}    Run all read-only pre-deploy checks (default). Exits 0 on GO, 1 on NO-GO.
   ${c.cyan("brief")}    Generate / refresh the PROJECT BRAIN — a portable, repo-resident project
            brief (default ${c.bold("PROJECT-BRIEF.md")}) that ANY model/session/tool reads on start,
@@ -230,7 +235,15 @@ ${c.bold("Examples")}
 }
 
 async function main() {
-  const { cmd, arg, flags } = parseArgs(process.argv.slice(2));
+  let { cmd, arg, flags } = parseArgs(process.argv.slice(2));
+
+  // Alias: `ship` = the full gate INCLUDING the production build. The name is
+  // the promise — a bare `check` without --build has not proven the build, so
+  // the command people remember runs the whole thing.
+  if (cmd === "ship") {
+    cmd = "check";
+    flags.build = true;
+  }
 
   if (cmd === "help" || flags.help) {
     printHelp();
@@ -272,6 +285,29 @@ async function main() {
   // step).
   const reportWanted = !!flags.report || !!flags["report-required"] || envReportOn();
   const reportRequired = !!flags["report-required"];
+
+  // `map` — the read-only overview scanners on their own: API surface,
+  // agents & integrations, schedules & jobs. Never blocks, never writes;
+  // exit 0 always (a map is orientation, not a verdict).
+  if (cmd === "map") {
+    header();
+    section("Map — what your app has (read-only)");
+    for (const [fn, label] of [
+      [overviewApiSurface, "API surface map"],
+      [overviewIntegrations, "Agents & integrations map"],
+      [overviewSchedules, "Schedules & jobs map"],
+    ]) {
+      try {
+        printResult(fn(cwd));
+      } catch (e) {
+        printResult({ status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] });
+      }
+    }
+    console.log(
+      `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan("npx getadvantage ship")} ${c.dim("for the gate.")}`,
+    );
+    process.exit(0);
+  }
 
   if (cmd === "check") {
     const restore = flags.json ? routeHumanOutputToStderr() : null;

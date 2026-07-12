@@ -66,6 +66,8 @@ whichever reads better to you.
 
 | Command | What it does |
 |---|---|
+| `getadvantage ship` | The full gate, including the production build: is this safe to ship? Exit `0` on **GO**, `1` on **NO-GO**. Same as `check --build` — the name you remember. |
+| `getadvantage map` | A read-only map of what your app has: API surface (what is gated, what mutates), agents & integrations, schedules & jobs. Orientation, never a verdict — always exits `0`. |
 | `ship-safe` (default `check`) | Read-only pre-deploy checks → exit `0` on **GO**, `1` on **NO-GO**. Add `--build` for a full build. |
 | `ship-safe brief` | Generate / refresh `PROJECT-BRIEF.md` — the **COLD** layer (what the project *is*). `--check` warns if it's stale; it never blocks. |
 | `ship-safe handoff` | Refresh the brief **and** write `HANDOFF.md` — the **HOT** layer (where you *left off*). Your notes are preserved across refreshes; it never overwrites a `HANDOFF.md` it didn't create. |
