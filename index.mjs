@@ -251,8 +251,9 @@ ${c.bold("Usage")}
 ${c.bold("Lanes")}
   ${c.cyan("Project estate")}          Top-level modules (dirs + file counts + languages) and
                           dependency highlights — works on ANY stack.
-  ${c.cyan("API surface map")}         Every Next.js App Router route (app/api/**/route.*), its
-                          methods, and whether it looks auth-gated. ${c.bold("Next.js only")} —
+  ${c.cyan("API surface map")}         Route table + methods + whether each looks auth-gated, with a
+                          ${c.bold("⚠")} on a mutating route with no obvious gate. Parses ${c.bold("Next.js")} App
+                          Router, ${c.bold("Express/Fastify")}, and ${c.bold("Flask/FastAPI")} (best-effort regex);
                           other stacks get the estate view and an honest scope note.
   ${c.cyan("Agents & integrations")}   LLM / 3rd-party services detected from DECLARED
                           dependencies (package.json, requirements.txt, pyproject.toml)
@@ -401,9 +402,13 @@ async function main() {
     if (stack) {
       if (stack.nextJs) {
         console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — deep route mapping reads the Next.js App Router directly.`);
+      } else if (stack.kind === "node") {
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — route mapping parses Express/Fastify definitions (best-effort regex).`);
+      } else if (stack.kind === "python") {
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — route mapping parses Flask/FastAPI decorators (best-effort regex).`);
       } else {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. Deep route mapping currently reads Next.js App Router`);
-        console.log(`  ${c.gray("projects; for this stack the map shows the generic estate view.")}`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. Route mapping covers Next.js, Express/Fastify, and Flask/FastAPI;`);
+        console.log(`  ${c.gray("for this stack the map shows the generic estate view.")}`);
       }
     }
 

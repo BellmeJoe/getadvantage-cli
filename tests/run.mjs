@@ -36,11 +36,16 @@
 //                                     check advisory never changes the verdict
 //  15. --version / -v               — prints the package version, exit 0, no gate run
 //  16. unknown gate flags           — `check --bogus-flag` errors with exit 1
-//  17. map on an Express repo       — exit 0, honest scope line, estate view,
-//                                     deps-based integrations (openai) detected
-//  18. map on a Python repo         — Python (Flask) detected; requirements.txt
-//                                     integrations (anthropic) detected
+//  17. map on an Express repo       — Express/Fastify routes PARSED: table with
+//                                     methods, /health auth-gated, POST /api/pay
+//                                     flagged ⚠ (mutates, ungated); estate view +
+//                                     deps-based integrations (openai) intact
+//  18. map on a Flask repo          — Flask routes PARSED: @app.route methods,
+//                                     @login_required gates /submit, POST /pay ⚠;
+//                                     requirements.txt integrations (anthropic)
 //  19. map --help / mcp --help      — command-specific help incl. MCP registration JSON
+//  20. map on a FastAPI repo        — FastAPI @router.get/post parsed; POST /items
+//                                     ⚠ (mutates, ungated), Depends() gates /me
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -986,9 +991,9 @@ scenario("unknown gate flags: `check --bogus-flag` and `ship --wat` error with e
 });
 
 // ---------------------------------------------------------------------------
-// 17. map on an Express repo — honest scope + a genuinely useful estate view
+// 17. map on an Express repo — routes PARSED (methods, gating, ⚠) + estate view
 // ---------------------------------------------------------------------------
-scenario("map on an Express repo: exit 0, honest scope line, estate view, deps-based integrations", () => {
+scenario("map on an Express repo: routes parsed with methods + gating + mutating-ungated ⚠; estate/integrations intact", () => {
   const base = freshBase();
   try {
     const repo = path.join(base, "sample");
@@ -1007,50 +1012,147 @@ scenario("map on an Express repo: exit 0, honest scope line, estate view, deps-b
         2,
       ) + "\n",
     );
-    write(repo, "server.js", "const express = require('express');\nconst app = express();\napp.listen(3000);\n");
+    // /health is auth-gated (requireAuth middleware on the route line);
+    // POST /api/pay MUTATES with no gate → must be flagged ⚠; /users is a plain GET.
+    write(
+      repo,
+      "server.js",
+      [
+        "const express = require('express');",
+        "const app = express();",
+        "const requireAuth = (req, res, next) => next(); // demo auth middleware",
+        "app.get('/health', requireAuth, (req, res) => res.send('ok'));",
+        "app.post('/api/pay', (req, res) => res.json({ paid: true }));",
+        "app.get('/users', (req, res) => res.json([]));",
+        "app.listen(3000);",
+        "",
+      ].join("\n"),
+    );
     write(repo, "lib/util.js", "module.exports = {};\n");
-    write(repo, "routes/health.js", "module.exports = (req, res) => res.send('ok');\n");
     commitAll(repo, "chore: express repo");
 
     const r = run(["map"], repo);
     assert.equal(r.code, 0, r.stderr);
-    // (a) the honest scope statement OPENS the map.
+    // (a) the scope line states the stack IS parsed now (no "estate view" dodge).
     assert.ok(/Detected: Express project/.test(r.stdout), `expected the stack scope line:\n${r.stdout}`);
-    assert.ok(/generic estate view/.test(r.stdout), "the Next.js-only depth must be stated honestly");
-    // (b) the estate view is real: module inventory + dependency highlights.
+    assert.ok(/parses Express\/Fastify/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    // (b) the ROUTE TABLE is real: correct methods + gating tags.
+    assert.ok(/\/health/.test(r.stdout) && /auth-gated/.test(r.stdout), `/health must show auth-gated:\n${r.stdout}`);
+    assert.ok(/\/users/.test(r.stdout) && /public \(read-only\)/.test(r.stdout), `/users must be public read-only:\n${r.stdout}`);
+    // (c) the mutating, ungated POST is FLAGGED with the ⚠ danger line.
+    assert.ok(/\/api\/pay/.test(r.stdout), r.stdout);
+    assert.ok(/mutates but no auth\/session check found/.test(r.stdout), `POST /api/pay must be flagged ⚠:\n${r.stdout}`);
+    // (d) the Next.js-only disclaimer is GONE for this lane.
+    assert.ok(!/App Router routes only/.test(r.stdout), "the parsed lane must drop the Next.js-only disclaimer");
+    // (e) estate view + deps-based integrations still work.
     assert.ok(/Project estate/.test(r.stdout), r.stdout);
     assert.ok(/lib\/ — 1 file/.test(r.stdout), `expected the module inventory:\n${r.stdout}`);
     assert.ok(/Dependencies \(package\.json\): express, openai/.test(r.stdout), r.stdout);
-    // Integrations detected from DECLARED DEPS (no app/ source on this stack).
     assert.ok(/OpenAI \(SDK\)/.test(r.stdout), `deps-based integration detection must fire:\n${r.stdout}`);
-    assert.ok(/package\.json \(declared dependency\)/.test(r.stdout) || /OPENAI_API_KEY/.test(r.stdout), r.stdout);
-    // (c) no bare "nothing to map" lines — every empty lane says WHY.
     assert.ok(!/nothing to map/i.test(r.stdout), "bare 'nothing to map' lines are banned");
-    assert.ok(/Next\.js App Router routes only/.test(r.stdout), "the empty API lane must say why");
   } finally {
     cleanup(base);
   }
 });
 
 // ---------------------------------------------------------------------------
-// 18. map on a Python repo — stack detected; requirements.txt integrations read
+// 18. map on a Flask repo — @app.route parsed (methods, @login_required gate, ⚠)
 // ---------------------------------------------------------------------------
-scenario("map on a Python repo: Python (Flask) detected; requirements.txt integrations detected", () => {
+scenario("map on a Flask repo: @app.route parsed with methods; @login_required gates /submit; POST /pay ⚠; integrations intact", () => {
   const base = freshBase();
   try {
     const repo = path.join(base, "sample");
     initRepo(repo);
     write(repo, "requirements.txt", "flask==3.0.0\nanthropic>=0.25\n# a comment\n");
-    write(repo, "app.py", "from flask import Flask\napp = Flask(__name__)\n");
+    write(
+      repo,
+      "app.py",
+      [
+        "from flask import Flask",
+        "app = Flask(__name__)",
+        "",
+        "@app.route('/health')",
+        "def health():",
+        "    return 'ok'",
+        "",
+        "@app.route('/pay', methods=['POST'])",
+        "def pay():",
+        "    return 'paid'",
+        "",
+        "@app.route('/submit', methods=['POST'])",
+        "@login_required",
+        "def submit():",
+        "    return 'done'",
+        "",
+      ].join("\n"),
+    );
     write(repo, "src/models.py", "class Thing: pass\n");
-    commitAll(repo, "chore: python repo");
+    commitAll(repo, "chore: flask repo");
 
     const r = run(["map"], repo);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(/Detected: Python \(Flask\) project/.test(r.stdout), `expected Python stack detection:\n${r.stdout}`);
-    assert.ok(/generic estate view/.test(r.stdout));
+    assert.ok(/parses Flask\/FastAPI/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    // Route table: methods correct; /submit gated by @login_required; POST /pay ⚠.
+    assert.ok(/\/submit/.test(r.stdout) && /auth-gated/.test(r.stdout), `/submit must be auth-gated:\n${r.stdout}`);
+    assert.ok(/\/pay/.test(r.stdout) && /\[POST\]/.test(r.stdout), `/pay must show [POST]:\n${r.stdout}`);
+    assert.ok(/mutates but no auth\/session check found/.test(r.stdout), `POST /pay must be flagged ⚠:\n${r.stdout}`);
+    assert.ok(!/App Router routes only/.test(r.stdout), "the parsed lane must drop the Next.js-only disclaimer");
+    // Integrations from requirements.txt still detected.
     assert.ok(/Anthropic \(SDK\)/.test(r.stdout), `requirements.txt integrations must be detected:\n${r.stdout}`);
     assert.ok(/Dependencies \(Python\): flask, anthropic/.test(r.stdout), r.stdout);
+    assert.ok(!/nothing to map/i.test(r.stdout));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 20. map on a FastAPI repo — @router.get/post parsed; POST /items ⚠; Depends() gate
+// ---------------------------------------------------------------------------
+scenario("map on a FastAPI repo: @router.get/post parsed; POST /items ⚠ (mutates, ungated); Depends() gates /me", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "requirements.txt", "fastapi>=0.110\nuvicorn>=0.29\n");
+    write(
+      repo,
+      "main.py",
+      [
+        "from fastapi import FastAPI, APIRouter, Depends",
+        "app = FastAPI()",
+        "router = APIRouter()",
+        "",
+        "@router.get('/items')",
+        "def list_items():",
+        "    return []",
+        "",
+        "@router.post('/items')",
+        "def create_item(payload: dict):",
+        "    return payload",
+        "",
+        "@app.get('/me')",
+        "def me(user=Depends(get_current_user)):",
+        "    return user",
+        "",
+        "app.include_router(router)",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: fastapi repo");
+
+    const r = run(["map"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(/Detected: Python \(FastAPI\) project/.test(r.stdout), `expected FastAPI stack detection:\n${r.stdout}`);
+    assert.ok(/parses Flask\/FastAPI/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    // GET + POST on /items both parsed; POST is the mutating, ungated ⚠.
+    assert.ok(/\/items/.test(r.stdout) && /\[POST\]/.test(r.stdout) && /\[GET\]/.test(r.stdout), `both /items verbs must appear:\n${r.stdout}`);
+    assert.ok(/mutates but no auth\/session check found/.test(r.stdout), `POST /items must be flagged ⚠:\n${r.stdout}`);
+    // /me is gated by a FastAPI Depends(get_current_user) dependency.
+    assert.ok(/\/me/.test(r.stdout) && /auth-gated/.test(r.stdout), `/me must be auth-gated via Depends():\n${r.stdout}`);
+    assert.ok(/Dependencies \(Python\): fastapi, uvicorn/.test(r.stdout), r.stdout);
+    assert.ok(!/App Router routes only/.test(r.stdout), "the parsed lane must drop the Next.js-only disclaimer");
     assert.ok(!/nothing to map/i.test(r.stdout));
   } finally {
     cleanup(base);

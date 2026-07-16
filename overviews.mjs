@@ -202,6 +202,287 @@ export function apiRowTag(r) {
   return "public (read-only)";
 }
 
+// ===========================================================================
+// CROSS-STACK ROUTE PARSING — Express / Fastify (node) and Flask / FastAPI
+// (python). The Next.js lane above reads the App Router file tree; these two
+// read SOURCE and pull out route registrations with best-effort regex (no code
+// is executed). Both return the SAME row shape as scanApiSurface so the map +
+// brief render every stack identically:
+//   { url, methods:string[], mutates, sessionGated, secretGated, devOnly }
+// `secretGated`/`devOnly` are Next-only concepts (a CRON secret gate / a
+// prod-404 dev route) and stay false here — honest, not invented.
+// ===========================================================================
+
+// Directory segments the route lanes never parse (vendored, generated, tests,
+// examples, virtualenvs). walkFiles already skips node_modules/.next/dist/build
+// /coverage/.turbo; this adds the test + example + python-env dirs a route scan
+// must also ignore so a fixture/test route never lands on the real map.
+const ROUTE_SKIP_SEGMENTS = new Set([
+  "node_modules", "dist", "build", ".next", ".vercel", ".data", "coverage", ".turbo", ".git",
+  "test", "tests", "__tests__", "__mocks__", "spec", "examples", "example", "fixtures",
+  "venv", ".venv", "env", ".env", "site-packages", "__pycache__",
+]);
+
+/** True if any path segment of `rel` is a dir we must not parse routes from. */
+function underSkippedDir(rel) {
+  return rel.split("/").some((seg) => ROUTE_SKIP_SEGMENTS.has(seg));
+}
+
+/** A forward window of source starting at `from`, capped at `max` chars and cut
+ *  at the first `;` — enough to see a route's middleware list / verb chain but
+ *  not bleed into the NEXT statement (which would falsely gate a public route
+ *  from a gated neighbour). Middlewares precede the handler body, so cutting at
+ *  the statement terminator still captures them. */
+function argWindow(text, from, max = 300) {
+  let w = text.slice(from, from + max);
+  const semi = w.indexOf(";");
+  return semi === -1 ? w : w.slice(0, semi);
+}
+
+// ---- Express / Fastify (node) ---------------------------------------------
+
+// Auth/middleware tokens that mark an Express/Fastify route as gated. Only the
+// well-known names an agent actually emits — a match in the route's OWN argument
+// window is what tags it; we never guess "gated" without one (default public).
+const EXPRESS_AUTH_TOKENS = [
+  /\brequireAuth\b/, /\bauthenticate\b/, /\bensureLoggedIn\b/, /\bpassport\b/,
+  /\bisAuthenticated\b/, /\bverifyToken\b/, /\brequireUser\b/,
+];
+
+/** Does a route's argument window reference an auth middleware? */
+function expressGated(win) {
+  return EXPRESS_AUTH_TOKENS.some((re) => re.test(win));
+}
+
+/**
+ * Parse Express / Fastify route registrations across the repo's JS/TS source.
+ * Detects the shapes an AI agent emits:
+ *   app.get("/x", …) · router.post("/y", …) · fastify.delete("/z", …)
+ *   app.route("/x").get(…).post(…)                (Express verb chains)
+ *   fastify.route({ method: "POST", url: "/x" })  (Fastify object form)
+ * Only single/double-quoted paths starting with "/" are taken as literal routes
+ * (so cache.get("key") / params.get("q") never masquerade as endpoints);
+ * non-literal (variable / template) router paths are counted in `dynamicCount`.
+ * @returns {{ rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind }}
+ */
+export function scanExpressRoutes(cwd) {
+  const files = walkFiles(cwd, (abs) => /\.(?:js|mjs|cjs|ts)$/.test(abs))
+    .filter((abs) => !underSkippedDir(relPath(abs, cwd)))
+    .sort();
+
+  const seen = new Map(); // "url|methods" -> row (dedupe identical registrations)
+  let dynamicCount = 0;
+
+  const pushRow = (url, methods, win) => {
+    const mset = methods.length ? methods : ["—"];
+    const key = url + "|" + mset.join(",");
+    if (seen.has(key)) return;
+    const mutates = mset.some((m) => MUTATING.has(m) || m === "ALL");
+    seen.set(key, {
+      url,
+      methods: mset,
+      mutates,
+      sessionGated: expressGated(win),
+      secretGated: false,
+      devOnly: false,
+    });
+  };
+
+  for (const abs of files) {
+    const raw = readText(abs);
+    if (!raw) continue;
+    const text = stripComments(raw);
+    let m;
+
+    // (1) shorthand verb calls: <ident>.get("/path", …). Path must start "/".
+    const verbRe = /\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|options|head|all)\s*\(\s*(['"])(\/[^'"]*)\3/g;
+    while ((m = verbRe.exec(text)) !== null) {
+      const method = m[2].toUpperCase();
+      const url = m[4];
+      const win = argWindow(text, m.index + m[0].length);
+      pushRow(url, [method], win);
+    }
+
+    // (2) router-like verb calls with a NON-literal path → dynamic tally only
+    //     (variable / template-literal / concatenated paths we can't resolve).
+    const dynRe = /\b(?:app|router|fastify|server|api|route|_?router|v\d+|[A-Za-z_$][\w$]*[Rr]outer)\.(?:get|post|put|patch|delete|options|head|all)\s*\(\s*(?!['"])/g;
+    while ((m = dynRe.exec(text)) !== null) dynamicCount++;
+
+    // (3) Express verb chains: <ident>.route("/path").get(…).post(…)
+    const chainRe = /\.route\s*\(\s*(['"])(\/[^'"]*)\1\s*\)/g;
+    while ((m = chainRe.exec(text)) !== null) {
+      const url = m[2];
+      const win = argWindow(text, m.index + m[0].length, 400);
+      const methods = [];
+      const vm = /\.(get|post|put|patch|delete|options|head|all)\s*\(/g;
+      let v;
+      while ((v = vm.exec(win)) !== null) {
+        const mm = v[1].toUpperCase();
+        if (!methods.includes(mm)) methods.push(mm);
+      }
+      pushRow(url, methods, win);
+    }
+
+    // (4) Fastify object form: fastify.route({ method: "POST", url: "/path" })
+    const objRe = /\.route\s*\(\s*\{/g;
+    while ((m = objRe.exec(text)) !== null) {
+      const win = text.slice(m.index, m.index + 400);
+      const urlM = win.match(/\burl\s*:\s*(['"])(\/[^'"]*)\1/);
+      if (!urlM) continue;
+      const url = urlM[2];
+      const methods = [];
+      const arr = win.match(/\bmethod\s*:\s*\[([^\]]*)\]/);
+      const single = win.match(/\bmethod\s*:\s*(['"])([A-Za-z]+)\1/);
+      if (arr) {
+        for (const mm of arr[1].matchAll(/['"]([A-Za-z]+)['"]/g)) methods.push(mm[1].toUpperCase());
+      } else if (single) {
+        methods.push(single[2].toUpperCase());
+      }
+      pushRow(url, methods, win);
+    }
+  }
+
+  const rows = [...seen.values()].sort(
+    (a, b) => a.url.localeCompare(b.url) || a.methods.join().localeCompare(b.methods.join()),
+  );
+  const gatedCount = rows.filter((r) => r.sessionGated || r.secretGated).length;
+  const mutatingCount = rows.filter((r) => r.mutates).length;
+  const dangerous = rows.filter((r) => r.mutates && !r.sessionGated && !r.secretGated && !r.devOnly);
+  return { rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind: "node" };
+}
+
+// ---- Flask / FastAPI (python) ---------------------------------------------
+
+// Auth tokens that mark a Python route as gated — a decorator on the route
+// (@login_required / @jwt_required) or a FastAPI dependency in the handler
+// signature (Depends(get_current_user) / Depends(require_…)).
+const PY_AUTH_TOKENS = [
+  /\blogin_required\b/,
+  /\bjwt_required\b/,
+  /Depends\(\s*get_current_user/,
+  /Depends\(\s*require_/,
+];
+
+/**
+ * The auth-relevant window for a Python route decorator: its OWN decorator
+ * stack (adjacent `@…` lines above and below the route decorator) plus the
+ * following `def …(…):` signature (where a FastAPI `Depends(…)` lives). Bounded
+ * to this one route — a naive char window bleeds a neighbour's gate across
+ * tightly-packed routes and would falsely gate the public ones (and suppress
+ * the ⚠ a mutating ungated route must show).
+ */
+function pyGated(text, idx) {
+  const lines = text.split("\n");
+  // Which line does `idx` fall on?
+  let acc = 0;
+  let li = 0;
+  for (; li < lines.length; li++) {
+    if (acc + lines[li].length + 1 > idx) break;
+    acc += lines[li].length + 1;
+  }
+  const win = [];
+  // Backward: stacked decorators immediately ABOVE this route decorator.
+  for (let i = li - 1; i >= 0 && i >= li - 5; i--) {
+    if (lines[i].trimStart().startsWith("@")) win.push(lines[i]);
+    else break;
+  }
+  // Forward from the route decorator: more stacked decorators, then the `def`
+  // signature (which may span lines). Stop once the signature's `:` is reached.
+  let seenDef = false;
+  for (let i = li; i < lines.length && i <= li + 8; i++) {
+    win.push(lines[i]);
+    if (/^\s*def\b/.test(lines[i])) seenDef = true;
+    if (seenDef && /:\s*$/.test(lines[i])) break;
+  }
+  const text2 = win.join("\n");
+  return PY_AUTH_TOKENS.some((re) => re.test(text2));
+}
+
+/** Blank out fully-commented (`# …`) lines while preserving line structure, so a
+ *  commented-out decorator never counts as a real route (mirrors stripComments
+ *  for JS). Best-effort: an inline `#` after code is left alone (route
+ *  decorators live on their own line, so this is safe). */
+function stripPyComments(text) {
+  return text
+    .split("\n")
+    .map((line) => (line.trimStart().startsWith("#") ? "" : line))
+    .join("\n");
+}
+
+/**
+ * Parse Flask / FastAPI route decorators across the repo's Python source.
+ *   Flask:   @app.route("/path", methods=["POST"]) · @bp.route("/x")  (GET default)
+ *   FastAPI: @app.get("/path") · @router.post("/path")  (verb = method)
+ * @returns {{ rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind }}
+ */
+export function scanPythonRoutes(cwd) {
+  const files = walkFiles(cwd, (abs) => /\.py$/.test(abs))
+    .filter((abs) => !underSkippedDir(relPath(abs, cwd)))
+    .sort();
+
+  const seen = new Map();
+  let dynamicCount = 0;
+
+  const pushRow = (url, methods, gated) => {
+    const mset = methods.length ? methods : ["GET"]; // Flask default is GET
+    const key = url + "|" + mset.join(",");
+    if (seen.has(key)) return;
+    const mutates = mset.some((mm) => MUTATING.has(mm));
+    seen.set(key, { url, methods: mset, mutates, sessionGated: gated, secretGated: false, devOnly: false });
+  };
+
+  for (const abs of files) {
+    const raw = readText(abs);
+    if (!raw) continue;
+    const text = stripPyComments(raw);
+    let m;
+
+    // (1) Flask: @app.route("/path", methods=[...]) / @bp.route("/path")
+    const routeRe = /@\s*[A-Za-z_]\w*\.route\s*\(\s*(['"])([^'"]+)\1([^)]*)\)/g;
+    while ((m = routeRe.exec(text)) !== null) {
+      const url = m[2];
+      const methods = [];
+      const mm = (m[3] || "").match(/methods\s*=\s*\[([^\]]*)\]/);
+      if (mm) for (const t of mm[1].matchAll(/['"]([A-Za-z]+)['"]/g)) methods.push(t[1].toUpperCase());
+      pushRow(url, methods, pyGated(text, m.index));
+    }
+
+    // (2) FastAPI / APIRouter: @app.get("/path") / @router.post("/path")
+    const verbRe = /@\s*[A-Za-z_]\w*\.(get|post|put|patch|delete|options|head)\s*\(\s*(['"])([^'"]+)\2/g;
+    while ((m = verbRe.exec(text)) !== null) {
+      pushRow(m[3], [m[1].toUpperCase()], pyGated(text, m.index));
+    }
+
+    // (3) non-literal decorator paths → dynamic tally.
+    const dynRe = /@\s*[A-Za-z_]\w*\.(?:route|get|post|put|patch|delete|options|head)\s*\(\s*(?!['"])/g;
+    while ((m = dynRe.exec(text)) !== null) dynamicCount++;
+  }
+
+  const rows = [...seen.values()].sort(
+    (a, b) => a.url.localeCompare(b.url) || a.methods.join().localeCompare(b.methods.join()),
+  );
+  const gatedCount = rows.filter((r) => r.sessionGated || r.secretGated).length;
+  const mutatingCount = rows.filter((r) => r.mutates).length;
+  const dangerous = rows.filter((r) => r.mutates && !r.sessionGated && !r.secretGated && !r.devOnly);
+  return { rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind: "python" };
+}
+
+/**
+ * Stack-aware route scan for the MAP lane. Dispatches to the parser that fits
+ * the detected stack. An unsupported stack (go/rust/ruby/generic) returns an
+ * empty result so the lane can print an honest "not parsed yet" note. When no
+ * stack is supplied (the `check`/`ship` overview path) it DEFAULTS to the
+ * Next.js scan, so that gate's behaviour is byte-for-byte unchanged.
+ * @returns {{ rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind }}
+ */
+export function scanRoutes(cwd, stack = null) {
+  const kind = (stack && stack.kind) || "next";
+  if (kind === "next") return { ...scanApiSurface(cwd), dynamicCount: 0, stackKind: "next" };
+  if (kind === "node") return scanExpressRoutes(cwd);
+  if (kind === "python") return scanPythonRoutes(cwd);
+  return { rows: [], gatedCount: 0, mutatingCount: 0, dangerous: [], dynamicCount: 0, stackKind: kind };
+}
+
 /**
  * Scan integrations → label → { files:Set, keys:Set }, plus client-secret hits
  * and whether an MCP server route was found. Detection is TWO-SOURCE:
@@ -329,18 +610,36 @@ export function scheduleRowTag(r) {
 // must authenticate itself. We therefore judge each /api route by its own
 // body. (A route under /app/* would be proxy-gated; we note that too.)
 
+/** The empty-lane message, honest per detected stack. Next keeps its exact
+ *  historical wording (the `check`/`ship` gate calls this with no stack, so its
+ *  message must never drift). Parseable non-Next stacks name themselves; only a
+ *  genuinely unsupported stack keeps the "aren't parsed yet" disclaimer. */
+function emptyRouteDetail(kind, stack, dynamicCount) {
+  const dyn =
+    dynamicCount > 0
+      ? ` (${dynamicCount} route${dynamicCount === 1 ? "" : "s"} with computed paths not shown)`
+      : "";
+  if (kind === "next") {
+    return "No Next.js App Router routes (app/api/**/route.*) found — this lane reads Next.js App Router route files only.";
+  }
+  if (kind === "node") {
+    return `No Express/Fastify routes found${dyn} — this lane parses app/router/fastify route definitions; none matched in ${stack ? stack.label : "this project"}.`;
+  }
+  if (kind === "python") {
+    return `No Flask/FastAPI routes found${dyn} — this lane parses @app/@router route decorators; none matched in ${stack ? stack.label : "this project"}.`;
+  }
+  const what = stack ? stack.label.replace(/ project$/, "") : "this stack";
+  return `No routes parsed — ${what} routes aren't parsed yet (this lane parses Next.js, Express/Fastify, and Flask/FastAPI).`;
+}
+
 export function overviewApiSurface(cwd, stack = null) {
-  const { rows, gatedCount, mutatingCount, dangerous } = scanApiSurface(cwd);
+  const scan = scanRoutes(cwd, stack);
+  const { rows, gatedCount, mutatingCount, dangerous } = scan;
+  const kind = scan.stackKind;
+  const dynamicCount = scan.dynamicCount || 0;
+
   if (rows.length === 0) {
-    const why =
-      stack && !stack.nextJs
-        ? ` — this lane reads Next.js App Router routes only; ${stack.label.replace(/ project$/, "")} routes aren't parsed yet.`
-        : " — this lane reads Next.js App Router route files only.";
-    return result(
-      "pass",
-      "API surface map",
-      `No Next.js App Router routes (app/api/**/route.*) found${why}`,
-    );
+    return result("pass", "API surface map", emptyRouteDetail(kind, stack, dynamicCount));
   }
 
   // Build the listing (capped so a big app stays readable).
@@ -351,6 +650,9 @@ export function overviewApiSurface(cwd, stack = null) {
     lines.push(`${r.url}  [${methodStr}]  ${apiRowTag(r)}`);
   }
   if (rows.length > CAP) lines.push(`…and ${rows.length - CAP} more route(s)`);
+  if (dynamicCount > 0) {
+    lines.push(`(${dynamicCount} route${dynamicCount === 1 ? "" : "s"} with computed paths not shown)`);
+  }
 
   const detail =
     `${rows.length} route(s) · ${gatedCount} look gated (session or cron secret) · ` +
