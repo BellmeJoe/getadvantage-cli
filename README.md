@@ -1,5 +1,8 @@
 # getadvantage
 
+[![npm version](https://img.shields.io/npm/v/getadvantage)](https://www.npmjs.com/package/getadvantage)
+[![npm downloads](https://img.shields.io/npm/dm/getadvantage)](https://www.npmjs.com/package/getadvantage)
+
 A local, dependency-free **pre-deploy gate + portable project brain** for apps
 built with AI — Claude Code, Cursor, Lovable, Bolt, v0, Replit, and friends.
 
