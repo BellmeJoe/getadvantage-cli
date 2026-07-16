@@ -24,8 +24,9 @@
 // own (the v1 safety checks own the NO-GO).
 
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
-import { result, walkFiles, readText, relPath } from "./util.mjs";
+import { existsSync, readdirSync } from "node:fs";
+import { result, walkFiles, readText, relPath, readJsonFile } from "./util.mjs";
+import { detectProject, pythonDeclaredDeps } from "./detect.mjs";
 
 // ===========================================================================
 // shared helpers
@@ -203,7 +204,11 @@ export function apiRowTag(r) {
 
 /**
  * Scan integrations → label → { files:Set, keys:Set }, plus client-secret hits
- * and whether an MCP server route was found.
+ * and whether an MCP server route was found. Detection is TWO-SOURCE:
+ *   1. DECLARED DEPENDENCIES — package.json (all dep fields) + requirements.txt /
+ *      pyproject.toml — so an Express/Flask/plain repo's OpenAI SDK still shows
+ *      up even though there is no app/ source to scan.
+ *   2. app/ SOURCE — host strings + SDK imports (the Next.js-deep scan).
  * @returns {{ integrations: Map, clientSecretHits: Array<{file,key}>, mcpRouteFound: boolean }}
  */
 export function scanIntegrations(cwd) {
@@ -211,9 +216,7 @@ export function scanIntegrations(cwd) {
   const integrations = new Map(); // label -> { files:Set, keys:Set }
   const clientSecretHits = [];
   let mcpRouteFound = false;
-  if (!existsSync(appDir)) return { integrations, clientSecretHits, mcpRouteFound };
 
-  const files = walkFiles(appDir, (abs) => /\.(ts|tsx|js|mjs)$/.test(abs));
   function note(label, keys, file) {
     if (!integrations.has(label)) integrations.set(label, { files: new Set(), keys: new Set() });
     const e = integrations.get(label);
@@ -221,6 +224,24 @@ export function scanIntegrations(cwd) {
     for (const k of keys) e.keys.add(k);
   }
 
+  // ---- 1. declared dependencies (any stack) --------------------------------
+  const project = detectProject(cwd);
+  for (const d of DEP_INTEGRATIONS_NODE) {
+    const hit = d.dep
+      ? project.deps.has(d.dep)
+      : [...project.deps].some((n) => n.startsWith(d.prefix));
+    if (hit) note(d.label, d.keys, "package.json (declared dependency)");
+  }
+  const pyDeps = pythonDeclaredDeps(cwd);
+  for (const d of DEP_INTEGRATIONS_PY) {
+    let src = null;
+    if (d.dep) src = pyDeps.get(d.dep) || null;
+    else for (const [name, s] of pyDeps) if (name.startsWith(d.prefix)) { src = s; break; }
+    if (src) note(d.label, d.keys, `${src} (declared dependency)`);
+  }
+
+  // ---- 2. app/ source (Next.js-deep) ---------------------------------------
+  const files = existsSync(appDir) ? walkFiles(appDir, (abs) => /\.(ts|tsx|js|mjs)$/.test(abs)) : [];
   for (const abs of files) {
     const text = readText(abs);
     if (!text) continue;
@@ -308,13 +329,17 @@ export function scheduleRowTag(r) {
 // must authenticate itself. We therefore judge each /api route by its own
 // body. (A route under /app/* would be proxy-gated; we note that too.)
 
-export function overviewApiSurface(cwd) {
+export function overviewApiSurface(cwd, stack = null) {
   const { rows, gatedCount, mutatingCount, dangerous } = scanApiSurface(cwd);
   if (rows.length === 0) {
+    const why =
+      stack && !stack.nextJs
+        ? ` — this lane reads Next.js App Router routes only; ${stack.label.replace(/ project$/, "")} routes aren't parsed yet.`
+        : " — this lane reads Next.js App Router route files only.";
     return result(
       "pass",
       "API surface map",
-      "No app/api/**/route files found — nothing to map.",
+      `No Next.js App Router routes (app/api/**/route.*) found${why}`,
     );
   }
 
@@ -388,6 +413,51 @@ const INTEGRATION_SDKS = [
   { re: /from\s+["']mcp-handler["']/, label: "MCP server (mcp-handler)", keys: [] },
 ];
 
+// Declared npm dependency → integration. This is what makes the lane honest on
+// a NON-Next.js repo: an Express app's `openai` dependency is an integration
+// even though there's no app/ source for the deep scan to read.
+const DEP_INTEGRATIONS_NODE = [
+  { dep: "openai", label: "OpenAI (SDK)", keys: ["OPENAI_API_KEY"] },
+  { dep: "@anthropic-ai/sdk", label: "Anthropic (SDK)", keys: ["ANTHROPIC_API_KEY"] },
+  { prefix: "@anthropic-ai/", label: "Anthropic (SDK)", keys: ["ANTHROPIC_API_KEY"] },
+  { dep: "@google/generative-ai", label: "Google Gemini (SDK)", keys: ["GEMINI_API_KEY"] },
+  { dep: "@google/genai", label: "Google Gemini (SDK)", keys: ["GEMINI_API_KEY"] },
+  { dep: "ai", label: "Vercel AI SDK", keys: [] },
+  { dep: "langchain", label: "LangChain", keys: [] },
+  { prefix: "@langchain/", label: "LangChain", keys: [] },
+  { dep: "llamaindex", label: "LlamaIndex", keys: [] },
+  { dep: "groq-sdk", label: "Groq (SDK)", keys: ["GROQ_API_KEY"] },
+  { dep: "@mistralai/mistralai", label: "Mistral (SDK)", keys: ["MISTRAL_API_KEY"] },
+  { dep: "cohere-ai", label: "Cohere (SDK)", keys: ["COHERE_API_KEY"] },
+  { dep: "replicate", label: "Replicate (SDK)", keys: ["REPLICATE_API_TOKEN"] },
+  { dep: "ollama", label: "Ollama (SDK)", keys: [] },
+  { dep: "@modelcontextprotocol/sdk", label: "MCP (SDK)", keys: [] },
+  { dep: "mcp-handler", label: "MCP server (mcp-handler)", keys: [] },
+  { dep: "stripe", label: "Stripe (SDK)", keys: ["STRIPE_SECRET_KEY"] },
+  { dep: "resend", label: "Resend (SDK)", keys: ["RESEND_API_KEY"] },
+  { dep: "@sendgrid/mail", label: "SendGrid (SDK)", keys: ["SENDGRID_API_KEY"] },
+  { dep: "twilio", label: "Twilio (SDK)", keys: ["TWILIO_AUTH_TOKEN"] },
+  { dep: "@supabase/supabase-js", label: "Supabase (SDK)", keys: ["SUPABASE_URL", "SUPABASE_ANON_KEY"] },
+];
+
+// Declared Python dependency (requirements.txt / pyproject.toml) → integration.
+const DEP_INTEGRATIONS_PY = [
+  { dep: "openai", label: "OpenAI (SDK)", keys: ["OPENAI_API_KEY"] },
+  { dep: "anthropic", label: "Anthropic (SDK)", keys: ["ANTHROPIC_API_KEY"] },
+  { dep: "langchain", label: "LangChain", keys: [] },
+  { prefix: "langchain-", label: "LangChain", keys: [] },
+  { dep: "litellm", label: "LiteLLM", keys: [] },
+  { dep: "google-generativeai", label: "Google Gemini (SDK)", keys: ["GEMINI_API_KEY"] },
+  { dep: "google-genai", label: "Google Gemini (SDK)", keys: ["GEMINI_API_KEY"] },
+  { dep: "cohere", label: "Cohere (SDK)", keys: ["COHERE_API_KEY"] },
+  { dep: "mistralai", label: "Mistral (SDK)", keys: ["MISTRAL_API_KEY"] },
+  { dep: "groq", label: "Groq (SDK)", keys: ["GROQ_API_KEY"] },
+  { dep: "llama-index", label: "LlamaIndex", keys: [] },
+  { dep: "mcp", label: "MCP (SDK)", keys: [] },
+  { dep: "stripe", label: "Stripe (SDK)", keys: ["STRIPE_SECRET_KEY"] },
+  { dep: "boto3", label: "AWS (boto3)", keys: ["AWS_ACCESS_KEY_ID"] },
+];
+
 // Env names that hold a SECRET (vs. public config). A match of one of these in
 // a CLIENT-reachable file is the risk we flag. NEXT_PUBLIC_* is deliberately
 // NOT secret (it's compiled into the browser bundle by design).
@@ -402,19 +472,14 @@ function isClientFile(text) {
   return /^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/\s*)*["']use client["']/.test(text.slice(0, 400));
 }
 
-export function overviewIntegrations(cwd) {
-  const appDir = path.join(cwd, "app");
-  if (!existsSync(appDir)) {
-    return result("pass", "Agents & integrations map", "No app/ directory found — nothing to map.");
-  }
-
+export function overviewIntegrations(cwd, stack = null) {
   const { integrations, clientSecretHits, mcpRouteFound } = scanIntegrations(cwd);
 
   if (integrations.size === 0 && clientSecretHits.length === 0) {
     return result(
       "pass",
       "Agents & integrations map",
-      "No external LLM / 3rd-party integrations detected in app/.",
+      "No known LLM / 3rd-party integrations found — none declared in dependencies (package.json / requirements.txt / pyproject.toml) and none detected in app/ source.",
     );
   }
 
@@ -431,7 +496,7 @@ export function overviewIntegrations(cwd) {
     lines.push("MCP server is EXPOSED at /api/mcp — model-callable tools; confirm its auth posture (keyless vs key-scoped).");
   }
 
-  const detail = `${labels.length} integration(s) detected${mcpRouteFound ? " (incl. an MCP server)" : ""}.`;
+  const detail = `${labels.length} integration(s) detected (declared dependencies + app/ source)${mcpRouteFound ? ", incl. an MCP server" : ""}.`;
 
   // Risk flag: secret key reachable from the client bundle.
   if (clientSecretHits.length > 0) {
@@ -472,14 +537,9 @@ export function overviewIntegrations(cwd) {
  *  missing or malformed file. */
 function vercelCrons(cwd) {
   const map = new Map();
-  const file = path.join(cwd, "vercel.json");
-  if (!existsSync(file)) return map;
-  let json;
-  try {
-    json = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    return map;
-  }
+  // BOM-tolerant read (PowerShell default) — see util.readJsonFile.
+  const { json } = readJsonFile(path.join(cwd, "vercel.json"));
+  if (!json) return map;
   const crons = Array.isArray(json?.crons) ? json.crons : [];
   for (const c of crons) {
     if (c && typeof c.path === "string") map.set(c.path, c.schedule || "(no schedule)");
@@ -487,11 +547,15 @@ function vercelCrons(cwd) {
   return map;
 }
 
-export function overviewSchedules(cwd) {
+export function overviewSchedules(cwd, stack = null) {
   const { rows, ungated, orphanRoutes, missing, cronCount } = scanSchedules(cwd);
 
   if (rows.length === 0) {
-    return result("pass", "Schedules & jobs map", "No cron routes or vercel.json crons found.");
+    return result(
+      "pass",
+      "Schedules & jobs map",
+      "No vercel.json crons or app/api/cron/* routes found — this lane reads Vercel cron config only; other schedulers (OS cron, Celery, GitHub Actions schedules) aren't parsed yet.",
+    );
   }
 
   const lines = [];
@@ -533,4 +597,121 @@ export function overviewSchedules(cwd) {
     );
   }
   return result("pass", "Schedules & jobs map", detail, extra);
+}
+
+// ===========================================================================
+// 4. PROJECT ESTATE (the generic map lane — useful on ANY repo)
+// ===========================================================================
+// The deep lanes above are Next.js-specific. This lane is not: a top-level
+// module inventory (dirs + file counts + languages) plus dependency highlights,
+// so `map` on an Express/Flask/Go/plain repo still hands the builder a real
+// orientation instead of three "nothing to map" lines.
+
+const ESTATE_SKIP_DIR = new Set([
+  ".git", "node_modules", ".next", ".vercel", ".data", "dist", "build", "coverage",
+  ".turbo", "__pycache__", ".venv", "venv", "target", "vendor",
+]);
+
+const EXT_LANG = {
+  ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JavaScript",
+  ".ts": "TypeScript", ".tsx": "TypeScript", ".mts": "TypeScript",
+  ".py": "Python", ".go": "Go", ".rs": "Rust", ".rb": "Ruby", ".java": "Java",
+  ".kt": "Kotlin", ".php": "PHP", ".cs": "C#", ".c": "C", ".cpp": "C++", ".h": "C/C++",
+  ".css": "CSS", ".scss": "CSS", ".html": "HTML", ".sql": "SQL",
+  ".sh": "Shell", ".ps1": "PowerShell", ".md": "Markdown", ".yml": "YAML", ".yaml": "YAML",
+};
+
+/** Tally languages for a list of absolute file paths → sorted ["TypeScript (41)", …]. */
+function languageTally(files) {
+  const tally = new Map();
+  for (const abs of files) {
+    const lang = EXT_LANG[path.extname(abs).toLowerCase()];
+    if (lang) tally.set(lang, (tally.get(lang) || 0) + 1);
+  }
+  return [...tally.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/**
+ * Scan the top-level estate → pure data (modules, languages, dependency
+ * highlights). Read-only, best-effort.
+ */
+export function scanEstate(cwd) {
+  let entries = [];
+  try {
+    entries = readdirSync(cwd, { withFileTypes: true });
+  } catch { /* best-effort */ }
+
+  const modules = [];
+  let looseFiles = 0;
+  const allFiles = [];
+  for (const ent of entries) {
+    if (ent.isDirectory()) {
+      if (ESTATE_SKIP_DIR.has(ent.name)) continue;
+      const abs = path.join(cwd, ent.name);
+      const files = walkFiles(abs);
+      if (files.length === 0) continue;
+      allFiles.push(...files);
+      const langs = languageTally(files).slice(0, 2).map(([lang]) => lang);
+      modules.push({ dir: ent.name, files: files.length, langs });
+    } else if (ent.isFile()) {
+      looseFiles++;
+      allFiles.push(path.join(cwd, ent.name));
+    }
+  }
+  modules.sort((a, b) => b.files - a.files);
+
+  // Dependency highlights: declared runtime deps first (they shape the app),
+  // then dev deps; then Python declarations. Names only, capped for readability.
+  const project = detectProject(cwd);
+  const depNames = [];
+  if (project.pkg) {
+    const runtime = project.pkg.dependencies && typeof project.pkg.dependencies === "object"
+      ? Object.keys(project.pkg.dependencies) : [];
+    const dev = project.pkg.devDependencies && typeof project.pkg.devDependencies === "object"
+      ? Object.keys(project.pkg.devDependencies) : [];
+    depNames.push(...runtime, ...dev.filter((d) => !runtime.includes(d)));
+  }
+  const pyDeps = [...pythonDeclaredDeps(cwd).keys()];
+
+  return { modules, looseFiles, languages: languageTally(allFiles), depNames, pyDeps, project };
+}
+
+/** The estate lane, rendered in the runner's result shape. Never warns — it's
+ *  pure orientation. */
+export function overviewEstate(cwd) {
+  const { modules, looseFiles, languages, depNames, pyDeps, project } = scanEstate(cwd);
+
+  const totalFiles = modules.reduce((n, m) => n + m.files, 0) + looseFiles;
+  const topLangs = languages.slice(0, 3).map(([lang, n]) => `${lang} (${n})`);
+  const detail =
+    `${modules.length} top-level module(s) · ${totalFiles} file(s)` +
+    (topLangs.length ? ` · languages: ${topLangs.join(", ")}` : "");
+
+  const lines = [];
+  const CAP = 15;
+  for (const m of modules.slice(0, CAP)) {
+    lines.push(`${m.dir}/ — ${m.files} file(s)${m.langs.length ? ` (${m.langs.join(", ")})` : ""}`);
+  }
+  if (modules.length > CAP) lines.push(`…and ${modules.length - CAP} more top-level dir(s)`);
+  if (looseFiles > 0) lines.push(`(plus ${looseFiles} file(s) at the repo root)`);
+
+  if (depNames.length > 0) {
+    const shown = depNames.slice(0, 12);
+    lines.push(
+      `Dependencies (package.json): ${shown.join(", ")}${depNames.length > shown.length ? ` …and ${depNames.length - shown.length} more` : ""}`,
+    );
+  } else if (project.packageJsonBroken) {
+    lines.push("Dependencies: package.json exists but could not be parsed — fix the JSON to see them here.");
+  }
+  if (pyDeps.length > 0) {
+    const shown = pyDeps.slice(0, 12);
+    lines.push(
+      `Dependencies (Python): ${shown.join(", ")}${pyDeps.length > shown.length ? ` …and ${pyDeps.length - shown.length} more` : ""}`,
+    );
+  }
+  if (depNames.length === 0 && pyDeps.length === 0 && !project.packageJsonBroken) {
+    lines.push("No declared dependencies found (package.json / requirements.txt / pyproject.toml).");
+  }
+
+  return result("pass", "Project estate", detail, lines);
 }

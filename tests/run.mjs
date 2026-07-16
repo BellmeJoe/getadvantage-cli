@@ -15,7 +15,12 @@
 //   5. idempotent re-run            — second --apply is a no-op, exit 0
 //   6. Bug A regression             — post-train dirt must NOT revert landed lanes
 //   7. Bug B regression             — a lane adding a dependency lands, not quarantined
-//   8. plain-Node repo              — `check` gives no false NO-GO
+//   8. plain-Node repo              — `check` gives no false NO-GO; skips are
+//                                     neutral "–" with their own verdict count
+//  8b. BOM'd package.json           — detected as a Node project; build gate RUNS
+//                                     (regression: BOM → "generic repo" → false GO)
+//  8c. broken package.json          — honest ⚠ "could not be parsed", never a
+//                                     ✓ "(no package.json)" skip
 //   9. own-key secret scan          — adv_live_ (lowercase base36) blocks
 //  9b. tracked .env                 — committed .env BLOCKS by itself; contents scanned too
 //  9c. clean repo / false positives — placeholder DB URL, CSS class, gitignored .env all pass;
@@ -29,6 +34,13 @@
 //  14. architecture scanner         — oversized + duplicated files flagged with the
 //                                     right signals; a small repo stays quiet; the
 //                                     check advisory never changes the verdict
+//  15. --version / -v               — prints the package version, exit 0, no gate run
+//  16. unknown gate flags           — `check --bogus-flag` errors with exit 1
+//  17. map on an Express repo       — exit 0, honest scope line, estate view,
+//                                     deps-based integrations (openai) detected
+//  18. map on a Python repo         — Python (Flask) detected; requirements.txt
+//                                     integrations (anthropic) detected
+//  19. map --help / mcp --help      — command-specific help incl. MCP registration JSON
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -460,7 +472,71 @@ scenario("plain-Node repo: `check` gives GO (no false NO-GO from stack-specific 
     assert.ok(Array.isArray(doc.checks) && doc.checks.length > 0);
     assert.ok(doc.checks.every((c) => c.status !== "fail"), JSON.stringify(doc.checks, null, 2));
     const typecheck = doc.checks.find((c) => c.label.startsWith("Typecheck"));
-    assert.ok(typecheck && typecheck.status === "pass" && /Skipped/.test(typecheck.detail));
+    assert.ok(typecheck && typecheck.status === "skip" && /Skipped/.test(typecheck.detail));
+    // Skipped checks are NEUTRAL: their own count in the verdict line (human
+    // channel = stderr under --json), never folded into the ✓ tally.
+    assert.ok(/\d+ skipped/.test(r.stderr), `verdict line must carry a separate skipped count:\n${r.stderr}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 8b. BOM'd package.json — the PowerShell default must not fake a "generic repo"
+// ---------------------------------------------------------------------------
+scenario("BOM'd package.json: detected as a Node project, the build gate RUNS (no false-GO skip)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    const pkg = JSON.stringify(
+      { name: "bom-repo", version: "1.0.0", private: true, type: "module", scripts: { build: "node --check app.js" } },
+      null,
+      2,
+    ) + "\n";
+    // ﻿ = the UTF-8 BOM PowerShell writes by default. Before 0.6.2 this made
+    // JSON.parse fail → "generic repo" → build gate silently skipped → false GO.
+    write(repo, "package.json", "﻿" + pkg);
+    write(repo, "app.js", APP_JS);
+    commitAll(repo, "chore: bom repo");
+
+    const r = run(["check", "--build", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    // The stack detection must see through the BOM…
+    assert.ok(/detected:\s+Node project/.test(r.stderr), `stack detection must see through the BOM:\n${r.stderr}`);
+    // …and the BUILD GATE must actually run, not skip.
+    const build = doc.checks.find((c) => c.label.startsWith("Production build"));
+    assert.ok(
+      build && build.status === "pass",
+      `the build gate must RUN on a BOM'd package.json:\n${JSON.stringify(doc.checks, null, 2)}`,
+    );
+    assert.ok(!(r.stdout + r.stderr).includes("no package.json"), "must never claim there is no package.json");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 8c. broken package.json — honest warning, never "(no package.json)"
+// ---------------------------------------------------------------------------
+scenario("broken package.json: ⚠ 'exists but could not be parsed' — never a ✓ '(no package.json)' skip", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "package.json", "{ this is not json\n");
+    write(repo, "app.js", APP_JS);
+    commitAll(repo, "chore: broken manifest");
+
+    const r = run(["check", "--build", "--json"], repo);
+    assert.equal(r.code, 0, `a broken manifest warns, it doesn't block:\n${r.stderr}`);
+    const doc = parseJson(r);
+    const build = doc.checks.find((c) => c.label === "Build");
+    assert.ok(build && build.status === "warn", JSON.stringify(doc.checks, null, 2));
+    assert.ok(/exists but could not be parsed/.test(build.detail), build.detail);
+    assert.ok(!(r.stdout + r.stderr).includes("(no package.json)"), "must never claim '(no package.json)' when the file exists");
   } finally {
     cleanup(base);
   }
@@ -857,6 +933,146 @@ scenario("architecture: oversized + duplicated flagged; small repo quiet; check 
     // nothing, and must NOT claim the architecture is good.
     assert.ok(/found nothing to flag/.test(rq.stderr), rq.stderr);
     assert.ok(/not.*that the architecture is clean/.test(rq.stderr), rq.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 15. --version / -v — the version, nothing else (it used to run the full gate)
+// ---------------------------------------------------------------------------
+scenario("--version / -v: prints the package version, exit 0, never runs the gate; works outside a repo", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const ownPkg = JSON.parse(readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+    for (const args of [["--version"], ["-v"]]) {
+      const r = run(args, repo);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(r.stdout.trim(), ownPkg.version, `expected just the version for ${args[0]}`);
+      assert.ok(!/Checks|Verdict/.test(r.stdout + r.stderr), `--version must not run the gate:\n${r.stdout}`);
+    }
+    // Version must work OUTSIDE a git repo too (it's not repo-bound).
+    const r2 = run(["--version"], base);
+    assert.equal(r2.code, 0, r2.stderr);
+    assert.equal(r2.stdout.trim(), ownPkg.version);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 16. unknown flags on gate commands — loud error, never a silent exit 0
+// ---------------------------------------------------------------------------
+scenario("unknown gate flags: `check --bogus-flag` and `ship --wat` error with exit 1", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const r = run(["check", "--bogus-flag"], repo);
+    assert.equal(r.code, 1, "an unknown flag on a gate command must exit 1, not silently run");
+    assert.ok(/Unknown flag: --bogus-flag/.test(r.stderr), r.stderr);
+    assert.ok(!/Verdict/.test(r.stdout + r.stderr), "the gate must not run with an unknown flag");
+
+    const r2 = run(["ship", "--wat"], repo);
+    assert.equal(r2.code, 1);
+    assert.ok(/Unknown flag: --wat/.test(r2.stderr), r2.stderr);
+
+    // Known flags still work (guard against over-eager validation).
+    const r3 = run(["check", "--json", "--no-overview"], repo);
+    assert.equal(r3.code, 0, r3.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 17. map on an Express repo — honest scope + a genuinely useful estate view
+// ---------------------------------------------------------------------------
+scenario("map on an Express repo: exit 0, honest scope line, estate view, deps-based integrations", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "express-app",
+          version: "1.0.0",
+          private: true,
+          dependencies: { express: "^4.19.0", openai: "^4.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "server.js", "const express = require('express');\nconst app = express();\napp.listen(3000);\n");
+    write(repo, "lib/util.js", "module.exports = {};\n");
+    write(repo, "routes/health.js", "module.exports = (req, res) => res.send('ok');\n");
+    commitAll(repo, "chore: express repo");
+
+    const r = run(["map"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    // (a) the honest scope statement OPENS the map.
+    assert.ok(/Detected: Express project/.test(r.stdout), `expected the stack scope line:\n${r.stdout}`);
+    assert.ok(/generic estate view/.test(r.stdout), "the Next.js-only depth must be stated honestly");
+    // (b) the estate view is real: module inventory + dependency highlights.
+    assert.ok(/Project estate/.test(r.stdout), r.stdout);
+    assert.ok(/lib\/ — 1 file/.test(r.stdout), `expected the module inventory:\n${r.stdout}`);
+    assert.ok(/Dependencies \(package\.json\): express, openai/.test(r.stdout), r.stdout);
+    // Integrations detected from DECLARED DEPS (no app/ source on this stack).
+    assert.ok(/OpenAI \(SDK\)/.test(r.stdout), `deps-based integration detection must fire:\n${r.stdout}`);
+    assert.ok(/package\.json \(declared dependency\)/.test(r.stdout) || /OPENAI_API_KEY/.test(r.stdout), r.stdout);
+    // (c) no bare "nothing to map" lines — every empty lane says WHY.
+    assert.ok(!/nothing to map/i.test(r.stdout), "bare 'nothing to map' lines are banned");
+    assert.ok(/Next\.js App Router routes only/.test(r.stdout), "the empty API lane must say why");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 18. map on a Python repo — stack detected; requirements.txt integrations read
+// ---------------------------------------------------------------------------
+scenario("map on a Python repo: Python (Flask) detected; requirements.txt integrations detected", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "requirements.txt", "flask==3.0.0\nanthropic>=0.25\n# a comment\n");
+    write(repo, "app.py", "from flask import Flask\napp = Flask(__name__)\n");
+    write(repo, "src/models.py", "class Thing: pass\n");
+    commitAll(repo, "chore: python repo");
+
+    const r = run(["map"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(/Detected: Python \(Flask\) project/.test(r.stdout), `expected Python stack detection:\n${r.stdout}`);
+    assert.ok(/generic estate view/.test(r.stdout));
+    assert.ok(/Anthropic \(SDK\)/.test(r.stdout), `requirements.txt integrations must be detected:\n${r.stdout}`);
+    assert.ok(/Dependencies \(Python\): flask, anthropic/.test(r.stdout), r.stdout);
+    assert.ok(!/nothing to map/i.test(r.stdout));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 19. map --help / mcp --help — command-specific help, not the generic wall
+// ---------------------------------------------------------------------------
+scenario("map --help / mcp --help: command-specific help with lanes / tools / MCP registration JSON", () => {
+  const base = freshBase();
+  try {
+    const r = run(["map", "--help"], base); // help is not repo-bound
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(/Lanes/.test(r.stdout) && /Project estate/.test(r.stdout), `expected the map lanes:\n${r.stdout}`);
+    assert.ok(!/fan-out/.test(r.stdout), "must be the map help, not the generic help wall");
+
+    const r2 = run(["mcp", "--help"], base);
+    assert.equal(r2.code, 0, r2.stderr);
+    assert.ok(/save_handoff/.test(r2.stdout), `expected the tool list:\n${r2.stdout}`);
+    assert.ok(/"mcpServers"/.test(r2.stdout), "must include the exact registration JSON snippet");
+    assert.ok(/claude mcp add getadvantage/.test(r2.stdout), "must include the Claude Code one-liner");
   } finally {
     cleanup(base);
   }

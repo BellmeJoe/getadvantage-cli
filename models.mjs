@@ -9,7 +9,7 @@
 //
 // Node built-ins only. ESM. Read-only (prints; writes nothing).
 
-import { c } from "./util.mjs";
+import { binName, c } from "./util.mjs";
 
 export function runModels() {
   const L = [
@@ -26,7 +26,7 @@ export function runModels() {
     "    Reach for the strongest model you have — the quality gap shows up right here.",
     "",
     `  ${c.cyan("Slow or down?")}           a provider is lagging or offline — switch and keep moving`,
-    "    (ChatGPT, Claude, Gemini, Qwen, …). Run `ship-safe switch` first so the next one",
+    `    (ChatGPT, Claude, Gemini, Qwen, …). Run \`${binName()} switch\` first so the next one`,
     "    starts with your brain instead of a blank slate.",
     "",
     c.gray("  Rule of thumb: try a cheaper model first, escalate when it struggles. Don't get"),

@@ -29,7 +29,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { repoRoot } from "./util.mjs";
+import { readJsonFile, repoRoot } from "./util.mjs";
 import { runBrief, briefStaleness, DEFAULT_OUT } from "./brief.mjs";
 import { runHandoff, DEFAULT_HANDOFF } from "./handoff.mjs";
 import { runChecks } from "./checks-runner.mjs";
@@ -39,12 +39,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROTOCOL_VERSION = "2024-11-05";
 
 function pkgVersion() {
-  try {
-    const pkg = JSON.parse(readFileSync(path.join(__dirname, "package.json"), "utf8"));
-    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+  const { json } = readJsonFile(path.join(__dirname, "package.json"));
+  return json && typeof json.version === "string" ? json.version : "0.0.0";
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +244,9 @@ const TOOL_IMPL = {
   },
 
   gauge(cwd) {
-    const { text } = captureStdout(() => runGauge({ cwd }));
+    // In MCP context the agent has this server's own tools, not a shell — so
+    // the nudge points at save_handoff, never at a CLI command it can't run.
+    const { text } = captureStdout(() => runGauge({ cwd, saveHint: "the save_handoff tool" }));
     return text.trim() || "(no gauge output)";
   },
 };

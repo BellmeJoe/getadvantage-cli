@@ -24,11 +24,11 @@
 //
 // Node built-ins only. ESM. Requires Node >= 18 (global fetch).
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import path from "node:path";
-import { c, gitSafe } from "./util.mjs";
+import { c, gitSafe, readJsonFile } from "./util.mjs";
 
 export const DEFAULT_API_BASE = "https://getadvantage.app";
 
@@ -50,11 +50,8 @@ export function userConfigPath() {
 }
 
 export function readUserConfig() {
-  try {
-    return JSON.parse(readFileSync(userConfigPath(), "utf8")) || {};
-  } catch {
-    return {};
-  }
+  // BOM-tolerant (PowerShell default) — see util.readJsonFile.
+  return readJsonFile(userConfigPath()).json || {};
 }
 
 function writeUserConfig(cfg) {

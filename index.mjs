@@ -37,9 +37,10 @@
 //                                       [--commit <ref>] [--token-env VERCEL_TOKEN]
 //                                       [--build] [--force]
 
-import { c, printResult, section } from "./util.mjs";
+import { binName, c, cliVersion, printResult, section } from "./util.mjs";
 import { repoRoot } from "./util.mjs";
-import { overviewApiSurface, overviewIntegrations, overviewSchedules } from "./overviews.mjs";
+import { detectRepoStack } from "./detect.mjs";
+import { overviewApiSurface, overviewIntegrations, overviewSchedules, overviewEstate } from "./overviews.mjs";
 import { runChecks } from "./checks-runner.mjs";
 import { deploy } from "./deploy.mjs";
 import { runBrief } from "./brief.mjs";
@@ -111,6 +112,7 @@ function emitJson(restoreStdout, doc) {
 }
 
 function printHelp() {
+  const bin = binName();
   header();
   console.log(`
 ${c.bold("Commands")}
@@ -168,6 +170,7 @@ ${c.bold("Commands")}
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
 
 ${c.bold("Flags")}
+  --version / -v          Print the CLI version and exit.
   --build                 Also run the project's ${c.bold("build")} script (default: typecheck only, where it applies).
   --base-ref <ref>        Merge-base ref for the schema-bump diff (default: main).
   --no-overview           Skip the read-only overview maps (API surface, integrations, schedules).
@@ -213,41 +216,137 @@ ${c.bold("Flags")}
   --force                 Deploy even if checks return NO-GO (use with care).
 
 ${c.bold("Examples")}
-  ship-safe                        run the pre-deploy checks (GO / NO-GO)
-  ship-safe brief                  generate / refresh the project brain
-  ship-safe init                   auto-load the brain at every session start
-  ship-safe handoff                save your place for the next session
-  ship-safe switch cursor          move to a new tool/model without losing context
-  ship-safe gauge                  is this session getting heavy?
-  getadvantage mcp                 run the MCP server (an agent calls the brain mid-session)
-  getadvantage fan-out 3           open 3 parallel lanes sharing one brain
-  getadvantage fan-out 3 --task "add a settings page"
-  getadvantage fan-in              collision map + merge-train DRY-RUN (preview, nothing merged)
-  getadvantage fan-in --apply      actually land the clean+green lanes into main, gated
-  getadvantage demo                see the whole safe fan-in conductor on a throwaway repo
-  getadvantage architecture        where is the code accreting? ranked collapse candidates
-  getadvantage architecture --json --top 5   machine-readable, top 5 only
-  getadvantage login               store your adv_live_ key for --report (once per machine)
-  getadvantage check --ci --report CI gate + post the verdict to your account (what the Action runs)
-  getadvantage github-action       write the GitHub Actions workflow for the line above
-  getadvantage deploy --expect-prefix myproject-
+  ${bin}                        run the pre-deploy checks (GO / NO-GO)
+  ${bin} brief                  generate / refresh the project brain
+  ${bin} init                   auto-load the brain at every session start
+  ${bin} handoff                save your place for the next session
+  ${bin} switch cursor          move to a new tool/model without losing context
+  ${bin} gauge                  is this session getting heavy?
+  ${bin} mcp                    run the MCP server (an agent calls the brain mid-session)
+  ${bin} fan-out 3              open 3 parallel lanes sharing one brain
+  ${bin} fan-out 3 --task "add a settings page"
+  ${bin} fan-in                 collision map + merge-train DRY-RUN (preview, nothing merged)
+  ${bin} fan-in --apply         actually land the clean+green lanes into main, gated
+  ${bin} demo                   see the whole safe fan-in conductor on a throwaway repo
+  ${bin} architecture           where is the code accreting? ranked collapse candidates
+  ${bin} architecture --json --top 5   machine-readable, top 5 only
+  ${bin} login                  store your adv_live_ key for --report (once per machine)
+  ${bin} check --ci --report    CI gate + post the verdict to your account (what the Action runs)
+  ${bin} github-action          write the GitHub Actions workflow for the line above
+  ${bin} deploy --expect-prefix myproject-
+`);
+}
+
+/** Command-specific help: `map --help` / `help map`. */
+function printMapHelp() {
+  const bin = binName();
+  header();
+  console.log(`
+${c.bold("map")} — a read-only orientation map of what your app has. Never a verdict,
+never a write; always exits 0.
+
+${c.bold("Usage")}
+  ${bin} map
+
+${c.bold("Lanes")}
+  ${c.cyan("Project estate")}          Top-level modules (dirs + file counts + languages) and
+                          dependency highlights — works on ANY stack.
+  ${c.cyan("API surface map")}         Every Next.js App Router route (app/api/**/route.*), its
+                          methods, and whether it looks auth-gated. ${c.bold("Next.js only")} —
+                          other stacks get the estate view and an honest scope note.
+  ${c.cyan("Agents & integrations")}   LLM / 3rd-party services detected from DECLARED
+                          dependencies (package.json, requirements.txt, pyproject.toml)
+                          plus app/ source, with the env keys behind them.
+  ${c.cyan("Schedules & jobs")}        vercel.json crons + app/api/cron/* routes and whether
+                          each is gated (CRON_SECRET).
+
+A map is orientation, not a gate — run ${c.cyan(`${bin} ship`)} for the GO / NO-GO.
+`);
+}
+
+/** Command-specific help: `mcp --help` / `help mcp`. */
+function printMcpHelp() {
+  const bin = binName();
+  header();
+  console.log(`
+${c.bold("mcp")} — run a dependency-free Model Context Protocol (MCP) server over stdio,
+so an AI agent (Claude Code, Cursor, any MCP client) can call getAdvantage's
+brain + checks MID-session. No API keys, no network — same engine as the CLI.
+
+${c.bold("Usage")}
+  ${bin} mcp
+
+${c.bold("Tools it exposes")}
+  ${c.cyan("get_brief")}       read (or generate) PROJECT-BRIEF.md — the project brain
+  ${c.cyan("refresh_brief")}   regenerate the brief from the current repo
+  ${c.cyan("get_handoff")}     read HANDOFF.md — where work left off
+  ${c.cyan("save_handoff")}    refresh the brief + write HANDOFF.md + a ledger entry
+  ${c.cyan("check")}           the read-only pre-deploy checks → GO / NO-GO
+  ${c.cyan("gauge")}           "is this session getting heavy?" heuristic
+
+${c.bold("Register in Claude Code")} (one command):
+  claude mcp add getadvantage -- npx -y getadvantage mcp
+
+${c.bold("Or by config file")} — .mcp.json at the repo root (Claude Code) or
+.cursor/mcp.json (Cursor):
+  {
+    "mcpServers": {
+      "getadvantage": {
+        "command": "npx",
+        "args": ["-y", "getadvantage", "mcp"]
+      }
+    }
+  }
 `);
 }
 
 async function main() {
   let { cmd, arg, flags } = parseArgs(process.argv.slice(2));
 
+  // --version / -v — print the package version, nothing else. (Before 0.6.2
+  // this silently ran the full check.)
+  if (flags.version || cmd === "-v" || cmd === "version") {
+    console.log(cliVersion());
+    process.exit(0);
+  }
+
   // Alias: `ship` = the full gate INCLUDING the production build. The name is
   // the promise — a bare `check` without --build has not proven the build, so
   // the command people remember runs the whole thing.
+  const invokedAsShip = cmd === "ship";
   if (cmd === "ship") {
     cmd = "check";
     flags.build = true;
   }
 
   if (cmd === "help" || flags.help) {
+    const topic = cmd === "help" ? arg : cmd;
+    if (topic === "map") {
+      printMapHelp();
+      process.exit(0);
+    }
+    if (topic === "mcp") {
+      printMcpHelp();
+      process.exit(0);
+    }
     printHelp();
     process.exit(0);
+  }
+
+  // Gate commands (check / ship) must never silently ignore an unknown flag —
+  // a typo'd `--no-overviews` quietly running the default gate would be a
+  // false sense of coverage. Error loudly, exit 1.
+  if (cmd === "check") {
+    const GATE_FLAGS = new Set([
+      "build", "base-ref", "no-overview", "no-brief-check", "json", "ci",
+      "report", "report-required", "help", "version",
+    ]);
+    const unknown = Object.keys(flags).filter((k) => !GATE_FLAGS.has(k));
+    if (unknown.length > 0) {
+      console.error(c.red(`✗ Unknown flag${unknown.length > 1 ? "s" : ""}: ${unknown.map((f) => `--${f}`).join(", ")}`));
+      console.error(c.gray(`  Run \`${binName()} help\` to see the flags ${invokedAsShip ? "`ship`" : "`check`"} accepts.`));
+      process.exit(1);
+    }
   }
 
   // The MCP server is special: stdout is the JSON-RPC protocol channel, so we must
@@ -286,25 +385,42 @@ async function main() {
   const reportWanted = !!flags.report || !!flags["report-required"] || envReportOn();
   const reportRequired = !!flags["report-required"];
 
-  // `map` — the read-only overview scanners on their own: API surface,
-  // agents & integrations, schedules & jobs. Never blocks, never writes;
-  // exit 0 always (a map is orientation, not a verdict).
+  // `map` — the read-only overview scanners on their own: project estate (any
+  // stack), API surface, agents & integrations, schedules & jobs. Never blocks,
+  // never writes; exit 0 always (a map is orientation, not a verdict). Opens
+  // with an HONEST scope line: the deep route lane reads Next.js App Router
+  // projects only, so any other stack is told what it's getting instead.
   if (cmd === "map") {
     header();
     section("Map — what your app has (read-only)");
+
+    let stack = null;
+    try {
+      stack = detectRepoStack(cwd);
+    } catch { /* best-effort — lanes still run below */ }
+    if (stack) {
+      if (stack.nextJs) {
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — deep route mapping reads the Next.js App Router directly.`);
+      } else {
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. Deep route mapping currently reads Next.js App Router`);
+        console.log(`  ${c.gray("projects; for this stack the map shows the generic estate view.")}`);
+      }
+    }
+
     for (const [fn, label] of [
+      [overviewEstate, "Project estate"],
       [overviewApiSurface, "API surface map"],
       [overviewIntegrations, "Agents & integrations map"],
       [overviewSchedules, "Schedules & jobs map"],
     ]) {
       try {
-        printResult(fn(cwd));
+        printResult(fn(cwd, stack));
       } catch (e) {
         printResult({ status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] });
       }
     }
     console.log(
-      `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan("npx getadvantage ship")} ${c.dim("for the gate.")}`,
+      `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan(`${binName()} ship`)} ${c.dim("for the gate.")}`,
     );
     process.exit(0);
   }

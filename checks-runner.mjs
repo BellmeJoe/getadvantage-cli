@@ -2,7 +2,7 @@
 // verdict. Shared by both `ship-safe check` and `ship-safe deploy` so the gate
 // is identical in both paths.
 
-import { c, GLYPH, printResult, section } from "./util.mjs";
+import { binName, c, GLYPH, printResult, section } from "./util.mjs";
 import {
   checkDirtyTree,
   checkSecrets,
@@ -109,7 +109,7 @@ export async function runChecks(o) {
           status: "warn",
           label: "Project brief",
           detail: s.reason,
-          extra: ["project brief is stale, run `ship-safe brief` to refresh."],
+          extra: [`project brief is stale, run \`${binName()} brief\` to refresh.`],
         };
       }, "Project brief"),
     );
@@ -117,13 +117,19 @@ export async function runChecks(o) {
   }
 
   // ---- Overall verdict ----------------------------------------------------
+  // Skipped (not-applicable) checks are NEUTRAL: they render with a "–" and get
+  // their own count — a skipped build is not a green tick.
   const fails = results.filter((r) => r.status === "fail").length;
   const warns = results.filter((r) => r.status === "warn").length;
   const passes = results.filter((r) => r.status === "pass").length;
+  const skips = results.filter((r) => r.status === "skip").length;
 
   section("Verdict");
-  console.log(`  ${GLYPH.pass} ${passes}   ${GLYPH.warn} ${warns}   ${GLYPH.fail} ${fails}`);
+  console.log(
+    `  ${GLYPH.pass} ${passes}   ${GLYPH.warn} ${warns}   ${GLYPH.fail} ${fails}   ${GLYPH.skip} ${skips} skipped`,
+  );
 
+  const skipNote = skips > 0 ? c.gray(` (${skips} check(s) skipped — not applicable on this stack.)`) : "";
   if (fails > 0) {
     console.log(
       "\n" + c.red(c.bold("  NO-GO")) + c.red(` — ${fails} blocking issue(s). Do not ship until these are clear.`),
@@ -132,11 +138,11 @@ export async function runChecks(o) {
   }
   if (warns > 0) {
     console.log(
-      "\n" + c.green(c.bold("  GO")) + c.yellow(` — with ${warns} warning(s) to eyeball first.`),
+      "\n" + c.green(c.bold("  GO")) + c.yellow(` — with ${warns} warning(s) to eyeball first.`) + skipNote,
     );
     return { exitCode: 0, results };
   }
-  console.log("\n" + c.green(c.bold("  GO")) + c.green(" — all checks clear. Safe to ship."));
+  console.log("\n" + c.green(c.bold("  GO")) + c.green(" — all applicable checks clear. Safe to ship.") + skipNote);
   return { exitCode: 0, results };
 }
 

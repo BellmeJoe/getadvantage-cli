@@ -13,7 +13,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { c, relPath } from "./util.mjs";
+import { binName, c, relPath } from "./util.mjs";
 
 const START = "<!-- ship-safe:auto-load -->";
 const END = "<!-- /ship-safe:auto-load -->";
@@ -23,7 +23,7 @@ const BLOCK = [
   "## Project brain — read first",
   "Before anything else, read **`PROJECT-BRIEF.md`** (what this project is) and,",
   "if present, **`HANDOFF.md`** (where work left off). Refresh them with",
-  "`ship-safe handoff` (or `npx getadvantage handoff`) before switching sessions",
+  "`npx getadvantage handoff` before switching sessions",
   "or models — your context lives in the repo, not the tool.",
   END,
 ].join("\n");
@@ -76,6 +76,6 @@ export function runInit(o) {
   console.log(c.green(`✓ Wired the project brain in: ${done.join(", ")}`));
   console.log(c.gray("  Your AI reads these at session start — so PROJECT-BRIEF.md + HANDOFF.md load automatically."));
   console.log(c.gray("  Re-run anytime; it updates its own marked block and never duplicates."));
-  console.log(c.gray("  (Don't forget to run `ship-safe brief` once so the brain file exists.)"));
+  console.log(c.gray(`  (Don't forget to run \`${binName()} brief\` once so the brain file exists.)`));
   return 0;
 }

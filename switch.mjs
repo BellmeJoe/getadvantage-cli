@@ -13,7 +13,7 @@
 //
 // Node built-ins only. ESM. (Delegates to handoff + init.)
 
-import { c } from "./util.mjs";
+import { binName, c } from "./util.mjs";
 import { runHandoff } from "./handoff.mjs";
 import { runInit } from "./init.mjs";
 
@@ -55,6 +55,6 @@ export function runSwitch(o) {
   }
   console.log("     Open your new tool or model and paste this:");
   console.log(c.bold("\n     Read PROJECT-BRIEF.md and HANDOFF.md, then continue where we left off.\n"));
-  console.log(c.gray("     Same project, new model — no re-explaining. Need help choosing one? `ship-safe models`."));
+  console.log(c.gray(`     Same project, new model — no re-explaining. Need help choosing one? \`${binName()} models\`.`));
   return 0;
 }

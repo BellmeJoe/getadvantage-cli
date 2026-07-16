@@ -4,6 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // --- ANSI color, degrading gracefully ---------------------------------------
 // Honour NO_COLOR (https://no-color.org/) and a non-TTY stdout (piped/redirected),
@@ -27,14 +28,16 @@ export const c = {
   dim: wrap("2"),
 };
 
-// Status glyphs. ✓ pass · ⚠ warn · ✗ fail (block).
+// Status glyphs. ✓ pass · ⚠ warn · ✗ fail (block) · – skip (not applicable).
 export const GLYPH = {
   pass: c.green("✓"),
   warn: c.yellow("⚠"),
   fail: c.red("✗"),
+  skip: c.gray("–"),
 };
 
-/** A single check result. status ∈ pass|warn|fail. fail ⇒ NO-GO. */
+/** A single check result. status ∈ pass|warn|fail|skip. fail ⇒ NO-GO.
+ *  skip = the check does not apply on this repo — neutral, never counted as ✓. */
 export function result(status, label, detail, extra = []) {
   return { status, label, detail, extra };
 }
@@ -95,6 +98,56 @@ export function fingerprint(match) {
 /** Section header. */
 export function section(title) {
   console.log("\n" + c.bold(c.cyan(title)));
+}
+
+// --- JSON file reading (BOM-tolerant) ----------------------------------------
+
+/** Strip a leading UTF-8 BOM. PowerShell writes UTF-8 files WITH a BOM by
+ *  default, and JSON.parse rejects it — so every JSON/config file read must
+ *  strip it first or a Windows-authored package.json silently "doesn't parse"
+ *  (which once turned a Node project into a "generic repo" and skipped the
+ *  build gate — a false GO). */
+export function stripBom(text) {
+  return typeof text === "string" && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * Read + parse a JSON file, BOM-tolerant. Distinguishes "no file" from
+ * "file exists but could not be parsed" so callers can be honest about which
+ * it is (never claim "(no package.json)" when the file is merely broken).
+ * @returns {{ exists: boolean, ok: boolean, json: any, error: Error|null }}
+ */
+export function readJsonFile(abs) {
+  let raw;
+  try {
+    raw = readFileSync(abs, "utf8");
+  } catch {
+    return { exists: existsSync(abs), ok: false, json: null, error: null };
+  }
+  try {
+    return { exists: true, ok: true, json: JSON.parse(stripBom(raw)), error: null };
+  } catch (e) {
+    return { exists: true, ok: false, json: null, error: e };
+  }
+}
+
+// --- self-identity (which bin was invoked; own version) ----------------------
+
+const UTIL_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/** The binary name the user actually invoked (`getadvantage` or the legacy
+ *  `ship-safe` alias), for use in every printed hint/example — an npx
+ *  getadvantage user does NOT have `ship-safe` on PATH, so hints must never
+ *  hardcode it. Falls back to "getadvantage" (e.g. direct `node index.mjs`). */
+export function binName() {
+  const base = path.basename(process.argv[1] || "").replace(/\.(mjs|cjs|js|cmd|ps1)$/i, "");
+  return base === "ship-safe" ? "ship-safe" : "getadvantage";
+}
+
+/** This CLI's own version, read from the package.json shipped next to it. */
+export function cliVersion() {
+  const r = readJsonFile(path.join(UTIL_DIR, "package.json"));
+  return r.ok && typeof r.json.version === "string" ? r.json.version : "0.0.0";
 }
 
 // --- filesystem walk (read-only) --------------------------------------------

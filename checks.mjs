@@ -402,13 +402,22 @@ export function checkTypecheck(cwd, project = null) {
   // would download TypeScript and either fail (no config) or flag JS files —
   // a FALSE NO-GO. Degrade to a clearly-labelled skip instead.
   if (!p.typecheckable) {
+    // A broken manifest is NOT a clean skip: we cannot know whether TypeScript
+    // is a dependency, so say so as a warning instead of a confident skip.
+    if (p.packageJsonBroken && p.hasTsConfig) {
+      return result(
+        "warn",
+        "Typecheck",
+        "package.json exists but could not be parsed — cannot confirm the TypeScript setup (tsconfig.json is present). Fix the JSON, then re-run.",
+      );
+    }
     const why = !p.hasTsConfig && !p.hasTypeScript
       ? "no tsconfig.json and no typescript dependency"
       : !p.hasTsConfig
         ? "no tsconfig.json"
         : "typescript is not a dependency";
     return result(
-      "pass",
+      "skip",
       "Typecheck",
       `Skipped — this is a ${p.label} (${why}). Nothing to typecheck.`,
     );
@@ -434,10 +443,19 @@ export function checkBuild(cwd, project = null) {
   const p = project || detectProject(cwd);
 
   if (!p.hasBuildScript) {
+    // Honest three-way split — a broken/BOM'd package.json must NEVER read as
+    // "(no package.json)" and silently pass the gate (that was a false GO).
+    if (p.packageJsonBroken) {
+      return result(
+        "warn",
+        "Build",
+        "package.json exists but could not be parsed — cannot determine the build script, so the build gate could not run. Fix the JSON (invalid syntax?), then re-run.",
+      );
+    }
     return result(
-      "pass",
+      "skip",
       "Build",
-      `Skipped — no "build" script in package.json${p.hasPackageJson ? "" : " (no package.json)"}. Nothing to build.`,
+      `Skipped — ${p.packageJsonExists ? 'no "build" script in package.json' : "no package.json"}. Nothing to build.`,
     );
   }
 
@@ -475,7 +493,7 @@ export function checkSchemaBump(cwd, baseRef = "main", project = null) {
   // false signal. Skip honestly when the pattern isn't present.
   if (!p.hasSchemaVersionPattern) {
     return result(
-      "pass",
+      "skip",
       "Schema-bump check",
       "Skipped — no SCHEMA_VERSION-sentinel db file in this repo (pattern doesn't apply).",
     );

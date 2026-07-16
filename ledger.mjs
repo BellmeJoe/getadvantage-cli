@@ -11,7 +11,7 @@
 // Node built-ins only. ESM. Writes one repo-resident file.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
+import { binName, c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
 
 const HEAD_MARK = "<!-- ship-safe:ledger -->";
 const LEDGER_FILE = "ledger.md";
@@ -51,7 +51,7 @@ export function appendLedger(cwd, { headSha, branch, lastHead, notes, now }) {
   if (!body.includes(HEAD_MARK)) {
     body =
       `${HEAD_MARK}\n# Session ledger\n\n` +
-      `_A running log of save-points (\`ship-safe handoff\`), newest at the bottom — ` +
+      `_A running log of save-points (\`npx getadvantage handoff\`), newest at the bottom — ` +
       `the project's session history._\n`;
   }
 
@@ -91,7 +91,7 @@ export function runLedger(o) {
   const cwd = o.cwd;
   const abs = markerFileForRead(cwd, LEDGER_FILE);
   if (!existsSync(abs)) {
-    console.log(`  ${c.yellow("⚠")} No session ledger yet — run ${c.cyan("ship-safe handoff")} to start one.`);
+    console.log(`  ${c.yellow("⚠")} No session ledger yet — run ${c.cyan(`${binName()} handoff`)} to start one.`);
     return 0;
   }
   const body = readFileSync(abs, "utf8");

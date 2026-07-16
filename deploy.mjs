@@ -16,20 +16,17 @@
 // It runs `vercel --prod` for real.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { c, git, gitSafe, section } from "./util.mjs";
+import { c, git, gitSafe, readJsonFile, section } from "./util.mjs";
 import { runChecks } from "./checks-runner.mjs";
 
 /** Read the linked Vercel project (.vercel/project.json), or null. Used to derive
  *  a sensible wrong-project guard prefix when --expect-prefix isn't given. */
 function readVercelProject(cwd) {
-  try {
-    return JSON.parse(readFileSync(path.join(cwd, ".vercel", "project.json"), "utf8"));
-  } catch {
-    return null;
-  }
+  // BOM-tolerant (PowerShell default) — see util.readJsonFile.
+  return readJsonFile(path.join(cwd, ".vercel", "project.json")).json;
 }
 
 /**

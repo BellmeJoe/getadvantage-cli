@@ -11,15 +11,10 @@
 //
 // Node built-ins only. ESM. Read-only (writes nothing).
 
-import { readFileSync } from "node:fs";
-import { c, gitSafe, markerFileForRead } from "./util.mjs";
+import { binName, c, gitSafe, markerFileForRead, readJsonFile } from "./util.mjs";
 
 function readJson(abs) {
-  try {
-    return JSON.parse(readFileSync(abs, "utf8"));
-  } catch {
-    return null;
-  }
+  return readJsonFile(abs).json;
 }
 
 /** Parse "N files changed, A insertions(+), B deletions(-)" → A+B (lines touched). */
@@ -42,13 +37,17 @@ function fmtAge(hours) {
 
 export function runGauge(o) {
   const cwd = o.cwd;
+  // How to save a handoff, phrased for the caller's context: the CLI names the
+  // invoked binary; the MCP server passes "the save_handoff tool" instead
+  // (an agent mid-session has the tool, not the shell command).
+  const save = o.saveHint || `\`${binName()} handoff\``;
   const marker = readJson(markerFileForRead(cwd, "handoff.json"));
   const head = gitSafe(["rev-parse", "HEAD"], { cwd });
 
   // No save-point yet → can't gauge drift; nudge to set a baseline.
   if (!marker || !marker.head_sha) {
     console.log(`  ${c.yellow("◔")} ${c.bold("No save-point yet.")}`);
-    console.log(`      Run ${c.cyan("ship-safe handoff")} to set your baseline — then this gauge can tell you when a session is getting heavy.`);
+    console.log(`      Run ${c.cyan(save)} to set your baseline — then this gauge can tell you when a session is getting heavy.`);
     return 0;
   }
 
@@ -75,10 +74,10 @@ export function runGauge(o) {
     nudge = "Plenty of runway — keep going.";
   } else if (weight < 12) {
     band = "Getting heavy"; glyph = "◐"; color = c.yellow;
-    nudge = "A good moment to `ship-safe handoff` soon, so your next session starts light.";
+    nudge = `A good moment to run ${save} soon, so your next session starts light.`;
   } else {
     band = "Time to reset"; glyph = "◑"; color = c.red;
-    nudge = "Run `ship-safe handoff`, then start a fresh session — you'll keep everything and get your speed back.";
+    nudge = `Run ${save}, then start a fresh session — you'll keep everything and get your speed back.`;
   }
 
   console.log(`  ${color(glyph)} ${c.bold("Session weight: " + band)}`);
