@@ -13,23 +13,27 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const local = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 
-let npm = "(offline?)";
+let npm = null;
 try {
   npm = execFileSync("npm", ["view", "getadvantage", "version"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 15_000,
+    // npm is npm.cmd on Windows and .cmd files need a shell to spawn;
+    // args are static literals, so no injection surface.
+    shell: process.platform === "win32",
   }).trim();
 } catch {
-  /* ignore */
+  /* registry unreachable or npm missing — reported as "couldn't check" below */
 }
 
-const match = npm === local;
+const verdict =
+  npm === null ? "  · live check skipped" : npm === local ? "  ✓ matches live" : "  ⚠ differs from live";
 console.log("");
 console.log("  getAdvantage — owner status");
 console.log("  ────────────────────────────────────────");
-console.log(`  Live npm:     getadvantage@${npm}`);
-console.log(`  This checkout: ${local}${match ? "  ✓ matches live" : "  ⚠ differs from live"}`);
+console.log(`  Live npm:     ${npm === null ? "(couldn't reach npm — no verdict on live version)" : `getadvantage@${npm}`}`);
+console.log(`  This checkout: ${local}${verdict}`);
 console.log("");
 console.log("  What it does (one line):");
 console.log("  GO/NO-GO before deploy — block secrets, .env, dirty tree.");

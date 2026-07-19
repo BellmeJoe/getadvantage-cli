@@ -4,6 +4,9 @@ name: Publish to npm
 # main. It skips when the version is already on npm, so a push that doesn't bump
 # the version is a safe no-op. Manual runs are available via the Actions tab.
 #
+# A publish only happens after the full test suite and the evidence suite
+# (npm run evidence, 8/8 GREEN) pass — a red gate blocks the release.
+#
 # ONE-TIME SETUP: add an npm token with publish rights as the repo secret
 # `NPM_TOKEN` (Settings -> Secrets and variables -> Actions). A granular token
 # with "Bypass 2FA" + read/write on packages works well.
@@ -22,17 +25,29 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - name: Publish if the version is new
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Check whether the version is new
+        id: version
         run: |
           NAME=$(node -p "require('./package.json').name")
           LOCAL=$(node -p "require('./package.json').version")
           PUBLISHED=$(npm view "$NAME" version 2>/dev/null || echo "none")
           echo "name=$NAME local=$LOCAL published=$PUBLISHED"
           if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
             echo "Version $LOCAL is already on npm — nothing to publish."
-            exit 0
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Gate — test suite
+        if: steps.version.outputs.new == 'true'
+        run: npm test
+      - name: Gate — evidence suite (must be 8/8 GREEN)
+        if: steps.version.outputs.new == 'true'
+        run: npm run evidence
+      - name: Publish
+        if: steps.version.outputs.new == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
           npm publish --access public
-          echo "Published $NAME@$LOCAL"
+          echo "Published $(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"

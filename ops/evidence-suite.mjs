@@ -218,4 +218,5 @@ if (JSON_OUT) {
   console.log("");
 }
 
-process.exit(allGreen ? 0 : 1);
+// process.exitCode (not process.exit) so piped --json output drains fully on Windows
+process.exitCode = allGreen ? 0 : 1;
