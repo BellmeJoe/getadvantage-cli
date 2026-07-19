@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>getAdvantage — 15s storyboard (live brand)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Inter:wght@500;600&family=JetBrains+Mono:wght@500;600;700&family=Newsreader:opsz,wght@6..72,600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #06070a;
+      --s1: #0c0e12;
+      --well: #090705;
+      --line: #ffffff0f;
+      --edge: #ffffff14;
+      --ink: #eceef3;
+      --ink-2: #c5c9d3;
+      --mut: #878c98;
+      --sig: #d4a853;
+      --sig-rgb: 212, 168, 83;
+      --on-sig: #171204;
+      --warn: #f0b052;
+      --fail: #de5f4e;
+      --r-card: 12px;
+      --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+      --font-serif: Newsreader, Georgia, serif;
+      --font-display: Fraunces, Georgia, serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(800px 360px at 15% 0%, rgba(212,168,83,0.08), transparent 50%), var(--bg);
+      color: var(--ink);
+      font-family: var(--font-sans);
+      padding: 40px 24px 56px;
+    }
+    header { max-width: 1120px; margin: 0 auto 24px; }
+    .logo {
+      display: inline-flex; align-items: center; gap: 8px; margin-bottom: 16px;
+    }
+    .logo .wm {
+      font-family: var(--font-serif); font-weight: 600; font-size: 18px;
+      letter-spacing: -0.03em;
+    }
+    .logo .wm .get { color: var(--ink-2); }
+    .logo .wm .adv { color: var(--ink); }
+    .gh-kicker {
+      font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+      letter-spacing: 0.18em; text-transform: uppercase; color: var(--sig);
+      margin-bottom: 10px;
+    }
+    h1 {
+      font-family: var(--font-display); font-weight: 600;
+      font-size: clamp(28px, 3.4vw, 38px); letter-spacing: -0.02em;
+      line-height: 1.08; margin-bottom: 10px;
+    }
+    h1 .g { color: var(--sig); }
+    header p { color: var(--ink-2); font-size: 15px; line-height: 1.55; max-width: 640px; }
+    header code {
+      font-family: var(--font-mono); font-size: 12px; color: var(--sig);
+      background: rgba(var(--sig-rgb), 0.1); border: 1px solid rgba(var(--sig-rgb), 0.28);
+      padding: 1px 6px; border-radius: 4px;
+    }
+
+    .bar { max-width: 1120px; margin: 0 auto 18px; display: flex; gap: 6px; height: 3px; }
+    .bar i { flex: 1; background: var(--s1); border-radius: 99px; }
+    .bar i.on { background: var(--sig); }
+
+    .frames {
+      max-width: 1120px; margin: 0 auto;
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+    }
+    @media (max-width: 900px) { .frames { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 560px) { .frames { grid-template-columns: 1fr; } }
+
+    /* Live gh-proof shell */
+    .gh-proof {
+      background: var(--s1); border: 1px solid var(--line); border-radius: var(--r-card);
+      overflow: hidden; box-shadow: inset 0 0.5px 0 0 var(--edge);
+    }
+    .gh-proof-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 10px 12px; background: var(--well); border-bottom: 1px solid var(--line);
+    }
+    .gh-proof-mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-2); }
+    .gh-proof-tag {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--mut);
+    }
+    .gh-proof-tag-sig { color: var(--sig); }
+    .gh-proof-body { padding: 12px; display: grid; gap: 8px; min-height: 148px; }
+    .meta {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--mut); margin-bottom: 2px;
+    }
+    .meta .t { color: var(--sig); float: right; }
+    .gh-chk {
+      font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .gh-chk-i {
+      display: inline-grid; place-items: center; width: 15px; height: 15px;
+      border-radius: 3px; font-size: 10px; flex: none;
+    }
+    .gh-chk-ok .gh-chk-i { color: var(--on-sig); background: var(--sig); }
+    .gh-chk-fail { color: var(--fail); }
+    .gh-chk-fail .gh-chk-i { color: #1a0a08; background: var(--fail); font-weight: 700; }
+    .path { color: var(--warn); font-family: var(--font-mono); font-size: 11.5px; padding-left: 23px; }
+    .gh-proof-verdict {
+      margin-top: 2px; font-family: var(--font-mono); font-size: 11.5px;
+      letter-spacing: 0.04em; padding-top: 8px; border-top: 1px solid var(--line);
+    }
+    .blocked { color: var(--fail); }
+    .clear { color: var(--sig); }
+    .dim { color: var(--mut); font-family: var(--font-mono); font-size: 12px; }
+
+    .note {
+      max-width: 1120px; margin: 28px auto 0; padding: 14px 16px;
+      border: 1px solid var(--line); border-radius: var(--r-card);
+      background: var(--s1); color: var(--mut); font-size: 13px; line-height: 1.55;
+    }
+    .note strong { color: var(--ink); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <svg width="20" height="20" viewBox="0 0 100 100" fill="none" aria-hidden="true">
+        <path d="M25 21 V79 H49" stroke="var(--ink)" stroke-width="12.5" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M45 31 L66 50 L45 69" stroke="var(--mut)" stroke-width="12.5" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M63 23 L89 50 L63 77" stroke="var(--sig)" stroke-width="12.5" stroke-linecap="square" stroke-linejoin="miter"/>
+      </svg>
+      <span class="wm"><span class="get">get</span><span class="adv">Advantage</span></span>
+    </div>
+    <p class="gh-kicker">15-second storyboard</p>
+    <h1>Ship AI work you can trust. <span class="g">In one gate.</span></h1>
+    <p>
+      Layout copied from live <strong>getadvantage.app</strong> gate cards
+      (<code>.gh-proof</code> · gold <code>--sig</code> · serif wordmark).
+      Record with ScreenToGif. Caption: <em>Key in a sourcemap. NO-GO. Fixed. GO.</em>
+    </p>
+  </header>
+
+  <div class="bar" aria-hidden="true">
+    <i class="on"></i><i class="on"></i><i class="on"></i>
+    <i class="on"></i><i class="on"></i><i class="on"></i>
+  </div>
+
+  <div class="frames">
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">$ npx getadvantage</span>
+        <span class="gh-proof-tag">0.0–2.5s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">01 · run</div>
+        <div class="dim">pre-deploy gate</div>
+        <div class="dim" style="margin-top:8px">reading your repo…</div>
+      </div>
+    </div>
+
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">$ npx getadvantage</span>
+        <span class="gh-proof-tag">2.5–5.0s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">02 · scan</div>
+        <div class="gh-chk gh-chk-ok"><span class="gh-chk-i">✓</span> working tree clean</div>
+        <div class="dim" style="padding-left:23px">scanning committed files…</div>
+      </div>
+    </div>
+
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">$ npx getadvantage</span>
+        <span class="gh-proof-tag" style="color:var(--fail)">5.0–7.5s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">03 · hit</div>
+        <div class="gh-chk gh-chk-fail"><span class="gh-chk-i">×</span> secret in committed files</div>
+        <div class="path">dist/assets/index.js.map · sk_liv…9f2a</div>
+        <div class="gh-proof-verdict blocked">NO-GO · do not ship</div>
+      </div>
+    </div>
+
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">// fix</span>
+        <span class="gh-proof-tag">7.5–10.0s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">04 · fix</div>
+        <div class="dim">$ git rm --cached dist/**/*.map</div>
+        <div class="dim">$ # rotate the key</div>
+        <div class="dim" style="margin-top:10px">commit · ready to re-check</div>
+      </div>
+    </div>
+
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">$ npx getadvantage</span>
+        <span class="gh-proof-tag gh-proof-tag-sig">10.0–12.5s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">05 · re-run</div>
+        <div class="gh-chk gh-chk-ok"><span class="gh-chk-i">✓</span> no secrets in the diff</div>
+        <div class="gh-chk gh-chk-ok"><span class="gh-chk-i">✓</span> working tree clean</div>
+        <div class="gh-chk gh-chk-ok"><span class="gh-chk-i">✓</span> build passes</div>
+      </div>
+    </div>
+
+    <div class="gh-proof">
+      <div class="gh-proof-bar">
+        <span class="gh-proof-mono">$ npx getadvantage</span>
+        <span class="gh-proof-tag gh-proof-tag-sig">12.5–15.0s</span>
+      </div>
+      <div class="gh-proof-body">
+        <div class="meta">06 · land</div>
+        <div class="gh-proof-verdict clear" style="border:0;padding-top:4px;font-size:14px">GO · safe to ship from this gate</div>
+        <div class="dim" style="margin-top:12px;color:var(--sig)">getadvantage.app</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Matched to live site:</strong> geometric mark (not teal A-chip), Newsreader wordmark,
+    gold <code>--sig #d4a853</code>, <code>.gh-proof</code> / <code>.gh-chk-ok</code> square ticks,
+    well bar, mono verdict line. Not the old Aurora teal-A marketing system.
+  </div>
+</body>
+</html>

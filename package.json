@@ -8,7 +8,9 @@
     "ship-safe": "index.mjs"
   },
   "scripts": {
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "evidence": "node ops/evidence-suite.mjs",
+    "owner": "node ops/owner-status.mjs"
   },
   "files": [
     "*.mjs",

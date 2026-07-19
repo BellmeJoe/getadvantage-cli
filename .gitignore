@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 .getadvantage/
 .ship-safe/
+# generated evidence / loop1 runs (recreate with npm run evidence)
+ops/loop1/out/
