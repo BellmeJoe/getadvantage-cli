@@ -156,6 +156,26 @@ or in your MCP config JSON:
 }
 ```
 
+**OpenAI Codex** (CLI / VS Code extension / desktop — shared config):
+
+```bash
+codex mcp add getadvantage -- npx -y getadvantage mcp
+```
+
+If the first start times out (a cold `npx` download can exceed Codex's 10 s
+handshake default), add `startup_timeout_sec = 60` to the
+`[mcp_servers.getadvantage]` block in `~/.codex/config.toml`.
+
+**xAI Grok Build** (CLI, beta):
+
+```bash
+grok mcp add getadvantage -- npx -y getadvantage mcp
+```
+
+Grok Build also reads existing Claude/Cursor MCP config files, so if you added
+getadvantage there it may already be available. (Web-based agents — Codex
+cloud, grok.com — can't spawn local stdio servers; use the CLI surfaces.)
+
 Each tool takes an optional `cwd` (defaults to where the server runs) so you can
 point it at any project repo on your machine.
 
