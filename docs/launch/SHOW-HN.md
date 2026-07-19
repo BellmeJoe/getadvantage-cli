@@ -1,4 +1,4 @@
-# Show HN — copy pack (getadvantage@0.8.0)
+# Show HN — copy pack (getadvantage@0.8.1)
 
 Use with `docs/launch/verdict-hero.html` (screenshot) and/or a 15s GIF from
 `gif-storyboard-15s.html`. Soft/beta framing — not “we own the category.”
@@ -114,7 +114,7 @@ incident.)*
 ## Pre-post checklist
 
 ```bash
-npm view getadvantage version   # expect 0.8.0
+npm view getadvantage version   # expect 0.8.1
 npm run evidence                # expect 8/8 GREEN
 ```
 

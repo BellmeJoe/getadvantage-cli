@@ -41,7 +41,7 @@
 import { binName, c, cliVersion, printResult, section } from "./util.mjs";
 import { repoRoot } from "./util.mjs";
 import { detectRepoStack } from "./detect.mjs";
-import { overviewApiSurface, overviewIntegrations, overviewSchedules, overviewEstate } from "./overviews.mjs";
+import { renderMap } from "./overviews.mjs";
 import { runChecks } from "./checks-runner.mjs";
 import { deploy } from "./deploy.mjs";
 import { runBrief } from "./brief.mjs";
@@ -142,7 +142,7 @@ ${c.bold("Commands")}
            for which job) — principles, not benchmarks.
   ${c.cyan("mcp")}      Run a dependency-free Model Context Protocol (MCP) server over stdio so an
            AI agent (Claude Code, Cursor) can call getAdvantage's brain + checks MID-session
-           — tools: ${c.bold("get_brief")}, ${c.bold("refresh_brief")}, ${c.bold("get_handoff")}, ${c.bold("save_handoff")}, ${c.bold("check")}, ${c.bold("gauge")}.
+           — tools: ${c.bold("get_brief")}, ${c.bold("refresh_brief")}, ${c.bold("get_handoff")}, ${c.bold("save_handoff")}, ${c.bold("check")}, ${c.bold("map")}, ${c.bold("architecture")}, ${c.bold("gauge")}.
            No API keys, no network — same engine as the CLI.
   ${c.cyan("fan-out")}  Run several AI sessions/models in PARALLEL, all sharing ONE project brain, via
            git worktrees. ${c.dim("(fan-out <n> [--task \"...\"])")} — opens ${c.bold("N")} lanes (1–8) off HEAD,
@@ -284,6 +284,8 @@ ${c.bold("Tools it exposes")}
   ${c.cyan("get_handoff")}     read HANDOFF.md — where work left off
   ${c.cyan("save_handoff")}    refresh the brief + write HANDOFF.md + a ledger entry
   ${c.cyan("check")}           the read-only pre-deploy checks → GO / NO-GO
+  ${c.cyan("map")}             read-only app X-ray: routes + auth posture, integrations, crons
+  ${c.cyan("architecture")}    accretion scan: collapse candidates + QUIET/NOTABLE/SEVERE band
   ${c.cyan("gauge")}           "is this session getting heavy?" heuristic
 
 ${c.bold("Register in Claude Code")} (one command):
@@ -436,47 +438,7 @@ async function main() {
   if (cmd === "map") {
     const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
-    section("Map — what your app has (read-only)");
-
-    let stack = null;
-    try {
-      stack = detectRepoStack(cwd);
-    } catch { /* best-effort — lanes still run below */ }
-    if (stack) {
-      if (stack.nextJs) {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Next.js App Router pages + API routes (app/ + src/app/).`);
-      } else if (stack.kind === "node" && stack.frontend) {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — a client-side app; the map looks for any server routes + the services it calls (there may be none to show, and that's fine).`);
-      } else if (stack.kind === "node") {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your server's route definitions (best-effort).`);
-      } else if (stack.kind === "python") {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Python route decorators (best-effort).`);
-      } else {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. The map covers Next.js, Node, and Python web apps;`);
-        console.log(`  ${c.gray("for this stack it shows the generic estate view.")}`);
-      }
-    }
-
-    const lanes = [];
-    for (const [fn, label] of [
-      [overviewEstate, "Project estate"],
-      [overviewApiSurface, "API surface map"],
-      [overviewIntegrations, "Agents & integrations map"],
-      [overviewSchedules, "Schedules & jobs map"],
-    ]) {
-      try {
-        const r = fn(cwd, stack);
-        lanes.push(r);
-        printResult(r);
-      } catch (e) {
-        const r = { status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] };
-        lanes.push(r);
-        printResult(r);
-      }
-    }
-    console.log(
-      `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan(`${binName()} ship`)} ${c.dim("for the gate.")}`,
-    );
+    const { stack, lanes } = renderMap(cwd);
     if (restore) {
       emitJson(restore, {
         command: "map",

@@ -2,8 +2,9 @@
 //
 // A dependency-free Model Context Protocol (MCP) server over stdio, so an AI
 // agent IN THE LOOP — Claude Code, Cursor, any MCP client — can call
-// getAdvantage's brain + checks MID-SESSION, without leaving the chat. Same
-// engine as the CLI; just reachable as tools.
+// getAdvantage's brain + checks + read-only maps (map, architecture)
+// MID-SESSION, without leaving the chat. Same engine as the CLI; just
+// reachable as tools.
 //
 // MCP framing here is newline-delimited JSON-RPC 2.0: one JSON object per line
 // read from stdin, one response object written per line to stdout. We implement
@@ -34,6 +35,8 @@ import { runBrief, briefStaleness, DEFAULT_OUT } from "./brief.mjs";
 import { runHandoff, DEFAULT_HANDOFF } from "./handoff.mjs";
 import { runChecks } from "./checks-runner.mjs";
 import { runGauge } from "./gauge.mjs";
+import { renderMap } from "./overviews.mjs";
+import { runArchitecture } from "./architecture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROTOCOL_VERSION = "2024-11-05";
@@ -163,6 +166,28 @@ const TOOLS = [
     },
   },
   {
+    name: "map",
+    description:
+      "A read-only map of what the app has: project estate (modules, languages, dependencies), API surface (every route with methods + auth posture, ⚠ on mutating routes with no obvious gate), agents & LLM integrations with their backing env keys, and schedules/crons. Orientation, never a verdict; mutates nothing. Run this to X-ray an unfamiliar repo mid-session. Same engine as the CLI `map` command.",
+    inputSchema: { type: "object", properties: { ...CWD_PROP }, additionalProperties: false },
+  },
+  {
+    name: "architecture",
+    description:
+      "The accretion scanner: where is the code being built OVER instead of collapsed? Ranks collapse candidates by size × churn × duplication (oversized files, git-churn hotspots, repeated ≥15-line blocks, approximate complexity) and reports a signal band (QUIET / NOTABLE / SEVERE). Read-only, advisory — it never refactors and never claims code is clean. Same engine as the CLI `architecture` command.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...CWD_PROP,
+        top: {
+          type: "number",
+          description: "How many collapse candidates to list (default 10).",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "gauge",
     description:
       "A quick 'is this session getting heavy?' read — a heuristic from repo activity since the last handoff (commits + lines changed + time elapsed). Nudges a reset before things slow down. It is NOT a read of your context window or token count.",
@@ -241,6 +266,21 @@ const TOOL_IMPL = {
     const verdict = result && result.exitCode === 0 ? "GO" : "NO-GO";
     const log = text.trim();
     return `Verdict: ${verdict}\n\n${log}`;
+  },
+
+  map(cwd) {
+    // ONE implementation: the same renderMap the CLI `map` command uses.
+    const { text, error } = captureStdout(() => renderMap(cwd));
+    if (error) return `Map failed: ${error.message || error}`;
+    return text.trim() || "(no map output)";
+  },
+
+  architecture(cwd, args) {
+    const { text, error } = captureStdout(() =>
+      runArchitecture({ cwd, top: args && typeof args.top === "number" ? args.top : undefined }),
+    );
+    if (error) return `Architecture scan failed: ${error.message || error}`;
+    return text.trim() || "(no architecture output)";
   },
 
   gauge(cwd) {

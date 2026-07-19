@@ -25,7 +25,7 @@
 
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
-import { result, walkFiles, readText, relPath, readJsonFile, pl } from "./util.mjs";
+import { result, walkFiles, readText, relPath, readJsonFile, pl, c, printResult, section, binName } from "./util.mjs";
 import { detectProject, detectRepoStack, pythonDeclaredDeps } from "./detect.mjs";
 
 // ===========================================================================
@@ -1051,4 +1051,55 @@ export function overviewEstate(cwd) {
   }
 
   return result("pass", "Project estate", detail, lines);
+}
+
+// ---------------------------------------------------------------------------
+// The full map, rendered — ONE implementation for both entry points.
+// The CLI `map` command and the MCP `map` tool both call this (no second
+// suite). Prints the stack line + all four lanes + the footer to stdout and
+// returns { stack, lanes } so callers can emit --json.
+// ---------------------------------------------------------------------------
+export function renderMap(cwd) {
+  section("Map — what your app has (read-only)");
+
+  let stack = null;
+  try {
+    stack = detectRepoStack(cwd);
+  } catch { /* best-effort — lanes still run below */ }
+  if (stack) {
+    if (stack.nextJs) {
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Next.js App Router pages + API routes (app/ + src/app/).`);
+    } else if (stack.kind === "node" && stack.frontend) {
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — a client-side app; the map looks for any server routes + the services it calls (there may be none to show, and that's fine).`);
+    } else if (stack.kind === "node") {
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your server's route definitions (best-effort).`);
+    } else if (stack.kind === "python") {
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Python route decorators (best-effort).`);
+    } else {
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. The map covers Next.js, Node, and Python web apps;`);
+      console.log(`  ${c.gray("for this stack it shows the generic estate view.")}`);
+    }
+  }
+
+  const lanes = [];
+  for (const [fn, label] of [
+    [overviewEstate, "Project estate"],
+    [overviewApiSurface, "API surface map"],
+    [overviewIntegrations, "Agents & integrations map"],
+    [overviewSchedules, "Schedules & jobs map"],
+  ]) {
+    try {
+      const r = fn(cwd, stack);
+      lanes.push(r);
+      printResult(r);
+    } catch (e) {
+      const r = { status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] };
+      lanes.push(r);
+      printResult(r);
+    }
+  }
+  console.log(
+    `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan(`${binName()} ship`)} ${c.dim("for the gate.")}`,
+  );
+  return { stack, lanes };
 }

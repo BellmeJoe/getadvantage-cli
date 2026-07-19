@@ -1685,6 +1685,71 @@ scenario("map on a client-only React/Vite app: de-jargoned, friendly empty-SPA l
 });
 
 // ---------------------------------------------------------------------------
+// 36. MCP live protocol: tools/list exposes map + architecture; tools/call map
+//     returns the real API-surface text (0.8.1)
+// ---------------------------------------------------------------------------
+scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X-rays an Express repo", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "package.json", '{"name":"mcp-sample","version":"1.0.0","dependencies":{"express":"^4.19.0"}}\n');
+    write(repo, "server.js", [
+      "const express = require('express');",
+      "const app = express();",
+      "app.get('/items', (req, res) => res.json([]));",
+      "app.post('/items', (req, res) => res.status(201).end());",
+      "app.listen(3000);",
+    ].join("\n"));
+    commitAll(repo, "chore: express sample");
+
+    const lines =
+      [
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+        JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+        JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "map", arguments: { cwd: repo } } }),
+        JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "architecture", arguments: { cwd: repo, top: 3 } } }),
+      ].join("\n") + "\n";
+    const r = spawnSync(process.execPath, [INDEX, "mcp"], {
+      cwd: repo,
+      input: lines,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+      env: buildEnv(),
+    });
+    assert.equal(r.status, 0, `mcp server must exit 0 on stdin close:\n${r.stderr}`);
+
+    const replies = r.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const byId = (id) => replies.find((m) => m.id === id);
+
+    const tools = byId(2).result.tools.map((t) => t.name);
+    assert.deepEqual(
+      [...tools].sort(),
+      ["architecture", "check", "gauge", "get_brief", "get_handoff", "map", "refresh_brief", "save_handoff"],
+      `tool catalogue must be exactly the 8 tools: ${tools.join(", ")}`,
+    );
+
+    const mapText = byId(3).result.content[0].text;
+    assert.ok(!byId(3).result.isError, `map tool must not error:\n${mapText}`);
+    assert.ok(/API surface map/.test(mapText), `map text must include the API lane:\n${mapText}`);
+    assert.ok(/\/items/.test(mapText) && /POST/.test(mapText), `map must find the Express routes:\n${mapText}`);
+    assert.ok(/mutates but no auth\/session check found/.test(mapText), `ungated POST must be flagged:\n${mapText}`);
+
+    const archText = byId(4).result.content[0].text;
+    assert.ok(!byId(4).result.isError, `architecture tool must not error:\n${archText}`);
+    assert.ok(/Signal band:/.test(archText), `architecture must report its signal band:\n${archText}`);
+
+    // stdout is the protocol channel — every line must be JSON-RPC, no leaked prose.
+    for (const line of r.stdout.split("\n").filter(Boolean)) {
+      assert.ok(line.startsWith("{"), `non-JSON leaked onto the protocol channel: ${line.slice(0, 80)}`);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
 let failed = 0;

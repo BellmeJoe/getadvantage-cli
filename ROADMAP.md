@@ -27,6 +27,7 @@ independently reproduced 1:1 against the live npm package.
 | 0.7.1 + 0.7.2 | Trust-critical correctness + honesty/branding sweep | **Released** (npm, 2026-07-19) |
 | 0.7.3 | Public-readiness: gate-value banner, honest secret-scan coverage (lockfiles + sourcemaps), outside-git next steps, de-jargoned client-app map | **Released** (npm, 2026-07-19) |
 | **0.8.0** | Launch polish: demo-ready output (real plurals, prefix-aware fingerprints), truthful `switch`/fan-in wording, per-command fan help, architecture signal band, owner ops + test+evidence-gated publish CI | **Released** (npm, 2026-07-19) |
+| **0.8.1** | MCP parity for the read-only lenses: `map` + `architecture` as MCP tools (one shared `renderMap` implementation, live-protocol test) | **Released** (npm, 2026-07-20) |
 | 0.8.x | Table stakes for CI adoption + the False-Positive escape hatch | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |

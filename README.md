@@ -81,7 +81,7 @@ run getAdvantage.
 | `getadvantage models` | A plain-language playbook for choosing + switching AI models (principles, not benchmarks). |
 | `getadvantage gauge` | A quick "is this session getting heavy?" read (repo activity since your last handoff) that nudges a reset before things slow down — a heuristic, not a token count. |
 | `getadvantage ledger` | Show the session ledger — the running log of save-points each `handoff` records (kept in `.getadvantage/ledger.md`; a legacy `.ship-safe/` dir is still read and migrates forward on the next write). |
-| `getadvantage mcp` | Run a dependency-free **MCP server** over stdio so an AI agent (Claude Code, Cursor) can call the brain + checks mid-session. Tools: `get_brief`, `refresh_brief`, `get_handoff`, `save_handoff`, `check`, `gauge`. Same engine as the CLI — no API keys, no network. |
+| `getadvantage mcp` | Run a dependency-free **MCP server** over stdio so an AI agent (Claude Code, Cursor) can call the brain, gate, and maps mid-session. Tools: `get_brief`, `refresh_brief`, `get_handoff`, `save_handoff`, `check`, `map`, `architecture`, `gauge`. Same engine as the CLI — no API keys, no network. |
 | `getadvantage fan-out <n>` | Open **N parallel lanes** (1–8) as git worktrees off `HEAD`, each with the brain copied in + wired. Add `--task "..."` to print a shared task into each lane's guidance. Open a different model/tool per lane, work in parallel. |
 | `getadvantage fan-in` | **The safe fan-in conductor.** Reconcile the lanes into one verified main: a **collision map**, a **merge-train** dry-run (textual conflicts up front), and — with `--apply` — actually merge the clean lanes one at a time, re-running the check gate on the **combined tree** after each so a lane that's green alone but red merged is **quarantined** (rolled back), never landed. Default is a read-only preview; `--apply` to land. |
 | `getadvantage demo` | Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, one that breaks the build, one that conflicts) and run the **whole conductor** on it — the entire wow in one command, zero setup. |
@@ -117,10 +117,11 @@ run getAdvantage.
 ## Use it as an MCP server (call the brain mid-session)
 
 `getadvantage mcp` runs a dependency-free **Model Context Protocol** server over
-stdio. Point your agent at it and it can call the brain + checks *while you're
-working* — `get_brief`, `refresh_brief`, `get_handoff`, `save_handoff`, `check`,
-`gauge` — instead of you running the CLI by hand. It's the same engine as the
-CLI: no API keys, no network, nothing leaves your machine.
+stdio. Point your agent at it and it can call the brain, the gate, and the maps
+*while you're working* — `get_brief`, `refresh_brief`, `get_handoff`,
+`save_handoff`, `check`, `map`, `architecture`, `gauge` — instead of you running
+the CLI by hand. It's the same engine as the CLI: no API keys, no network,
+nothing leaves your machine.
 
 **Claude Code** — add it with one command:
 
