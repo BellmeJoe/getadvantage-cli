@@ -10,7 +10,7 @@ Empty board = nobody claims exclusive work — first writer updates this.
 ### Rules
 1. Before starting: add a row.  
 2. Same path already open? **Don’t start a parallel suite** — join or wait.  
-3. When done: set Status `done` or delete the row + write a `docs/sessions/…-SESSION.md`.  
+3. When done: set Status `done` or delete the row + write a `docs/sessions/…-SESSION.md` (kept local — gitignored, not published).  
 4. Canonical tools: evidence = `npm run evidence` · launch HTML = `docs/launch/` only.
 
 ### Example rows

@@ -107,7 +107,8 @@ Features ohne grünes Evidence = Lärm.
    und `npm run evidence` als Gate. Version-Bump pushen = Release freigeben.
 
 5. **Nach Session: Session-Log**  
-   `docs/sessions/YYYY-MM-DD-…-SESSION.md` mit: Live-Version, Evidence-Stand, was noch nicht committed ist, nächster Schritt.
+   `docs/sessions/YYYY-MM-DD-…-SESSION.md` mit: Live-Version, Evidence-Stand, was noch nicht committed ist, nächster Schritt.  
+   *(Session-Logs bleiben lokal — der Ordner ist gitignored und nicht im öffentlichen Repo.)*
 
 ---
 

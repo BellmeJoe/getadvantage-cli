@@ -5,3 +5,6 @@ node_modules/
 .ship-safe/
 # generated evidence / loop1 runs (recreate with npm run evidence)
 ops/loop1/out/
+
+# Session logs stay local — owner process notes, not product docs (unpublished 2026-07-20)
+docs/sessions/
