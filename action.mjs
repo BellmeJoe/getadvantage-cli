@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { c } from "./util.mjs";
+import { c, cliVersion } from "./util.mjs";
 
 const WORKFLOW_REL = ".github/workflows/getadvantage.yml";
 
@@ -23,6 +23,15 @@ const WORKFLOW_REL = ".github/workflows/getadvantage.yml";
 //               using the GETADVANTAGE_API_KEY repo secret. Without the secret
 //               the gate still runs — reporting just warns (best-effort).
 // fetch-depth: 0 keeps origin/main resolvable for the base comparison.
+//
+// Two things the workflow gets right on purpose:
+//   • It INSTALLS dependencies (with --ignore-scripts) before the gate, so the
+//     typecheck runs the project's OWN, locally-installed TypeScript compiler.
+//     Without an install, `tsc` isn't present and the gate would (in older
+//     versions) fetch a squatted third-party `tsc` — never do that in CI.
+//   • It PINS the CLI version (getadvantage@<version>) so every run is
+//     reproducible instead of silently tracking the latest publish.
+const PINNED = `getadvantage@${cliVersion()}`;
 const WORKFLOW = `# getAdvantage — the pre-deploy gate in CI.
 #
 # Runs \`getadvantage check\` on every push + pull request: secret scan, build/
@@ -46,8 +55,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install dependencies (the typecheck uses your own compiler; the gate never downloads one)
+        run: |
+          if [ -f package-lock.json ]; then npm ci --ignore-scripts; \\
+          elif [ -f package.json ]; then npm install --ignore-scripts; \\
+          else echo "No package.json — nothing to install."; fi
       - name: getAdvantage check (GO / NO-GO)
-        run: npx --yes getadvantage check --ci --report
+        run: npx --yes ${PINNED} check --ci --report
         env:
           GETADVANTAGE_API_KEY: \${{ secrets.GETADVANTAGE_API_KEY }}
 `;

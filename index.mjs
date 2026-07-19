@@ -152,9 +152,9 @@ ${c.bold("Commands")}
            clean lanes one at a time, re-running the check gate on the COMBINED tree after
            each so two-green-but-red-together breaks are caught and that lane is quarantined
            (rolled back), never landed. Ends on one verdict screen. No conflict reaches main un-verified.
-  ${c.cyan("demo")}     Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, two
-           that collide, one that breaks the build) and run the WHOLE fan-in conductor on it —
-           so you can see the entire wow in ONE command, zero setup.
+  ${c.cyan("demo")}     Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean,
+           one that breaks the build, one that textually conflicts) and run the WHOLE fan-in
+           conductor on it — the entire wow in ONE command, zero setup.
   ${c.cyan("architecture")}  The ACCRETION scanner — where is the code rotting by being built OVER instead
            of collapsed? Ranks the top collapse candidates by ${c.bold("size × churn × duplication")}
            (oversized files, git-churn hotspots, repeated ≥15-line blocks, approximate
@@ -175,7 +175,7 @@ ${c.bold("Flags")}
   --base-ref <ref>        Merge-base ref for the schema-bump diff (default: main).
   --no-overview           Skip the read-only overview maps (API surface, integrations, schedules).
   --no-brief-check        Skip the (non-blocking) brief-staleness warning in ${c.cyan("check")}.
-  --json                  (${c.cyan("check")} + ${c.cyan("fan-in")}) Print ONE machine-readable JSON document to stdout
+  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
   --ci                    (${c.cyan("check")} + ${c.cyan("fan-in")}) Non-interactive CI mode: never prompts, tolerates a
@@ -370,6 +370,15 @@ async function main() {
     process.exit(runLogout());
   }
 
+  // `demo` scaffolds its OWN throwaway repo in a temp dir — it needs no project
+  // and no cwd git repo. It is the "zero setup" showcase, so it must run before
+  // the repo-root gate below (otherwise a curious evaluator in an empty folder
+  // hits a dead-end on the most likely first-run path).
+  if (cmd === "demo") {
+    header();
+    process.exit(await runDemo({ keep: !!flags.keep }));
+  }
+
   let cwd;
   try {
     cwd = repoRoot();
@@ -389,9 +398,10 @@ async function main() {
   // `map` — the read-only overview scanners on their own: project estate (any
   // stack), API surface, agents & integrations, schedules & jobs. Never blocks,
   // never writes; exit 0 always (a map is orientation, not a verdict). Opens
-  // with an HONEST scope line: the deep route lane reads Next.js App Router
-  // projects only, so any other stack is told what it's getting instead.
+  // with an HONEST scope line. Same stack detection + parsers as `check`.
+  // `--json` is honoured (finding: map --json was silently ignored).
   if (cmd === "map") {
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
     section("Map — what your app has (read-only)");
 
@@ -401,7 +411,7 @@ async function main() {
     } catch { /* best-effort — lanes still run below */ }
     if (stack) {
       if (stack.nextJs) {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — deep route mapping reads the Next.js App Router directly.`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — deep route mapping reads the Next.js App Router (app/ + src/app/).`);
       } else if (stack.kind === "node") {
         console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — route mapping parses Express/Fastify definitions (best-effort regex).`);
       } else if (stack.kind === "python") {
@@ -412,6 +422,7 @@ async function main() {
       }
     }
 
+    const lanes = [];
     for (const [fn, label] of [
       [overviewEstate, "Project estate"],
       [overviewApiSurface, "API surface map"],
@@ -419,14 +430,33 @@ async function main() {
       [overviewSchedules, "Schedules & jobs map"],
     ]) {
       try {
-        printResult(fn(cwd, stack));
+        const r = fn(cwd, stack);
+        lanes.push(r);
+        printResult(r);
       } catch (e) {
-        printResult({ status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] });
+        const r = { status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] };
+        lanes.push(r);
+        printResult(r);
       }
     }
     console.log(
       `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan(`${binName()} ship`)} ${c.dim("for the gate.")}`,
     );
+    if (restore) {
+      emitJson(restore, {
+        command: "map",
+        stack: stack
+          ? { kind: stack.kind, label: stack.label, nextJs: !!stack.nextJs }
+          : null,
+        lanes: lanes.map((r) => ({
+          status: r.status,
+          label: r.label,
+          detail: r.detail,
+          extra: r.extra || [],
+        })),
+        generatedAt: new Date().toISOString(),
+      });
+    }
     process.exit(0);
   }
 
@@ -585,11 +615,6 @@ async function main() {
     process.exit(exitCode);
   }
 
-  if (cmd === "demo") {
-    header();
-    process.exit(await runDemo({ keep: !!flags.keep }));
-  }
-
   if (cmd === "deploy") {
     header();
     const code = await deploy({
@@ -604,9 +629,52 @@ async function main() {
     process.exit(code);
   }
 
+  // Typo → focused "did you mean", not a 130-line help dump (finding: typo-dumps-full-help).
+  const known = [
+    "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
+    "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
+    "github-action", "deploy", "help", "version",
+  ];
+  const suggestion = didYouMean(cmd, known);
   console.error(c.red(`✗ Unknown command: ${cmd}`));
-  printHelp();
+  if (suggestion) {
+    console.error(c.gray(`  Did you mean \`${binName()} ${suggestion}\`?`));
+  }
+  console.error(c.gray(`  Run \`${binName()} help\` for the full command list.`));
   process.exit(1);
+}
+
+/** Tiny Levenshtein-ish "did you mean" for command typos. */
+function didYouMean(input, candidates) {
+  if (!input || typeof input !== "string") return null;
+  const s = input.toLowerCase();
+  let best = null;
+  let bestDist = Infinity;
+  for (const cand of candidates) {
+    const d = editDistance(s, cand);
+    // Accept only close typos (≤2 edits, or prefix match).
+    if (d < bestDist && (d <= 2 || cand.startsWith(s) || s.startsWith(cand.slice(0, 3)))) {
+      bestDist = d;
+      best = cand;
+    }
+  }
+  return bestDist <= 2 || (best && best.startsWith(s)) ? best : null;
+}
+
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 3) return 99;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
 }
 
 main().catch((e) => {

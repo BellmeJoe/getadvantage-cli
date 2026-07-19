@@ -1,0 +1,45 @@
+release: getadvantage 0.7.2 — trust gate + honesty sweep
+
+Ship the cold-QA fixes from 0.7.0 as a single versioned release:
+
+0.7.1 (trust-critical correctness)
+- Scan UTF-16 (BOM) files for secrets; stop false-GO on PowerShell-authored keys
+- List files with git -z so non-ASCII paths are not silently skipped
+- Run local typescript/bin/tsc via node; never npx --yes tsc
+- NO-GO on unparseable package.json (not checkable ≠ GO)
+- demo runs before the repo-root gate (works outside a git repo)
+- Generated CI workflow: install deps + pin getadvantage@version
+
+0.7.2 (honesty + branding + polish)
+- brief: protected notes block; refuse foreign PROJECT-BRIEF.md
+- getadvantage_* markers/frontmatter; legacy ship-safe reads still work
+- README teaches only getadvantage; warn that npx ship-safe is another package
+- map and check share scanRoutes + detectRepoStack; Next scans src/app/api
+- map --json emits a real JSON document
+- dirty-tree: own brain/marker artifacts are not "scratch" risk alone
+- deploy: Vercel token via child env, not argv
+- MCP: enforce inputSchema (additionalProperties), clear unknown-tool errors
+- First-run polish: gitSafe no fatal leak, did-you-mean, login abort exit 1,
+  missing-vs-stale brief wording, fan-out honesty, build 10m timeout,
+  switch cursor tip, demo help arithmetic, author hello@getadvantage.app
+
+Post-review fixes (independent review, docs/INDEPENDENT-REVIEW-0.7.2.md)
+- brief: fail closed — read the existing brief with a generous cap and refuse to
+  overwrite any file we cannot read as text (was: a >200 KB hand-written brief
+  silently clobbered) [brief-foreign-guard-bypassed-over-200kb]
+- dirty-tree: only untracked-new own files and regenerated brief/handoff/marker
+  files stay informational; tracked edits to seed files (CLAUDE.md/AGENTS.md/rules/
+  workflow) and any deletion now NO-GO instead of "clean of ship-risk"
+  [dirty-own-artifact-tracked-mod-pass]
+- secret scan: no longer skips committed build/dist/coverage dirs — they only
+  reach the scan when committed (the dangerous case), same as .env [F1-buildpath-secret-skip]
+- release pack: disclose that a push to main auto-publishes via publish.yml;
+  proposed workflow_dispatch/tag-only + --provenance variant in docs/ [auto-publish-on-push-undisclosed]
+
+Tests: 37/37 (npm test). Not published from this commit alone.
+
+Closes cold-QA findings: gate-utf16-false-go, gate-nonascii-filename-skipped,
+gate-npx-tsc-thirdparty, gate-ship-go-on-corrupt-packagejson,
+demo-requires-git-repo, brief-eats-manual-edits, map-vs-check-routes,
+shipsafe-brand-residue, shipsafe-name-collision, and the 0.7.2 polish set.
+Plus the four independent-review fixes above.

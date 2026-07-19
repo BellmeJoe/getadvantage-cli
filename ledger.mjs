@@ -13,7 +13,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { binName, c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
 
-const HEAD_MARK = "<!-- ship-safe:ledger -->";
+const HEAD_MARK = "<!-- getadvantage:ledger -->";
+const HEAD_MARK_LEGACY = "<!-- ship-safe:ledger -->";
 const LEDGER_FILE = "ledger.md";
 
 /** Pull the first real "next step" line out of a handoff notes block. Returns
@@ -48,7 +49,11 @@ export function appendLedger(cwd, { headSha, branch, lastHead, notes, now }) {
   const abs = markerFileForWrite(cwd, LEDGER_FILE);
 
   let body = existsSync(readAbs) ? readFileSync(readAbs, "utf8") : "";
-  if (!body.includes(HEAD_MARK)) {
+  if (body.includes(HEAD_MARK_LEGACY) && !body.includes(HEAD_MARK)) {
+    // Migrate the legacy marker on write so committed ledgers pick up the brand.
+    body = body.replace(HEAD_MARK_LEGACY, HEAD_MARK);
+  }
+  if (!body.includes(HEAD_MARK) && !body.includes(HEAD_MARK_LEGACY)) {
     body =
       `${HEAD_MARK}\n# Session ledger\n\n` +
       `_A running log of save-points (\`npx getadvantage handoff\`), newest at the bottom — ` +

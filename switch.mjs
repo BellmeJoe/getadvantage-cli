@@ -21,7 +21,11 @@ import { runInit } from "./init.mjs";
 const TOOL_TIPS = {
   claude: "Claude Code reads CLAUDE.md at startup — it'll pick up your brain automatically.",
   "claude-code": "Claude Code reads CLAUDE.md at startup — it'll pick up your brain automatically.",
-  cursor: "Cursor reads .cursorrules at startup — it'll pick up your brain automatically.",
+  // init upserts the auto-load block into existing AI files, or creates AGENTS.md
+  // when none exist. It does NOT create .cursorrules from scratch — only updates
+  // it if already present (finding: switch-cursorrules-claim).
+  cursor:
+    "Cursor: if you already have a .cursorrules file, it now has the brain block. Otherwise AGENTS.md was created (or updated) — open that, or add a .cursorrules and re-run `getadvantage init`.",
   windsurf: "Windsurf reads .windsurfrules at startup — it'll pick up your brain automatically.",
   cline: "Cline reads .clinerules at startup — it'll pick up your brain automatically.",
   copilot: "GitHub Copilot reads .github/copilot-instructions.md — it'll pick up your brain.",

@@ -1,0 +1,56 @@
+# PROPOSED replacement for .github/workflows/publish.yml
+# Inert here (wrong path / .proposed name) — apply deliberately when you decide:
+#   cp docs/publish.yml.proposed .github/workflows/publish.yml
+#
+# What changes vs the current workflow:
+#   - Trigger: `push: branches:[main]`  →  `push: tags:['v*']` + workflow_dispatch.
+#     A plain `git push origin main` no longer publishes — only pushing a vN tag
+#     (or a manual Actions run) does. Publishing becomes a deliberate act.
+#   - Adds `permissions: id-token: write` + `npm publish --provenance` so the npm
+#     package carries a verifiable build-provenance attestation (the residual the
+#     review pack flagged as missing).
+#   - Keeps the "already on npm → no-op" guard unchanged.
+
+name: Publish to npm
+
+# Publishes the getadvantage CLI DELIBERATELY — on a version tag push (v*) or a
+# manual run. A plain push to main no longer publishes, so you can sync source
+# without shipping. Skips when the version is already on npm (safe no-op).
+#
+# ONE-TIME SETUP: repo secret NPM_TOKEN with publish rights (a granular
+# automation token with read/write on packages). Provenance needs no extra
+# secret — it uses the workflow's own OIDC identity.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required for `npm publish --provenance` (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish if the version is new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view "$NAME" version 2>/dev/null || echo "none")
+          echo "name=$NAME local=$LOCAL published=$PUBLISHED"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "Version $LOCAL is already on npm — nothing to publish."
+            exit 0
+          fi
+          npm publish --provenance --access public
+          echo "Published $NAME@$LOCAL"

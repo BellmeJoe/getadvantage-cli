@@ -2,9 +2,9 @@
 //
 // Run several AI sessions / models IN PARALLEL on the same project, each in its
 // own git worktree, all sharing ONE project brain. Because your context lives in
-// the repo (PROJECT-BRIEF.md + HANDOFF.md), every lane reads the same brain and
-// won't collide — you open a different model/tool in each, work in parallel, then
-// review and merge the ones you like.
+// the repo (PROJECT-BRIEF.md + HANDOFF.md), every lane shares the brain, not the
+// working tree — fan-in catches collisions. You open a different model/tool in
+// each, work in parallel, then review and merge the ones you like.
 //
 // `fan-out <n> [--task "..."]`:
 //   1. refreshes the brain (writes PROJECT-BRIEF.md + HANDOFF.md so every lane
@@ -189,7 +189,8 @@ export function runFanOut(o) {
     console.log(c.gray("     All requested lanes already exist — nothing new created."));
   }
   console.log("     Open a DIFFERENT model/tool in each lane — they all read the same brain,");
-  console.log("     so they won't collide. For example (ChatGPT, Claude, Gemini, Cursor, Qwen):");
+  console.log("     so they share the brain, not the working tree — fan-in catches collisions.");
+  console.log("     For example (ChatGPT, Claude, Gemini, Cursor, Qwen):");
   console.log("");
   const lanesForGuidance = created.length ? created : skipped;
   for (const lane of lanesForGuidance) {

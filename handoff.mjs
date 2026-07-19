@@ -31,11 +31,15 @@ const DEFAULT_HANDOFF = "HANDOFF.md";
 const MARKER_FILE = "handoff.json";
 // Recognisable first-lines marker so we can tell OUR handoff from a hand-written
 // HANDOFF.md (and so a tool can recognise the file).
-const BANNER = "<!-- ship-safe:project-handoff -->";
-const NOTES_START = "<!-- ship-safe:handoff:notes -->";
-const NOTES_END = "<!-- /ship-safe:handoff:notes -->";
-const AUTO_START = "<!-- ship-safe:handoff:auto -->";
-const AUTO_END = "<!-- /ship-safe:handoff:auto -->";
+// Write getadvantage markers; still accept legacy ship-safe banners/notes.
+const BANNER = "<!-- getadvantage:project-handoff -->";
+const BANNER_LEGACY = "<!-- ship-safe:project-handoff -->";
+const NOTES_START = "<!-- getadvantage:handoff:notes -->";
+const NOTES_END = "<!-- /getadvantage:handoff:notes -->";
+const NOTES_START_LEGACY = "<!-- ship-safe:handoff:notes -->";
+const NOTES_END_LEGACY = "<!-- /ship-safe:handoff:notes -->";
+const AUTO_START = "<!-- getadvantage:handoff:auto -->";
+const AUTO_END = "<!-- /getadvantage:handoff:auto -->";
 
 // The narrative template written on the first handoff (and whenever the notes
 // section is empty). This is the part a human/agent fills in — the value.
@@ -170,7 +174,7 @@ export function runHandoff(o) {
 
   // ---- Guard: never overwrite a HANDOFF.md we didn't create. ---------------
   const prev = existsSync(handoffAbs) ? readTextSafe(handoffAbs) : "";
-  if (prev && !prev.includes(BANNER)) {
+  if (prev && !prev.includes(BANNER) && !prev.includes(BANNER_LEGACY)) {
     console.error(
       c.red(`✗ ${relPath(handoffAbs, cwd)} already exists and wasn't created by this CLI — refusing to overwrite it.`),
     );
@@ -189,7 +193,9 @@ export function runHandoff(o) {
   }
 
   // ---- 2. Preserve the existing narrative; regenerate the rest. ------------
-  const prevNotes = prev ? between(prev, NOTES_START, NOTES_END) : null;
+  const prevNotes = prev
+    ? between(prev, NOTES_START, NOTES_END) ?? between(prev, NOTES_START_LEGACY, NOTES_END_LEGACY)
+    : null;
   const firstTime = !prevNotes;
   const notes = prevNotes && prevNotes.trim() ? prevNotes : DEFAULT_NOTES;
 
@@ -202,7 +208,7 @@ export function runHandoff(o) {
 
   const L = [];
   L.push("---");
-  L.push("ship_safe_handoff: 1");
+  L.push("getadvantage_handoff: 1");
   L.push(`generated_at: ${now}`);
   L.push(`head_sha: ${auto.head || "(none)"}`);
   L.push(`branch: ${auto.branch}`);

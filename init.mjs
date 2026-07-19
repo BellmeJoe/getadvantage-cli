@@ -15,8 +15,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { binName, c, relPath } from "./util.mjs";
 
-const START = "<!-- ship-safe:auto-load -->";
-const END = "<!-- /ship-safe:auto-load -->";
+const START = "<!-- getadvantage:auto-load -->";
+const END = "<!-- /getadvantage:auto-load -->";
+const START_LEGACY = "<!-- ship-safe:auto-load -->";
+const END_LEGACY = "<!-- /ship-safe:auto-load -->";
 
 const BLOCK = [
   START,
@@ -41,11 +43,19 @@ const TARGETS = [
 
 function upsertBlock(abs) {
   let body = existsSync(abs) ? readFileSync(abs, "utf8") : "";
-  const i = body.indexOf(START);
-  const j = body.indexOf(END);
+  // Prefer current markers; fall back to legacy ship-safe so re-init migrates
+  // the block in place instead of duplicating it.
+  let i = body.indexOf(START);
+  let j = body.indexOf(END);
+  let endLen = END.length;
+  if (i === -1 || j === -1 || j <= i) {
+    i = body.indexOf(START_LEGACY);
+    j = body.indexOf(END_LEGACY);
+    endLen = END_LEGACY.length;
+  }
   let action;
   if (i !== -1 && j !== -1 && j > i) {
-    body = body.slice(0, i) + BLOCK + body.slice(j + END.length);
+    body = body.slice(0, i) + BLOCK + body.slice(j + endLen);
     action = "updated";
   } else {
     body = (body ? body.replace(/\n*$/, "") + "\n\n" : "") + BLOCK + "\n";

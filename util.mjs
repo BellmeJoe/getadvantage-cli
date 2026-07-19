@@ -68,12 +68,40 @@ export function gitRaw(args, opts = {}) {
   });
 }
 
-/** Run git but never throw — returns "" on any failure (best-effort probes). */
+/** Run git but never throw — returns "" on any failure (best-effort probes).
+ *  Stderr is swallowed so a 0-commit repo's `fatal: your current branch … does
+ *  not have any commits yet` never leaks into the CLI UI (finding:
+ *  zerocommit-git-fatal-leak). */
 export function gitSafe(args, opts = {}) {
   try {
-    return git(args, opts);
+    return execFileSync("git", args, {
+      encoding: "utf8",
+      cwd: opts.cwd ?? process.cwd(),
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return "";
+  }
+}
+
+/** List repo files with `git <args> -z` and return an array of paths.
+ *  The `-z` (NUL-terminated) output is CRITICAL: without it, `git ls-files`
+ *  octal-escapes and quotes any non-ASCII path (core.quotepath is on by
+ *  default), e.g. `"geheime Datei \303\274ber prod.txt"` — which then fails to
+ *  open, so the file is silently dropped from the scan (a false GO on any repo
+ *  with an umlaut in a filename). `-z` emits raw UTF-8 bytes, unquoted.
+ *  Best-effort: returns [] on any failure. */
+export function gitFilesZ(args, opts = {}) {
+  try {
+    const out = execFileSync("git", [...args, "-z"], {
+      encoding: "utf8",
+      cwd: opts.cwd ?? process.cwd(),
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return out.split("\0").filter(Boolean);
+  } catch {
+    return [];
   }
 }
 

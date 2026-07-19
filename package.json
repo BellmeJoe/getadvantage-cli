@@ -1,6 +1,6 @@
 {
   "name": "getadvantage",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "description": "The getAdvantage CLI \u2014 a local, dependency-free pre-deploy gate and portable project brain for AI-built apps. Plain-language GO / NO-GO checks, a repo-resident PROJECT-BRIEF.md any model reads first, and session handoffs between AI tools.",
   "type": "module",
   "bin": {
@@ -38,7 +38,7 @@
     "worktree",
     "parallel"
   ],
-  "homepage": "https://getadvantage.app/ship-safe",
+  "homepage": "https://getadvantage.app",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BellmeJoe/getadvantage-cli.git"
@@ -46,7 +46,7 @@
   "bugs": {
     "url": "https://github.com/BellmeJoe/getadvantage-cli/issues"
   },
-  "author": "getAdvantage (https://getadvantage.app)",
+  "author": "getAdvantage <hello@getadvantage.app> (https://getadvantage.app)",
   "publishConfig": {
     "access": "public"
   }

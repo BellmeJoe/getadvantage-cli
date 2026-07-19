@@ -308,12 +308,63 @@ function rpcError(id, code, message, data) {
   return { jsonrpc: "2.0", id, error: err };
 }
 
+/**
+ * Enforce a tool's inputSchema (type: object, properties, additionalProperties:false).
+ * Returns null if ok, or an error string for -32602 (finding: mcp-schema-not-enforced).
+ */
+function validateToolArgs(toolDef, args) {
+  const schema = toolDef && toolDef.inputSchema;
+  if (!schema || schema.type !== "object") return null;
+  const raw = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+  const props = schema.properties || {};
+  const allowed = new Set(Object.keys(props));
+
+  if (schema.additionalProperties === false) {
+    const extras = Object.keys(raw).filter((k) => !allowed.has(k));
+    if (extras.length) {
+      return `Invalid params: unexpected propert${extras.length === 1 ? "y" : "ies"}: ${extras.join(", ")}`;
+    }
+  }
+
+  for (const [key, prop] of Object.entries(props)) {
+    if (!(key in raw) || raw[key] === undefined) continue;
+    const v = raw[key];
+    if (prop.type === "string" && typeof v !== "string") {
+      return `Invalid params: "${key}" must be a string`;
+    }
+    if (prop.type === "boolean" && typeof v !== "boolean") {
+      return `Invalid params: "${key}" must be a boolean`;
+    }
+    if (prop.type === "number" && typeof v !== "number") {
+      return `Invalid params: "${key}" must be a number`;
+    }
+  }
+
+  if (Array.isArray(schema.required)) {
+    for (const req of schema.required) {
+      if (!(req in raw) || raw[req] === undefined || raw[req] === null) {
+        return `Invalid params: missing required property "${req}"`;
+      }
+    }
+  }
+  return null;
+}
+
 async function handleToolsCall(id, params) {
-  const name = params && params.name;
+  const name = params && typeof params.name === "string" ? params.name : undefined;
   const args = (params && params.arguments) || {};
+  if (!name) {
+    return rpcError(id, -32602, "Unknown tool: (name missing)");
+  }
+  const toolDef = TOOLS.find((t) => t.name === name);
   const impl = TOOL_IMPL[name];
-  if (!impl) {
+  if (!toolDef || !impl) {
     return rpcError(id, -32602, `Unknown tool: ${name}`);
+  }
+
+  const schemaErr = validateToolArgs(toolDef, args);
+  if (schemaErr) {
+    return rpcError(id, -32602, schemaErr);
   }
 
   const { cwd, error } = resolveRepo(args);

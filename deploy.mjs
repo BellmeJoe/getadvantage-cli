@@ -55,7 +55,7 @@ export async function deploy(o) {
     }
   }
 
-  console.log(c.bold("\nShip-Safe — safe deploy"));
+  console.log(c.bold("\ngetAdvantage — safe deploy"));
   console.log(
     c.dim(`  target commit: ${commit}   expect prefix: ${expectPrefix || "(none — wrong-project guard disabled)"}\n`),
   );
@@ -108,24 +108,28 @@ export async function deploy(o) {
     }
 
     // ---- 5. Run `vercel --prod` FROM the worktree. ------------------------
-    // We pass the token via the --token flag value (read from env above) and the
-    // scope through --scope. The token value is never logged by us; we spawn
-    // with stdio inherited so vercel's own output streams to the founder.
+    // Token via the CHILD'S env (VERCEL_TOKEN), never as a CLI arg — argv is
+    // visible in the process list (finding: deploy-token-in-argv). Scope still
+    // goes through --scope. Value never logged.
     section("Deploying");
     const vercelArgs = ["--yes", "vercel", "--prod", "--yes"];
     if (o.scope) vercelArgs.push("--scope", o.scope);
-    vercelArgs.push("--token", token); // value from env; not printed by us
 
-    // Print a redacted version of the command (token masked) for transparency.
-    const shown = vercelArgs.map((a) => (a === token ? "<token:hidden>" : a));
-    console.log(c.gray(`  npx ${shown.join(" ")}   (cwd=${wtDir})`));
+    console.log(c.gray(`  npx ${vercelArgs.join(" ")}   (cwd=${wtDir}, token via env ${tokenEnv})`));
 
     // Capture stdout so we can read the deployment URL, but also echo it live.
+    const childEnv = { ...process.env, VERCEL_TOKEN: token };
+    // If the founder named a different token env var, also set that name so
+    // vercel (which reads VERCEL_TOKEN) still works when tokenEnv was custom —
+    // we always set VERCEL_TOKEN for the CLI, and keep the source var too.
+    if (tokenEnv !== "VERCEL_TOKEN") childEnv[tokenEnv] = token;
+
     const proc = spawnSync("npx", vercelArgs, {
       cwd: wtDir,
       encoding: "utf8",
       shell: process.platform === "win32",
       maxBuffer: 32 * 1024 * 1024,
+      env: childEnv,
     });
     deployed = true;
     const stdout = proc.stdout || "";

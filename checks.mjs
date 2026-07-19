@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
-import { result, fingerprint, git, gitRaw, gitSafe } from "./util.mjs";
+import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
 
 // ===========================================================================
@@ -19,6 +19,47 @@ import { detectProject } from "./detect.mjs";
 // modified/staged file (possibly another concurrent session's uncommitted
 // work) would ship live. BLOCK on tracked changes; WARN on untracked (often
 // scratch). This is the single biggest known foot-gun in this repo.
+/**
+ * Paths the CLI itself writes and then tells the user to commit. Flagging them
+ * as "likely scratch" right after `brief`/`handoff`/`init` is dishonest
+ * (finding: self-artifacts-trip-dirty-guard). Matched as exact files or under
+ * the marker dirs.
+ */
+function isOwnArtifact(rel) {
+  const p = String(rel || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (
+    p === "PROJECT-BRIEF.md" ||
+    p === "HANDOFF.md" ||
+    p === "AGENTS.md" ||
+    p === ".cursorrules" ||
+    p === ".windsurfrules" ||
+    p === ".clinerules" ||
+    p === "CLAUDE.md" ||
+    p === ".github/copilot-instructions.md" ||
+    p === ".github/workflows/getadvantage.yml"
+  ) {
+    return true;
+  }
+  if (p.startsWith(".getadvantage/") || p.startsWith(".ship-safe/")) return true;
+  return false;
+}
+
+/**
+ * The subset of own artifacts the CLI REWRITES on every run (brief/handoff and
+ * the marker dirs). A tracked, in-place modification of these is expected churn,
+ * so it stays informational. The OTHER own artifacts (CLAUDE.md, AGENTS.md, the
+ * editor rules files, the CI workflow) are seeded ONCE and then hand-maintained —
+ * a tracked edit or deletion there is real human/agent work (or tampering), not
+ * CLI churn, so it must go through the normal tracked-change gate instead of being
+ * reported as "clean of ship-risk" (finding: dirty-own-artifact-tracked-mod-pass).
+ */
+function isRegeneratedArtifact(rel) {
+  const p = String(rel || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  if (p === "PROJECT-BRIEF.md" || p === "HANDOFF.md") return true;
+  if (p.startsWith(".getadvantage/") || p.startsWith(".ship-safe/")) return true;
+  return false;
+}
+
 export function checkDirtyTree(cwd) {
   // gitRaw (NOT git) — porcelain's leading status columns are space-significant,
   // so we must not trim the output before parsing.
@@ -30,11 +71,27 @@ export function checkDirtyTree(cwd) {
   const lines = porcelain.split("\n").filter((l) => l.length > 0);
   const tracked = []; // modified / staged / renamed / deleted tracked files
   const untracked = []; // ?? — new files git isn't tracking yet
+  const own = []; // getAdvantage brain/marker artifacts (informational)
 
   for (const line of lines) {
     // Porcelain v1: XY<space>path  (X=staged, Y=worktree). "??" = untracked.
+    // Renames: "R  old -> new" — take the right-hand path for classification.
     const xy = line.slice(0, 2);
-    const file = line.slice(3);
+    let file = line.slice(3);
+    if (file.includes(" -> ")) file = file.split(" -> ").pop();
+    if (isOwnArtifact(file)) {
+      const untrackedNew = xy === "??";
+      const deleted = xy.includes("D");
+      // Informational ONLY when it is a just-generated untracked file, or an
+      // expected in-place rewrite of a file the CLI regenerates every run. A
+      // tracked edit to a seed file (CLAUDE.md/AGENTS.md/rules/workflow), or ANY
+      // deletion, is real work → fall through to the normal tracked gate so we
+      // never claim "clean of ship-risk" over changes the CLI did not make.
+      if (untrackedNew || (isRegeneratedArtifact(file) && !deleted)) {
+        own.push(file);
+        continue;
+      }
+    }
     if (xy === "??") untracked.push(file);
     else tracked.push(`${xy.trim() || xy} ${file}`);
   }
@@ -48,19 +105,38 @@ export function checkDirtyTree(cwd) {
         ...tracked.slice(0, 20).map((t) => t),
         ...(tracked.length > 20 ? [`…and ${tracked.length - 20} more`] : []),
         "Commit, stash, or revert before shipping. Deploy from a clean detached worktree of the intended commit.",
+        ...(own.length
+          ? [`(Also ${own.length} getAdvantage brain/marker file(s) dirty — commit those when ready; they don't block alone.)`]
+          : []),
       ],
     );
   }
 
-  // Only untracked files → warn, list them (they're usually scratch/logs).
+  // Only own artifacts dirty → pass with a note (the tool told you to create them).
+  if (untracked.length === 0 && own.length > 0) {
+    return result(
+      "pass",
+      "Dirty-tree guard",
+      `Working tree clean of ship-risk; ${own.length} getAdvantage brain/marker file(s) uncommitted (expected after brief/handoff — commit when ready).`,
+      own.slice(0, 20),
+    );
+  }
+
+  // Only untracked files → warn, list them (may be intentional new work).
+  const extras = [
+    ...untracked.slice(0, 20),
+    ...(untracked.length > 20 ? [`…and ${untracked.length - 20} more`] : []),
+  ];
+  if (own.length) {
+    extras.push(
+      `(Plus ${own.length} getAdvantage brain/marker file(s) — not listed as risk; commit when ready.)`,
+    );
+  }
   return result(
     "warn",
     "Dirty-tree guard",
-    `${untracked.length} untracked file(s) present (not tracked — likely scratch, but confirm they shouldn't ship).`,
-    [
-      ...untracked.slice(0, 20),
-      ...(untracked.length > 20 ? [`…and ${untracked.length - 20} more`] : []),
-    ],
+    `${untracked.length} untracked file(s) present (not yet tracked — confirm they are meant to ship, or add them to .gitignore).`,
+    extras,
   );
 }
 
@@ -165,13 +241,16 @@ const SECRET_PATTERNS = [
 
 // Files we never scan (binary-ish, generated, vendored).
 //
-// ⚠ Deliberately NOT skipped anymore: .env* files. A gitignored .env never
-// reaches filesToScan() in the first place (git ls-files honours .gitignore),
-// so a basename skip here could only ever suppress the DANGEROUS case — a
-// tracked/committed .env, which is exactly the classic vibe-coder leak.
-// That was a real hole in ≤0.5.0; fixed in 0.6.0 (plus the dedicated
-// tracked-.env check below).
-const SKIP_DIR = new Set([".git", "node_modules", ".next", ".vercel", ".data", "dist", "build", "coverage"]);
+// ⚠ Deliberately NOT skipped: .env* files AND build-output dirs (dist/build/
+// coverage). filesToScan() runs through git ls-files, which honours .gitignore —
+// so a normally-generated dir only ever reaches the scan when the user COMMITTED
+// it. A dir/basename skip here could therefore only suppress the DANGEROUS case:
+// a bundled/copied key inside committed build output (the classic vibe-coder
+// `git add .` of a dist folder). Skipping .env was a real hole in ≤0.5.0 (fixed
+// 0.6.0); skipping build dirs was the same silent-GO hole
+// (finding: F1-buildpath-secret-skip). Truly-huge trees that are normally
+// gitignored stay skipped for perf — if they're committed, that's a separate smell.
+const SKIP_DIR = new Set([".git", "node_modules", ".next", ".vercel", ".data"]);
 const SKIP_BASENAME = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
@@ -191,6 +270,40 @@ function looksBinary(buf) {
   const n = Math.min(buf.length, 4096);
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
   return false;
+}
+
+/** UTF-16 encoding implied by a leading BOM, or null. FF FE = LE (the Windows
+ *  PowerShell 5.1 default for `>` / Out-File), FE FF = BE. */
+function bomEncoding(buf) {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return "utf16le";
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return "utf16be";
+  return null;
+}
+
+/** Decode UTF-16 bytes to a JS string. `hasBom` strips the leading 2-byte BOM;
+ *  BE is byte-swapped to LE (Node has no utf16be decoder). */
+function decodeUtf16(buf, be, hasBom) {
+  const body = hasBom ? buf.subarray(2) : buf;
+  if (!be) return body.toString("utf16le");
+  const swapped = Buffer.allocUnsafe(body.length - (body.length % 2));
+  for (let i = 0; i + 1 < body.length; i += 2) {
+    swapped[i] = body[i + 1];
+    swapped[i + 1] = body[i];
+  }
+  return swapped.toString("utf16le");
+}
+
+/** Decode a whole-file buffer to scannable text, honoring a UTF-16/UTF-8 BOM.
+ *  Returns null for genuine binary (caller skips). Without the UTF-16 branch, a
+ *  UTF-16-LE file has a NUL byte after every ASCII char, trips looksBinary, and
+ *  is skipped silently — so a committed secret in a PowerShell-authored notes
+ *  file passes the gate (a false GO). BOM detection is the reliable signal
+ *  because both PowerShell and most Windows editors write the BOM. */
+function decodeText(buf) {
+  const enc = bomEncoding(buf);
+  if (enc) return decodeUtf16(buf, enc === "utf16be", /* hasBom */ true);
+  if (looksBinary(buf)) return null;
+  return buf.toString("utf8");
 }
 
 /** Read the first and last PARTIAL_CHUNK_BYTES of an oversized file without
@@ -214,10 +327,13 @@ function readHeadTail(abs, size) {
  *  is supposed to hold secrets). */
 function filesToScan(cwd) {
   const set = new Set();
+  // gitFilesZ (NUL-terminated) — NOT the newline-split gitSafe: git quotes +
+  // octal-escapes non-ASCII paths by default, which then fail to open and drop
+  // out of the scan silently (a false GO on any repo with an umlaut filename).
   // Tracked files.
-  for (const f of gitSafe(["ls-files"], { cwd }).split("\n")) if (f) set.add(f);
+  for (const f of gitFilesZ(["ls-files"], { cwd })) set.add(f);
   // Untracked-but-not-ignored (new files a dev created; --others honours .gitignore).
-  for (const f of gitSafe(["ls-files", "--others", "--exclude-standard"], { cwd }).split("\n")) if (f) set.add(f);
+  for (const f of gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })) set.add(f);
   return [...set];
 }
 
@@ -248,13 +364,20 @@ export function checkSecrets(cwd) {
         // say so in the summary — a secret appended to a giant file is a
         // classic miss.
         const { head, tail } = readHeadTail(abs, st.size);
-        if (looksBinary(head)) continue;
-        text = `${head.toString("utf8")}\n${tail.toString("utf8")}`;
+        const enc = bomEncoding(head);
+        if (enc) {
+          // UTF-16: decode both chunks (head carries the BOM, tail doesn't).
+          const be = enc === "utf16be";
+          text = `${decodeUtf16(head, be, true)}\n${decodeUtf16(tail, be, false)}`;
+        } else {
+          if (looksBinary(head)) continue;
+          text = `${head.toString("utf8")}\n${tail.toString("utf8")}`;
+        }
         isPartial = true;
       } else {
-        const buf = readFileSync(abs);
-        if (looksBinary(buf)) continue;
-        text = buf.toString("utf8");
+        const decoded = decodeText(readFileSync(abs));
+        if (decoded === null) continue;
+        text = decoded;
       }
     } catch {
       continue; // unreadable / deleted-but-staged etc.
@@ -327,9 +450,7 @@ function isRealEnvFile(basename) {
 }
 
 export function checkTrackedEnv(cwd) {
-  const tracked = gitSafe(["ls-files"], { cwd })
-    .split("\n")
-    .filter(Boolean)
+  const tracked = gitFilesZ(["ls-files"], { cwd })
     .filter((f) => isRealEnvFile(path.basename(f)));
 
   if (tracked.length > 0) {
@@ -344,9 +465,7 @@ export function checkTrackedEnv(cwd) {
     );
   }
 
-  const untrackedEnv = gitSafe(["ls-files", "--others", "--exclude-standard"], { cwd })
-    .split("\n")
-    .filter(Boolean)
+  const untrackedEnv = gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })
     .filter((f) => isRealEnvFile(path.basename(f)));
 
   if (untrackedEnv.length > 0) {
@@ -366,24 +485,71 @@ export function checkTrackedEnv(cwd) {
 }
 
 // ===========================================================================
+// b3. PACKAGE MANIFEST INTEGRITY
+// ===========================================================================
+// "Not checkable is not GO." A package.json that EXISTS but does not parse means
+// npm can't install, the build can't run, and the deploy will fail — so the gate
+// must NO-GO, not merely warn (that was a false GO: `ship` returned GO on a
+// corrupt manifest because the build gate could only warn "could not run"). The
+// BOM case was patched in 0.6.2; this makes the principle general. A repo with
+// NO package.json is a legitimate non-Node project → neutral skip.
+export function checkManifest(cwd, project = null) {
+  const p = project || detectProject(cwd);
+  if (p.packageJsonBroken) {
+    return result(
+      "fail",
+      "Package manifest",
+      "package.json exists but is not valid JSON — npm install, the build, and the deploy will all fail until it parses.",
+      [
+        "Fix the syntax (a trailing comma, a missing quote, smart quotes, or a mid-file BOM are the usual causes), then re-run.",
+      ],
+    );
+  }
+  if (!p.packageJsonExists) {
+    return result(
+      "skip",
+      "Package manifest",
+      "Skipped — no package.json (not a Node project). Nothing to validate.",
+    );
+  }
+  return result("pass", "Package manifest", "package.json is present and valid JSON.");
+}
+
+// ===========================================================================
 // c. BUILD + TYPECHECK
 // ===========================================================================
 // Default: `npx tsc --noEmit` (fast). `--build` also runs `npm run build`.
 // BLOCK on either failing; print the tail of the output so the founder sees
 // the actual error without scrollback.
 
-function runCapture(cmd, args, cwd) {
+/** Default wall-clock budget for typecheck / build (finding: gate-build-no-timeout). */
+const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function runCapture(cmd, args, cwd, opts = {}) {
   try {
     const out = execFileSync(cmd, args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 32 * 1024 * 1024,
-      // On Windows npx/tsc are .cmd shims — shell:true lets them resolve.
-      shell: process.platform === "win32",
+      // On Windows npm is a .cmd shim — shell:true lets it resolve. When we call
+      // an absolute path through `node` (the tsc case) we pass shell:false so the
+      // path is never re-parsed by cmd.exe.
+      shell: opts.shell ?? process.platform === "win32",
+      timeout: opts.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
+      killSignal: "SIGTERM",
     });
     return { ok: true, out };
   } catch (e) {
+    // Node sets e.killed / signal on timeout; surface a clear message.
+    if (e.killed || e.signal === "SIGTERM" || /ETIMEDOUT|timed out/i.test(String(e.message || ""))) {
+      const mins = Math.round((opts.timeout ?? DEFAULT_CHECK_TIMEOUT_MS) / 60000);
+      return {
+        ok: false,
+        out: `Command timed out after ${mins} minute(s): ${cmd} ${args.join(" ")}`,
+        timedOut: true,
+      };
+    }
     const out = `${e.stdout || ""}${e.stderr || ""}`.trim();
     return { ok: false, out: out || String(e.message || e) };
   }
@@ -402,13 +568,14 @@ export function checkTypecheck(cwd, project = null) {
   // would download TypeScript and either fail (no config) or flag JS files —
   // a FALSE NO-GO. Degrade to a clearly-labelled skip instead.
   if (!p.typecheckable) {
-    // A broken manifest is NOT a clean skip: we cannot know whether TypeScript
-    // is a dependency, so say so as a warning instead of a confident skip.
+    // A broken manifest can't confirm the TypeScript setup. The Package manifest
+    // check owns the NO-GO for that (a broken manifest is a hard block), so here
+    // we skip and point at it rather than emitting a second, weaker signal.
     if (p.packageJsonBroken && p.hasTsConfig) {
       return result(
-        "warn",
+        "skip",
         "Typecheck",
-        "package.json exists but could not be parsed — cannot confirm the TypeScript setup (tsconfig.json is present). Fix the JSON, then re-run.",
+        "Skipped — package.json could not be parsed, so the TypeScript setup can't be confirmed (the Package manifest check blocks on this). Fix the JSON, then re-run.",
       );
     }
     const why = !p.hasTsConfig && !p.hasTypeScript
@@ -423,7 +590,20 @@ export function checkTypecheck(cwd, project = null) {
     );
   }
 
-  const r = runCapture("npx", ["--yes", "tsc", "--noEmit"], cwd);
+  // Resolve the LOCALLY INSTALLED TypeScript compiler and run it via `node`.
+  // NEVER `npx --yes tsc`: when typescript is declared but not installed (a
+  // fresh clone, or CI with no install step), npx would download and execute a
+  // SQUATTED third-party package literally named `tsc` and we'd mislabel its
+  // output as type errors. A trust gate must not fetch-and-run unvetted code.
+  const tscJs = path.join(cwd, "node_modules", "typescript", "bin", "tsc");
+  if (!existsSync(tscJs)) {
+    return result(
+      "warn",
+      "Typecheck",
+      "TypeScript is declared but not installed (no node_modules/typescript). Run `npm install`, then re-run — the gate never downloads a compiler.",
+    );
+  }
+  const r = runCapture(process.execPath, [tscJs, "--noEmit"], cwd, { shell: false });
   if (r.ok) {
     return result("pass", "Typecheck (tsc --noEmit)", "TypeScript compiled with no type errors.");
   }
@@ -443,13 +623,16 @@ export function checkBuild(cwd, project = null) {
   const p = project || detectProject(cwd);
 
   if (!p.hasBuildScript) {
-    // Honest three-way split — a broken/BOM'd package.json must NEVER read as
-    // "(no package.json)" and silently pass the gate (that was a false GO).
+    // A broken/BOM'd package.json must NEVER read as "(no package.json)" and
+    // silently pass the gate (that was a false GO). The Package manifest check
+    // owns the NO-GO for an unparseable manifest; defer to it here so ship
+    // reports ONE clear blocking reason, not a weaker "could not run" warning
+    // that still lets the verdict be GO.
     if (p.packageJsonBroken) {
       return result(
-        "warn",
+        "skip",
         "Build",
-        "package.json exists but could not be parsed — cannot determine the build script, so the build gate could not run. Fix the JSON (invalid syntax?), then re-run.",
+        "Skipped — package.json could not be parsed, so the build script can't be determined (the Package manifest check blocks on this). Fix the JSON, then re-run.",
       );
     }
     return result(
@@ -466,7 +649,9 @@ export function checkBuild(cwd, project = null) {
   return result(
     "fail",
     "Production build (npm run build)",
-    "The build failed — fix it before shipping.",
+    r.timedOut
+      ? "The build timed out (10 min budget) — fix a hang or run the build yourself before shipping."
+      : "The build failed — fix it before shipping.",
     tail(r.out, 30),
   );
 }

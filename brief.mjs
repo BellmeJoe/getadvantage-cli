@@ -47,17 +47,62 @@ import {
   markerFileForWrite,
 } from "./util.mjs";
 import {
-  scanApiSurface,
+  scanRoutes,
   apiRowTag,
   scanIntegrations,
   scanSchedules,
   scheduleRowTag,
 } from "./overviews.mjs";
+import { detectRepoStack } from "./detect.mjs";
 
 const DEFAULT_OUT = "PROJECT-BRIEF.md";
 const MARKER_FILE = "brief.json";
-// A stable banner so a model/tool can recognise this file by its first lines.
-const BANNER = "<!-- ship-safe:project-brief -->";
+// Stable banner so a model/tool can recognise this file. Write the getAdvantage
+// name; still accept the legacy ship-safe banner so older briefs keep working
+// (finding: shipsafe-codename-in-artifacts).
+const BANNER = "<!-- getadvantage:project-brief -->";
+const BANNER_LEGACY = "<!-- ship-safe:project-brief -->";
+// Protected notes block — same pattern as HANDOFF.md. Regenerating the brief
+// rewrites the generated map/state but MUST preserve anything the human/agent
+// put between these markers (finding: brief-eats-manual-edits).
+const NOTES_START = "<!-- getadvantage:brief:notes -->";
+const NOTES_END = "<!-- /getadvantage:brief:notes -->";
+const NOTES_START_LEGACY = "<!-- ship-safe:brief:notes -->";
+const NOTES_END_LEGACY = "<!-- /ship-safe:brief:notes -->";
+
+// Template written on first generate (and when the notes section is empty).
+// Fill this in; it survives every subsequent `brief` refresh.
+const DEFAULT_NOTES = [
+  "## Your notes (preserved across refreshes)",
+  "_(Hand-written context, decisions, ICP notes, or links the generators don't",
+  "know about. Edit freely between the HTML comment markers — `npx getadvantage",
+  "brief` will keep this block and only regenerate the sections below.)_",
+  "",
+  "- _(Replace this line, or delete the list if you have nothing yet.)_",
+].join("\n");
+
+/** Content strictly between two markers (exclusive). Null if either is absent. */
+function between(text, start, end) {
+  const i = text.indexOf(start);
+  if (i === -1) return null;
+  const j = text.indexOf(end, i + start.length);
+  if (j === -1) return null;
+  return text.slice(i + start.length, j).replace(/^\n+/, "").replace(/\n+$/, "");
+}
+
+/** True if this file was created by getadvantage brief (current or legacy banner). */
+function isOurBrief(text) {
+  return text.includes(BANNER) || text.includes(BANNER_LEGACY);
+}
+
+/** Extract preserved notes from a prior brief (new markers, then legacy). */
+function extractNotes(prev) {
+  if (!prev) return null;
+  return (
+    between(prev, NOTES_START, NOTES_END) ??
+    between(prev, NOTES_START_LEGACY, NOTES_END_LEGACY)
+  );
+}
 
 // ===========================================================================
 // repo-fact readers (best-effort; never throw on a missing/oddly-shaped file)
@@ -243,19 +288,31 @@ function mdEscape(s) {
   return String(s).replace(/\|/g, "\\|");
 }
 
-/** Build the full PROJECT-BRIEF.md text. */
-function renderBrief(cwd) {
+/**
+ * Build the full PROJECT-BRIEF.md text.
+ * @param {string} cwd
+ * @param {string} [notes]  preserved notes body (between markers); default template if empty
+ */
+function renderBrief(cwd, notes) {
   const pkg = readPackage(cwd);
   const stack = detectStack(cwd, pkg);
   const pm = detectPackageManager(cwd);
   const deploy = detectDeploy(cwd);
   const does = whatItDoes(cwd, pkg);
   const git = gitState(cwd);
-  const api = scanApiSurface(cwd);
+  // Same stack-aware route scan as map + check (finding: map-vs-check-routes).
+  let repoStack = null;
+  try {
+    repoStack = detectRepoStack(cwd);
+  } catch {
+    /* best-effort */
+  }
+  const api = scanRoutes(cwd, repoStack);
   const integ = scanIntegrations(cwd);
   const sched = scanSchedules(cwd);
   const now = new Date().toISOString();
   const repoName = path.basename(cwd);
+  const notesBody = notes && notes.trim() ? notes : DEFAULT_NOTES;
 
   const claudePresent = existsSync(path.join(cwd, "CLAUDE.md"));
   const handoffPresent = existsSync(path.join(cwd, "HANDOFF.md"));
@@ -264,7 +321,7 @@ function renderBrief(cwd) {
 
   // ---- frontmatter (machine-readable staleness marker) --------------------
   L.push("---");
-  L.push("ship_safe_brief: 1");
+  L.push("getadvantage_brief: 1");
   L.push(`generated_at: ${now}`);
   L.push(`head_sha: ${git.head || "(none)"}`);
   L.push(`branch: ${git.branch}`);
@@ -281,13 +338,19 @@ function renderBrief(cwd) {
   L.push("> portable, provider-agnostic brief generated from the repo itself by");
   L.push("> `npx getadvantage brief`. It lets any model, session, or tool start cold");
   L.push("> without re-explaining the project — your brain lives in the repo,");
-  L.push("> not in your tool. Everything here is generated from the real tree;");
-  L.push("> if it looks stale, run `npx getadvantage brief` to refresh it.");
+  L.push("> not in your tool. Everything below the notes block is generated from");
+  L.push("> the real tree; if it looks stale, run `npx getadvantage brief` to refresh it.");
   L.push(">");
   L.push("> This is the **COLD** layer — what the project *is* (slow-moving). For the");
   L.push("> **HOT** layer — where work *left off right now* (what you were doing, the");
   L.push("> next steps) — read `HANDOFF.md` if present, and run `npx getadvantage handoff` to");
   L.push("> refresh both before you switch sessions or models.");
+  L.push("");
+
+  // ---- protected notes (preserved across regenerations) -------------------
+  L.push(NOTES_START);
+  L.push(notesBody);
+  L.push(NOTES_END);
   L.push("");
 
   // ---- 1. What the app is --------------------------------------------------
@@ -314,7 +377,16 @@ function renderBrief(cwd) {
   L.push("### API surface");
   L.push("");
   if (api.rows.length === 0) {
-    L.push("No `app/api/**/route` files found.");
+    const kind = api.stackKind || (repoStack && repoStack.kind) || "next";
+    if (kind === "next") {
+      L.push("No Next.js App Router routes (`app/api/**/route.*` or `src/app/api/**/route.*`) found.");
+    } else if (kind === "node") {
+      L.push("No Express/Fastify route registrations found.");
+    } else if (kind === "python") {
+      L.push("No Flask/FastAPI route decorators found.");
+    } else {
+      L.push(`No routes parsed for this stack (${kind}).`);
+    }
   } else {
     L.push(
       `${api.rows.length} route(s) · ${api.gatedCount} look gated (session or cron secret) · ` +
@@ -442,7 +514,9 @@ function renderBrief(cwd) {
   L.push("---");
   L.push("");
   L.push(`_Generated by \`npx getadvantage brief\` at ${now} from \`${git.head ? git.head.slice(0, 10) : "(no HEAD)"}\`._`);
-  L.push("_Regenerate after meaningful changes: `npx getadvantage brief`. The brief is repo-resident on purpose — commit it so any model/session starts here._");
+  L.push(
+    "_Regenerate after meaningful changes: `npx getadvantage brief`. Your notes between the `getadvantage:brief:notes` markers are preserved; everything else is regenerated. The brief is repo-resident on purpose — commit it so any model/session starts here._",
+  );
   L.push("");
 
   return { text: L.join("\n"), head: git.head, generatedAt: now, branch: git.branch };
@@ -618,21 +692,66 @@ export function runBrief(o) {
       console.log(
         `  ${c.yellow("⚠")} ${c.bold("Project brief")} — ${s.reason}`,
       );
-      console.log(`      ${c.gray(`project brief is stale, run \`${binName()} brief\` to refresh.`)}`);
+      const hint =
+        s.status === "missing"
+          ? `no project brief yet — run \`${binName()} brief\` to create one.`
+          : `project brief is stale — run \`${binName()} brief\` to refresh.`;
+      console.log(`      ${c.gray(hint)}`);
     }
     return 0; // a warning, never a NO-GO
   }
 
-  // Generate.
-  const { text, head, generatedAt, branch } = renderBrief(cwd);
+  // Generate — never clobber a PROJECT-BRIEF.md we didn't create (same rule as handoff).
   const briefAbs = path.resolve(cwd, out);
+  // Fail CLOSED. readTextSafe returns "" both for a MISSING file and for one that
+  // exists but is unreadable / over its size cap. Treating the latter as "no file"
+  // silently overwrote hand-written briefs over the 200 KB cap
+  // (finding: brief-foreign-guard-bypassed-over-200kb). So: (1) read with a
+  // generous cap — any real brief, even one with a large notes block, is preserved;
+  // (2) if the file exists on disk but we still couldn't read it as text, refuse
+  // rather than clobber a file we can't prove we authored.
+  let existingSize = -1; // -1 = no file
+  try {
+    const st = statSync(briefAbs);
+    if (st.isFile()) existingSize = st.size;
+  } catch {
+    /* no file / unstatable → treat as absent */
+  }
+  const prev = existingSize >= 0 ? readTextSafe(briefAbs, 8_000_000) : "";
+  if (existingSize > 0 && !prev) {
+    console.error(
+      c.red(`✗ ${relPath(briefAbs, cwd)} already exists but couldn't be read as text (too large or unreadable) — refusing to overwrite it.`),
+    );
+    console.error(c.gray(`  Write to a different file instead:  ${binName()} brief --out PROJECT-BRIEF.generated.md`));
+    return 1;
+  }
+  if (prev && !isOurBrief(prev)) {
+    console.error(
+      c.red(`✗ ${relPath(briefAbs, cwd)} already exists and wasn't created by this CLI — refusing to overwrite it.`),
+    );
+    console.error(c.gray(`  Write to a different file instead:  ${binName()} brief --out PROJECT-BRIEF.generated.md`));
+    return 1;
+  }
+
+  // Preserve hand-written notes (between markers); seed the default template once.
+  // Accepts legacy ship-safe:brief:notes markers so upgrades don't eat notes.
+  const prevNotes = extractNotes(prev);
+  const notes = prevNotes && prevNotes.trim() ? prevNotes : DEFAULT_NOTES;
+  const preserved = !!(prevNotes && prevNotes.trim());
+
+  const { text, head, generatedAt, branch } = renderBrief(cwd, notes);
   writeFileSync(briefAbs, text, "utf8");
   writeMarker(cwd, out, head, generatedAt, branch);
 
   console.log(c.green(`✓ Project brief written → ${relPath(briefAbs, cwd)}`));
+  if (preserved) {
+    console.log(c.gray("  Your notes block was preserved (edit between the getadvantage:brief:notes markers)."));
+  } else {
+    console.log(c.gray("  Notes block seeded — put lasting context between the markers; regenerations keep it."));
+  }
   console.log(c.gray(`  Staleness marker → ${MARKER_DIR}/${MARKER_FILE} (HEAD ${head ? head.slice(0, 10) : "?"})`));
   console.log(c.gray("  Commit it so any model/session/tool starts here — your brain lives in the repo, not your tool."));
   return 0;
 }
 
-export { DEFAULT_OUT };
+export { DEFAULT_OUT, NOTES_START, NOTES_END, BANNER as BRIEF_BANNER };

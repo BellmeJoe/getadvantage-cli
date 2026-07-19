@@ -46,6 +46,20 @@
 //  19. map --help / mcp --help      — command-specific help incl. MCP registration JSON
 //  20. map on a FastAPI repo        — FastAPI @router.get/post parsed; POST /items
 //                                     ⚠ (mutates, ungated), Depends() gates /me
+//  21. UTF-16 secret (0.7.1)        — a committed key in a UTF-16-LE file (the
+//                                     PowerShell default) is SCANNED, not skipped → NO-GO
+//  22. non-ASCII filename (0.7.1)   — a committed key in a file with an umlaut name
+//                                     is scanned (git -z, no quotepath drop) → NO-GO
+//  23. tsc not installed (0.7.1)    — typescript declared but absent → honest warn,
+//                                     never a downloaded third-party `tsc`
+//  24. demo outside a repo (0.7.1)  — `demo` runs in a non-git dir (scaffolds its own),
+//                                     no repo-required dead-end
+//  25. brief preserves notes (0.7.2) — regenerating PROJECT-BRIEF.md keeps the
+//                                     protected notes block; refuses foreign files
+//  26. map == check routes (0.7.2)  — Next src/app + Express: same route count
+//  27. map --json (0.7.2)           — emits a JSON document (no longer ignored)
+//  28. typo did-you-mean (0.7.2)    — unknown cmd suggests, does not dump full help
+//  29. own-artifacts dirty (0.7.2)  — PROJECT-BRIEF.md alone is not "scratch" risk
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -524,9 +538,9 @@ scenario("BOM'd package.json: detected as a Node project, the build gate RUNS (n
 });
 
 // ---------------------------------------------------------------------------
-// 8c. broken package.json — honest warning, never "(no package.json)"
+// 8c. broken package.json — NO-GO ("not checkable ≠ GO"), never "(no package.json)"
 // ---------------------------------------------------------------------------
-scenario("broken package.json: ⚠ 'exists but could not be parsed' — never a ✓ '(no package.json)' skip", () => {
+scenario("broken package.json: NO-GO via Package manifest check — a corrupt manifest is never a GO", () => {
   const base = freshBase();
   try {
     const repo = path.join(base, "sample");
@@ -536,11 +550,17 @@ scenario("broken package.json: ⚠ 'exists but could not be parsed' — never a 
     commitAll(repo, "chore: broken manifest");
 
     const r = run(["check", "--build", "--json"], repo);
-    assert.equal(r.code, 0, `a broken manifest warns, it doesn't block:\n${r.stderr}`);
+    // A guaranteed-broken deploy must not get green light (was a false GO: the
+    // build gate could only "warn: could not run" and the verdict stayed GO).
+    assert.equal(r.code, 1, `a corrupt manifest must be NO-GO:\n${r.stderr}`);
     const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const manifest = doc.checks.find((c) => c.label === "Package manifest");
+    assert.ok(manifest && manifest.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(/not valid JSON|could not be parsed/.test(manifest.detail), manifest.detail);
+    // Build/typecheck defer to the manifest check — they must not green-tick.
     const build = doc.checks.find((c) => c.label === "Build");
-    assert.ok(build && build.status === "warn", JSON.stringify(doc.checks, null, 2));
-    assert.ok(/exists but could not be parsed/.test(build.detail), build.detail);
+    assert.ok(!build || build.status !== "pass", `build must not pass on a broken manifest:\n${JSON.stringify(build)}`);
     assert.ok(!(r.stdout + r.stderr).includes("(no package.json)"), "must never claim '(no package.json)' when the file exists");
   } finally {
     cleanup(base);
@@ -1175,6 +1195,419 @@ scenario("map --help / mcp --help: command-specific help with lanes / tools / MC
     assert.ok(/save_handoff/.test(r2.stdout), `expected the tool list:\n${r2.stdout}`);
     assert.ok(/"mcpServers"/.test(r2.stdout), "must include the exact registration JSON snippet");
     assert.ok(/claude mcp add getadvantage/.test(r2.stdout), "must include the Claude Code one-liner");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 21. UTF-16 secret — the PowerShell-default encoding must not hide a leak
+// ---------------------------------------------------------------------------
+scenario("UTF-16 secret: a committed key in a UTF-16-LE file is scanned (not skipped as binary) → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "u16", version: "1.0.0", private: true }, null, 2) + "\n");
+    // Assembled at runtime so this test file never trips the scanner itself.
+    const stripeKey = "sk_live_" + "7".repeat(26);
+    // A UTF-16-LE file WITH a BOM — exactly what PowerShell 5.1 `>` / Out-File
+    // writes by default. Before 0.7.1 the NUL-after-every-ASCII-byte tripped the
+    // "looks binary" skip, so the key was invisible (a false GO).
+    const u16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`STRIPE_KEY=${stripeKey}\n`, "utf16le")]);
+    writeFileSync(path.join(repo, "notes.txt"), u16);
+    commitAll(repo, "chore: utf-16 notes with a key");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `a UTF-16 file with a committed key must be NO-GO:\n${r.stderr}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(secret.extra.join("\n").includes("notes.txt"), "the UTF-16 file must be reported by name");
+    assert.ok(!JSON.stringify(doc).includes(stripeKey), "the full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 22. non-ASCII filename — git quotepath must not drop the file from the scan
+// ---------------------------------------------------------------------------
+scenario("non-ASCII filename: a committed key in a file with an umlaut name is scanned → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "umlaut", version: "1.0.0", private: true }, null, 2) + "\n");
+    const stripeKey = "sk_live_" + "5".repeat(26);
+    // A filename with an umlaut. git ls-files octal-escapes + quotes this by
+    // default (core.quotepath on); before 0.7.1 the quoted path failed to open
+    // and the file dropped out of the scan silently (a false GO for the DACH ICP).
+    write(repo, "geheime_datei_über_prod.txt", `STRIPE_KEY=${stripeKey}\n`);
+    commitAll(repo, "chore: secret in an umlaut-named file");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `a key in an umlaut-named file must be NO-GO:\n${r.stderr}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(doc.checks, null, 2));
+    assert.ok(/ber_prod\.txt/.test(secret.extra.join("\n")), `the umlaut file must be reported:\n${JSON.stringify(secret)}`);
+    assert.ok(!JSON.stringify(doc).includes(stripeKey), "the full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 23. tsc declared-but-not-installed — honest warn, never a downloaded compiler
+// ---------------------------------------------------------------------------
+scenario("typecheck: TypeScript declared but not installed → honest warn, never `npx --yes tsc`", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    // tsconfig + a typescript devDependency → the repo is "typecheckable", but
+    // node_modules is absent (a fresh clone). The gate must NOT `npx --yes tsc`
+    // (that downloads a squatted third-party package); it warns to run install.
+    write(repo, "package.json", JSON.stringify({ name: "ts-uninstalled", version: "1.0.0", private: true, devDependencies: { typescript: "^5.7.0" } }, null, 2) + "\n");
+    write(repo, "tsconfig.json", JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }, null, 2) + "\n");
+    write(repo, "index.ts", "export const x: number = 1;\n");
+    commitAll(repo, "chore: ts repo, deps not installed");
+
+    const r = run(["check", "--json"], repo);
+    const doc = parseJson(r);
+    const typecheck = doc.checks.find((c) => c.label.startsWith("Typecheck"));
+    assert.ok(typecheck && typecheck.status === "warn", JSON.stringify(doc.checks, null, 2));
+    assert.ok(/not installed|npm install/.test(typecheck.detail), typecheck.detail);
+    // It must NOT have run a compiler and reported type errors (that's the
+    // third-party-`tsc` mislabel we're preventing).
+    assert.ok(!/type errors/.test(typecheck.detail), "must not claim type errors when no compiler ran");
+    // A warn alone keeps the verdict GO (exit 0) — the repo is otherwise clean.
+    assert.equal(r.code, 0, `a missing-compiler warn must not itself NO-GO:\n${r.stderr}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 24. demo outside a repo — the "zero setup" showcase must not require a repo
+// ---------------------------------------------------------------------------
+scenario("demo: runs in a non-git directory (scaffolds its own repo), no repo-required dead-end", () => {
+  const base = freshBase(); // NOT a git repo
+  try {
+    const r = run(["demo"], base);
+    // demo always exits 0 (a "needs you" verdict is the point). Before 0.7.1 the
+    // global repo-root gate fired first and it dead-ended with exit 1.
+    assert.equal(r.code, 0, `demo must run outside a git repo:\n${r.stderr}`);
+    assert.ok(!/Not inside a git repository/.test(r.stdout + r.stderr), "must not hit the repo-required gate");
+    assert.ok(/Demo/.test(r.stdout + r.stderr), `expected the demo to run:\n${r.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 25. brief preserves manual notes across regenerations (0.7.2)
+// ---------------------------------------------------------------------------
+scenario("brief: regenerating PROJECT-BRIEF.md preserves the protected notes block", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base); // already committed
+
+    // First generate seeds the notes markers + default template.
+    const r1 = run(["brief"], repo);
+    assert.equal(r1.code, 0, r1.stderr);
+    const briefPath = path.join(repo, "PROJECT-BRIEF.md");
+    assert.ok(existsSync(briefPath), "PROJECT-BRIEF.md must be written");
+    let body = readFileSync(briefPath, "utf8");
+    assert.ok(body.includes("<!-- getadvantage:project-brief -->"), "banner present");
+    assert.ok(body.includes("<!-- getadvantage:brief:notes -->"), "notes start marker");
+    assert.ok(body.includes("<!-- /getadvantage:brief:notes -->"), "notes end marker");
+    assert.ok(body.includes("getadvantage_brief: 1"), "frontmatter uses getadvantage key");
+
+    // Hand-edit the protected block (what the finding said was eaten).
+    const manual =
+      "## Your notes (preserved across refreshes)\n" +
+      "KEEP-ME-BRIEF-NOTES-v1 — ICP is Lovable founders; never drop this.\n" +
+      "- decision: ship gate is the hero, AEO is supporting\n";
+    body = body.replace(
+      /<!-- getadvantage:brief:notes -->[\s\S]*?<!-- \/getadvantage:brief:notes -->/,
+      `<!-- getadvantage:brief:notes -->\n${manual}<!-- /getadvantage:brief:notes -->`,
+    );
+    writeFileSync(briefPath, body, "utf8");
+
+    // Also change a generated-looking section to prove non-notes content regenerates
+    // (we only assert notes survive — generated map may change with git state).
+    const r2 = run(["brief"], repo);
+    assert.equal(r2.code, 0, r2.stderr);
+    assert.ok(/preserved/i.test(r2.stdout), `should mention notes preserved:\n${r2.stdout}`);
+    const after = readFileSync(briefPath, "utf8");
+    assert.ok(
+      after.includes("KEEP-ME-BRIEF-NOTES-v1"),
+      "manual notes must survive regeneration (brief-eats-manual-edits)",
+    );
+    assert.ok(after.includes("ship gate is the hero"), "full notes body preserved");
+    assert.ok(after.includes("## What this is"), "generated sections still present");
+
+    // Legacy ship-safe markers must still preserve notes on upgrade (brand migrate).
+    writeFileSync(
+      briefPath,
+      [
+        "---",
+        "ship_safe_brief: 1",
+        "---",
+        "",
+        "<!-- ship-safe:project-brief -->",
+        "",
+        "# Old brief",
+        "",
+        "<!-- ship-safe:brief:notes -->",
+        "LEGACY-NOTES-KEEP",
+        "<!-- /ship-safe:brief:notes -->",
+        "",
+        "## What this is",
+        "old generated body",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const rLegacy = run(["brief"], repo);
+    assert.equal(rLegacy.code, 0, rLegacy.stderr);
+    const migrated = readFileSync(briefPath, "utf8");
+    assert.ok(migrated.includes("LEGACY-NOTES-KEEP"), "legacy notes survive brand migration");
+    assert.ok(migrated.includes("<!-- getadvantage:brief:notes -->"), "rewrites to new markers");
+    assert.ok(migrated.includes("<!-- getadvantage:project-brief -->"), "rewrites to new banner");
+
+    // Foreign PROJECT-BRIEF.md without our banner must refuse overwrite.
+    writeFileSync(briefPath, "# Hand-written project brief\n\nDo not clobber.\n", "utf8");
+    const r3 = run(["brief"], repo);
+    assert.equal(r3.code, 1, "must refuse to overwrite a foreign brief");
+    assert.ok(/refusing to overwrite/i.test(r3.stderr + r3.stdout), r3.stderr + r3.stdout);
+    const foreign = readFileSync(briefPath, "utf8");
+    assert.ok(foreign.includes("Do not clobber"), "foreign file must be untouched");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 26. map vs check — one parser, same routes (0.7.2)
+// ---------------------------------------------------------------------------
+scenario("map vs check: Next src/app/api and Express routes agree across commands", () => {
+  const base = freshBase();
+  try {
+    // --- Next.js with src/app/api (common layout map used to miss) ----------
+    const nextRepo = path.join(base, "next-src");
+    initRepo(nextRepo);
+    write(
+      nextRepo,
+      "package.json",
+      JSON.stringify(
+        { name: "next-src", version: "1.0.0", private: true, dependencies: { next: "15.0.0", react: "19.0.0" } },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(
+      nextRepo,
+      "src/app/api/hello/route.ts",
+      `export async function GET() { return Response.json({ ok: true }); }\n` +
+        `export async function POST() { return Response.json({ ok: true }); }\n`,
+    );
+    commitAll(nextRepo, "chore: next src app route");
+
+    const nextMap = run(["map", "--json"], nextRepo);
+    assert.equal(nextMap.code, 0, nextMap.stderr);
+    const nextMapDoc = JSON.parse(nextMap.stdout);
+    assert.equal(nextMapDoc.command, "map");
+    const nextApiLane = (nextMapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(nextApiLane, "map JSON must include API surface lane");
+    assert.ok(/1 route/.test(nextApiLane.detail), `map must see src/app route: ${nextApiLane.detail}`);
+
+    const nextCheck = run(["check", "--json", "--no-brief-check"], nextRepo);
+    assert.equal(nextCheck.code, 0, nextCheck.stderr);
+    const nextCheckDoc = JSON.parse(nextCheck.stdout);
+    const nextCheckApi = (nextCheckDoc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(nextCheckApi, "check must include API surface overview");
+    assert.ok(/1 route/.test(nextCheckApi.detail), `check must see same route: ${nextCheckApi.detail}`);
+    assert.equal(
+      nextApiLane.detail.replace(/\s+/g, " "),
+      nextCheckApi.detail.replace(/\s+/g, " "),
+      "map and check API surface detail must match",
+    );
+
+    // --- Express: both must use the node parser (not Next-empty) ------------
+    const exRepo = path.join(base, "express");
+    initRepo(exRepo);
+    write(
+      exRepo,
+      "package.json",
+      JSON.stringify(
+        { name: "ex", version: "1.0.0", private: true, dependencies: { express: "^4.0.0" }, scripts: { build: "node -e \"\"" } },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(
+      exRepo,
+      "server.js",
+      `const express = require("express");\n` +
+        `const app = express();\n` +
+        `app.get("/health", (req, res) => res.send("ok"));\n` +
+        `app.post("/api/pay", (req, res) => res.send("paid"));\n`,
+    );
+    commitAll(exRepo, "chore: express app");
+
+    const exMap = run(["map", "--json"], exRepo);
+    const exMapDoc = JSON.parse(exMap.stdout);
+    const exMapApi = (exMapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(exMapApi && /2 route/.test(exMapApi.detail), `express map: ${exMapApi && exMapApi.detail}`);
+
+    const exCheck = run(["check", "--json", "--no-brief-check"], exRepo);
+    const exCheckDoc = JSON.parse(exCheck.stdout);
+    const exCheckApi = (exCheckDoc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(exCheckApi && /2 route/.test(exCheckApi.detail), `express check: ${exCheckApi && exCheckApi.detail}`);
+    assert.equal(
+      exMapApi.detail.replace(/\s+/g, " "),
+      exCheckApi.detail.replace(/\s+/g, " "),
+      "express: map and check must agree",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 27. map --json is honoured (0.7.2)
+// ---------------------------------------------------------------------------
+scenario("map --json: emits one JSON document on stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.command, "map");
+    assert.ok(Array.isArray(doc.lanes) && doc.lanes.length >= 3, "lanes present");
+    assert.ok(doc.generatedAt, "timestamp present");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 28. typo → did you mean (0.7.2)
+// ---------------------------------------------------------------------------
+scenario("typo command: suggests a close match instead of dumping full help", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const r = run(["chekc"], repo); // typo for check
+    assert.equal(r.code, 1);
+    const out = r.stderr + r.stdout;
+    assert.ok(/Unknown command/i.test(out), out);
+    assert.ok(/Did you mean/i.test(out) && /check/.test(out), `expected did-you-mean:\n${out}`);
+    // Must NOT dump the full help catalogue.
+    assert.ok(!/fan-out.*fan-in.*architecture/s.test(out), "must not dump full help");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 29. dirty-tree: own brain artifacts are not "scratch" risk alone (0.7.2)
+// ---------------------------------------------------------------------------
+scenario("dirty-tree: only PROJECT-BRIEF.md dirty → pass (own artifact), not scratch warn", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Generate brief (untracked) — the tool just told the user to create it.
+    const b = run(["brief"], repo);
+    assert.equal(b.code, 0, b.stderr);
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    const doc = JSON.parse(r.stdout);
+    const dirty = doc.checks.find((c) => /Dirty-tree/i.test(c.label));
+    assert.ok(dirty, "dirty-tree check present");
+    assert.equal(dirty.status, "pass", `own artifacts alone must pass: ${JSON.stringify(dirty)}`);
+    assert.ok(/brain|marker|getAdvantage/i.test(dirty.detail), dirty.detail);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 30. dirty-tree: a TRACKED edit to a seed file is NOT own-artifact churn (0.7.2 fix)
+// ---------------------------------------------------------------------------
+scenario("dirty-tree: a tracked edit to a seed file (CLAUDE.md) is not waved through as brain-file churn → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    write(repo, "CLAUDE.md", "# Project rules\n\nseeded by init.\n");
+    commitAll(repo, "chore: seed CLAUDE.md");
+    // Hand-edit the committed seed file (real work / tampering — the CLI does not
+    // rewrite CLAUDE.md on a run, so this must not read as "expected after brief").
+    write(repo, "CLAUDE.md", "# Project rules\n\nseeded by init.\nINJECTED LINE\n");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 1, `tracked seed-file edit must NO-GO: ${r.stdout}${r.stderr}`);
+    const doc = JSON.parse(r.stdout);
+    const dirty = doc.checks.find((c) => /Dirty-tree/i.test(c.label));
+    assert.ok(dirty, "dirty-tree check present");
+    assert.equal(dirty.status, "fail", `tracked seed-file edit must fail, not pass: ${JSON.stringify(dirty)}`);
+    // But a tracked in-place rewrite of PROJECT-BRIEF.md (regenerated every run)
+    // stays informational — prove we didn't over-correct.
+    const repo2 = scaffold(path.join(base, "two"));
+    run(["brief"], repo2);
+    commitAll(repo2, "chore: commit brief");
+    run(["brief"], repo2); // regenerate → PROJECT-BRIEF.md is now tracked-modified
+    const r2 = run(["check", "--json", "--no-brief-check", "--no-overview"], repo2);
+    const doc2 = JSON.parse(r2.stdout);
+    const dirty2 = doc2.checks.find((c) => /Dirty-tree/i.test(c.label));
+    assert.notEqual(dirty2.status, "fail", `regenerated brief churn must not fail: ${JSON.stringify(dirty2)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 31. brief: a large (>cap) foreign brief is refused, never silently clobbered (0.7.2 fix)
+// ---------------------------------------------------------------------------
+scenario("brief: a large hand-written brief is refused, not silently overwritten (foreign-guard bypass)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const briefPath = path.join(repo, "PROJECT-BRIEF.md");
+    const marker = "KEEP-THIS-LARGE-FOREIGN-BRIEF-v1";
+    // >200 KB: the old 200 KB read cap made readTextSafe return "", so the guard
+    // saw "no file" and clobbered it. Must now be preserved.
+    writeFileSync(briefPath, `# Hand-written brief\n\n${marker}\n` + "x".repeat(260_000), "utf8");
+    const r = run(["brief"], repo);
+    assert.equal(r.code, 1, `must refuse to overwrite a foreign brief: ${r.stdout}${r.stderr}`);
+    assert.ok(/refus/i.test(r.stderr + r.stdout), r.stderr + r.stdout);
+    const after = readFileSync(briefPath, "utf8");
+    assert.ok(after.includes(marker), "large foreign brief must be left untouched");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 32. secret scan: a committed key inside a build/ dir is scanned, not skipped (0.7.2 fix)
+// ---------------------------------------------------------------------------
+scenario("secret scan: a committed key inside a build/ dir is scanned → NO-GO (no silent dir skip)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // The classic `git add .` of bundled output with an embedded key.
+    const fakeKey = "sk-proj-" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0";
+    write(repo, "frontend/build/static/js/main.abc123.js", `var C={apiKey:"${fakeKey}"};\n`);
+    commitAll(repo, "chore: commit build output with an embedded key");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 1, `committed secret in build/ must NO-GO: ${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    const sec = doc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.ok(sec, "secret scan present");
+    assert.equal(sec.status, "fail", `build/ secret must fail: ${JSON.stringify(sec)}`);
+    assert.ok(!JSON.stringify(doc).includes(fakeKey), "the full key must never be echoed");
   } finally {
     cleanup(base);
   }

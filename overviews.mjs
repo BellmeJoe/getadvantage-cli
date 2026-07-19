@@ -26,7 +26,7 @@
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
 import { result, walkFiles, readText, relPath, readJsonFile } from "./util.mjs";
-import { detectProject, pythonDeclaredDeps } from "./detect.mjs";
+import { detectProject, detectRepoStack, pythonDeclaredDeps } from "./detect.mjs";
 
 // ===========================================================================
 // shared helpers
@@ -35,25 +35,39 @@ import { detectProject, pythonDeclaredDeps } from "./detect.mjs";
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-/** Find every App Router route handler (app/api/**\/route.ts|js). */
+/**
+ * Find every App Router route handler under app/api and src/app/api
+ * (both layouts are valid Next.js). Returns absolute paths, sorted, deduped.
+ */
 function routeFiles(cwd) {
-  const apiDir = path.join(cwd, "app", "api");
-  if (!existsSync(apiDir)) return [];
-  return walkFiles(apiDir, (abs) => /[\\/]route\.(ts|tsx|js|mjs)$/.test(abs)).sort();
+  const roots = [
+    path.join(cwd, "app", "api"),
+    path.join(cwd, "src", "app", "api"),
+  ];
+  const out = [];
+  for (const apiDir of roots) {
+    if (!existsSync(apiDir)) continue;
+    out.push(...walkFiles(apiDir, (abs) => /[\\/]route\.(ts|tsx|js|mjs)$/.test(abs)));
+  }
+  return [...new Set(out)].sort();
 }
 
 /**
- * Turn an absolute app/api/.../route.ts path into its public URL path.
- *   app/api/sites/route.ts            → /api/sites
- *   app/api/team/[memberId]/route.ts  → /api/team/[memberId]
- *   app/api/[transport]/route.ts      → /api/[transport]   (=> the MCP server)
+ * Turn an absolute .../app/api/.../route.ts path into its public URL path.
+ *   app/api/sites/route.ts                → /api/sites
+ *   src/app/api/team/[memberId]/route.ts  → /api/team/[memberId]
+ *   app/api/[transport]/route.ts          → /api/[transport]   (=> the MCP server)
  */
 function routeUrlFromFile(abs, cwd) {
-  const rel = relPath(abs, cwd); // app/api/.../route.ts
+  const rel = relPath(abs, cwd); // app/api/.../route.ts or src/app/api/...
   const segs = rel.split("/");
-  // drop leading "app" and the trailing "route.xx"
-  const parts = segs.slice(1, -1); // ["api", "sites"] etc.
-  return "/" + parts.join("/");
+  // URL starts at the "api" segment (works for both app/ and src/app/ layouts).
+  const apiIdx = segs.indexOf("api");
+  if (apiIdx === -1) {
+    // Fallback: drop leading dir + trailing route.xx (legacy behaviour).
+    return "/" + segs.slice(1, -1).join("/");
+  }
+  return "/" + segs.slice(apiIdx, -1).join("/");
 }
 
 /** Which HTTP methods a route file exports (handles `export async function POST`,
@@ -468,15 +482,30 @@ export function scanPythonRoutes(cwd) {
 }
 
 /**
- * Stack-aware route scan for the MAP lane. Dispatches to the parser that fits
- * the detected stack. An unsupported stack (go/rust/ruby/generic) returns an
- * empty result so the lane can print an honest "not parsed yet" note. When no
- * stack is supplied (the `check`/`ship` overview path) it DEFAULTS to the
- * Next.js scan, so that gate's behaviour is byte-for-byte unchanged.
+ * Stack-aware route scan — THE single source for map, check overviews, and brief.
+ * Dispatches to the parser that fits the detected stack. An unsupported stack
+ * (go/rust/ruby/generic) returns an empty result so the lane can print an honest
+ * "not parsed yet" note.
+ *
+ * When no stack is supplied we detect it (detectRepoStack) so map and check never
+ * disagree (finding: map-vs-check-routes). Callers that already have a stack pass
+ * it to avoid a second detect.
+ *
+ * Hybrid honesty: a Next.js project may also host Express routes (rare); we still
+ * use the Next App Router parser for kind=next. A node project without Express
+ * registrations gets 0 rows — honest, not a fake Next scan.
  * @returns {{ rows, gatedCount, mutatingCount, dangerous, dynamicCount, stackKind }}
  */
 export function scanRoutes(cwd, stack = null) {
-  const kind = (stack && stack.kind) || "next";
+  let s = stack;
+  if (!s) {
+    try {
+      s = detectRepoStack(cwd);
+    } catch {
+      s = { kind: "next" };
+    }
+  }
+  const kind = (s && s.kind) || "next";
   if (kind === "next") return { ...scanApiSurface(cwd), dynamicCount: 0, stackKind: "next" };
   if (kind === "node") return scanExpressRoutes(cwd);
   if (kind === "python") return scanPythonRoutes(cwd);
@@ -620,7 +649,7 @@ function emptyRouteDetail(kind, stack, dynamicCount) {
       ? ` (${dynamicCount} route${dynamicCount === 1 ? "" : "s"} with computed paths not shown)`
       : "";
   if (kind === "next") {
-    return "No Next.js App Router routes (app/api/**/route.*) found — this lane reads Next.js App Router route files only.";
+    return "No Next.js App Router routes (app/api/**/route.* or src/app/api/**/route.*) found — this lane reads Next.js App Router route files only.";
   }
   if (kind === "node") {
     return `No Express/Fastify routes found${dyn} — this lane parses app/router/fastify route definitions; none matched in ${stack ? stack.label : "this project"}.`;

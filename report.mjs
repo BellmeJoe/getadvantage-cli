@@ -313,7 +313,7 @@ const KEY_SHAPE = /^adv_live_[a-z0-9]{10,}$/;
 /** Prompt for one line on stdin, echo suppressed on a TTY (best-effort). The
  *  prompt itself goes to stderr so piped stdout stays clean. */
 function promptForKey(question) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     process.stderr.write(question);
     const rl = createInterface({
       input: process.stdin,
@@ -326,7 +326,14 @@ function promptForKey(question) {
       // key still is never printed BACK by us.
       rl._writeToOutput = () => {};
     }
+    // Ctrl+C / close without an answer is an abort — must not look like success
+    // (finding: login-abort-exit0).
+    const onClose = () => {
+      reject(Object.assign(new Error("login aborted"), { code: "LOGIN_ABORTED" }));
+    };
+    rl.once("close", onClose);
     rl.question("", (answer) => {
+      rl.removeListener("close", onClose);
       rl.close();
       if (process.stdin.isTTY) process.stderr.write("\n");
       resolve(String(answer || "").trim());
@@ -346,7 +353,15 @@ export async function runLogin() {
   if (key) {
     console.log(c.gray("  Using the key from GETADVANTAGE_API_KEY (value never shown)."));
   } else {
-    key = await promptForKey("  Paste your getAdvantage API key (adv_live_…): ");
+    try {
+      key = await promptForKey("  Paste your getAdvantage API key (adv_live_…): ");
+    } catch (e) {
+      if (e && e.code === "LOGIN_ABORTED") {
+        console.error(c.red("  ✗ Login aborted — nothing was stored."));
+        return 1;
+      }
+      throw e;
+    }
   }
 
   if (!key) {

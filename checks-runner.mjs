@@ -7,6 +7,7 @@ import {
   checkDirtyTree,
   checkSecrets,
   checkTrackedEnv,
+  checkManifest,
   checkTypecheck,
   checkBuild,
   checkSchemaBump,
@@ -17,7 +18,7 @@ import {
   overviewSchedules,
 } from "./overviews.mjs";
 import { briefStaleness } from "./brief.mjs";
-import { detectProject } from "./detect.mjs";
+import { detectProject, detectRepoStack } from "./detect.mjs";
 import { architectureAdvisory } from "./architecture.mjs";
 
 /**
@@ -58,6 +59,11 @@ export async function runChecks(o) {
   results.push(safe(() => checkTrackedEnv(cwd), "Tracked .env file"));
   printResult(results[results.length - 1]);
 
+  // b3. Package manifest integrity — an unparseable package.json BLOCKS
+  // ("not checkable ≠ GO"); no package.json → neutral skip.
+  results.push(safe(() => checkManifest(cwd, project), "Package manifest"));
+  printResult(results[results.length - 1]);
+
   // c. Typecheck (only where it applies) + optional full build
   results.push(safe(() => checkTypecheck(cwd, project), "Typecheck"));
   printResult(results[results.length - 1]);
@@ -79,7 +85,16 @@ export async function runChecks(o) {
   if (runOverview) {
     section("Overview — what your app has (read-only)");
 
-    results.push(safe(() => overviewApiSurface(cwd), "API surface map"));
+    // Same stack detection map uses — so map and check never disagree on routes
+    // (finding: map-vs-check-routes).
+    let stack = null;
+    try {
+      stack = detectRepoStack(cwd);
+    } catch {
+      /* best-effort */
+    }
+
+    results.push(safe(() => overviewApiSurface(cwd, stack), "API surface map"));
     printResult(results[results.length - 1]);
 
     results.push(safe(() => overviewIntegrations(cwd), "Agents & integrations map"));
@@ -105,11 +120,16 @@ export async function runChecks(o) {
         if (s.status === "ok") {
           return { status: "pass", label: "Project brief", detail: s.reason, extra: [] };
         }
+        // Honest wording: missing ≠ stale (finding: missing-brief-called-stale).
+        const action =
+          s.status === "missing"
+            ? `no project brief yet — run \`${binName()} brief\` to create one.`
+            : `project brief is stale — run \`${binName()} brief\` to refresh.`;
         return {
           status: "warn",
           label: "Project brief",
           detail: s.reason,
-          extra: [`project brief is stale, run \`${binName()} brief\` to refresh.`],
+          extra: [action],
         };
       }, "Project brief"),
     );
@@ -171,6 +191,7 @@ export function gateTree(o) {
 
   results.push(safe(() => checkSecrets(cwd), "Secret scan"));
   results.push(safe(() => checkTrackedEnv(cwd), "Tracked .env file"));
+  results.push(safe(() => checkManifest(cwd, project), "Package manifest"));
   results.push(safe(() => checkTypecheck(cwd, project), "Typecheck"));
   if (o.build !== false) {
     results.push(safe(() => checkBuild(cwd, project), "Build"));

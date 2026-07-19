@@ -58,27 +58,29 @@ npm install --save-dev getadvantage
 ```
 
 ```jsonc
-// package.json
-{ "scripts": { "ship-safe": "ship-safe" } }
+// package.json — always invoke the getadvantage bin (not the bare ship-safe name)
+{ "scripts": { "gate": "getadvantage check", "ship": "getadvantage ship" } }
 ```
 
 ## Commands
 
-`getadvantage` and `ship-safe` are installed as aliases of the same command — use
-whichever reads better to you.
+Teach and use **`getadvantage`** only. A `ship-safe` binary is still installed as a
+compat alias of the same code, but **`npx ship-safe` is a different package on npm**
+(an unrelated, actively maintained project). Do not `npx ship-safe …` — you will not
+run getAdvantage.
 
 | Command | What it does |
 |---|---|
 | `getadvantage ship` | The full gate, including the production build: is this safe to ship? Exit `0` on **GO**, `1` on **NO-GO**. Same as `check --build` — the name you remember. |
+| `getadvantage check` | Read-only pre-deploy checks → exit `0` on **GO**, `1` on **NO-GO**. Add `--build` for a full build. Default when you run `getadvantage` with no subcommand. |
 | `getadvantage map` | A read-only map of what your app has: API surface (what is gated, what mutates — with a `⚠` on any mutating route that has no obvious gate), agents & integrations, schedules & jobs. Route mapping covers **Next.js** App Router, **Express/Fastify**, and **Flask/FastAPI** (best-effort regex parsing — no code is run); other stacks get the estate view and an honest scope note. Orientation, never a verdict — always exits `0`. |
-| `ship-safe` (default `check`) | Read-only pre-deploy checks → exit `0` on **GO**, `1` on **NO-GO**. Add `--build` for a full build. |
-| `ship-safe brief` | Generate / refresh `PROJECT-BRIEF.md` — the **COLD** layer (what the project *is*). `--check` warns if it's stale; it never blocks. |
-| `ship-safe handoff` | Refresh the brief **and** write `HANDOFF.md` — the **HOT** layer (where you *left off*). Your notes are preserved across refreshes; it never overwrites a `HANDOFF.md` it didn't create. |
-| `ship-safe init` | Wire the brain into your agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `.clinerules`) so `PROJECT-BRIEF.md` + `HANDOFF.md` load automatically at session start. |
-| `ship-safe switch [tool]` | Switch tools/models without losing context — saves your place, wires every AI-tool file, and prints the prompt to start the new session. |
-| `ship-safe models` | A plain-language playbook for choosing + switching AI models (principles, not benchmarks). |
-| `ship-safe gauge` | A quick "is this session getting heavy?" read (repo activity since your last handoff) that nudges a reset before things slow down — a heuristic, not a token count. |
-| `ship-safe ledger` | Show the session ledger — the running log of save-points each `handoff` records (kept in `.getadvantage/ledger.md`; a legacy `.ship-safe/` dir is still read and migrates forward on the next write). |
+| `getadvantage brief` | Generate / refresh `PROJECT-BRIEF.md` — the **COLD** layer (what the project *is*). Hand-written notes between the `getadvantage:brief:notes` markers are preserved across regenerations. `--check` warns if it's stale; it never blocks. |
+| `getadvantage handoff` | Refresh the brief **and** write `HANDOFF.md` — the **HOT** layer (where you *left off*). Your notes are preserved across refreshes; it never overwrites a `HANDOFF.md` it didn't create. |
+| `getadvantage init` | Wire the brain into your agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `.clinerules`) so `PROJECT-BRIEF.md` + `HANDOFF.md` load automatically at session start. |
+| `getadvantage switch [tool]` | Switch tools/models without losing context — saves your place, wires every AI-tool file, and prints the prompt to start the new session. |
+| `getadvantage models` | A plain-language playbook for choosing + switching AI models (principles, not benchmarks). |
+| `getadvantage gauge` | A quick "is this session getting heavy?" read (repo activity since your last handoff) that nudges a reset before things slow down — a heuristic, not a token count. |
+| `getadvantage ledger` | Show the session ledger — the running log of save-points each `handoff` records (kept in `.getadvantage/ledger.md`; a legacy `.ship-safe/` dir is still read and migrates forward on the next write). |
 | `getadvantage mcp` | Run a dependency-free **MCP server** over stdio so an AI agent (Claude Code, Cursor) can call the brain + checks mid-session. Tools: `get_brief`, `refresh_brief`, `get_handoff`, `save_handoff`, `check`, `gauge`. Same engine as the CLI — no API keys, no network. |
 | `getadvantage fan-out <n>` | Open **N parallel lanes** (1–8) as git worktrees off `HEAD`, each with the brain copied in + wired. Add `--task "..."` to print a shared task into each lane's guidance. Open a different model/tool per lane, work in parallel. |
 | `getadvantage fan-in` | **The safe fan-in conductor.** Reconcile the lanes into one verified main: a **collision map**, a **merge-train** dry-run (textual conflicts up front), and — with `--apply` — actually merge the clean lanes one at a time, re-running the check gate on the **combined tree** after each so a lane that's green alone but red merged is **quarantined** (rolled back), never landed. Default is a read-only preview; `--apply` to land. |
@@ -86,7 +88,7 @@ whichever reads better to you.
 | `getadvantage architecture` | **The accretion scanner** — where is the code rotting by being built *over* instead of collapsed? Ranks the top collapse candidates by **size × churn × duplication**: oversized files (>600 / >1000 / >1800 lines), git-churn hotspots (last 100 commits), repeated ≥15-line blocks (exact/near-exact, appearing ≥3×), plus an explicitly approximate JS/TS complexity read. It **surfaces** the signal an AI coding agent is missing — it never refactors, and finding nothing means the heuristics found nothing, *not* that the architecture is clean. **Advisory only — always exits 0**; `--json` for the machine report, `--top <n>` to size the ranking. |
 | `getadvantage login` / `logout` | Store (or remove) your `adv_live_` API key in `~/.getadvantage/config.json` — per-user, owner-only file, never inside a repo. Used by `--report`; the `GETADVANTAGE_API_KEY` env var always wins over the stored key. The key is never printed back. |
 | `getadvantage github-action` | Write `.github/workflows/getadvantage.yml`: run `getadvantage check --ci --report` on every push + pull request (reporting uses the `GETADVANTAGE_API_KEY` repo secret). Idempotent — it never clobbers a differing existing file without `--force`. Alias: `init --github-action`. |
-| `ship-safe deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
+| `getadvantage deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
 
 ## The gate (what `check` actually does)
 
