@@ -83,7 +83,7 @@ Version stays 0.7.3 — **no publish is triggered by these changes**.
 Committed on founder request same day (see git log).
 
 Dogfood follow-up (founder ran `node index.mjs check` on this repo): the
-NO-GO's secret hit was AWS' doc key `AKIAIOSFODNN7EXAMPLE` written out in
+NO-GO's secret hit was AWS' doc key `AKIA…EXAMPLE` (elided here too) written out in
 ROADMAP.md's own false-positive backlog item — now elided there, secret scan
 clean. Remaining NO-GO is the dirty tree (these uncommitted fixes; clears on
 commit). The `map` "/items ungated POST" warning is the CLI parsing its own
