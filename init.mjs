@@ -69,7 +69,12 @@ function upsertBlock(abs) {
 
 export function runInit(o) {
   const cwd = o.cwd;
+  // o.preferFile: the entry file the tool being switched TO actually reads
+  // (e.g. CLAUDE.md for `switch claude`). Wired even when absent, so the
+  // per-tool tip ("X reads Y at startup") is always true.
+  const prefer = o.preferFile && TARGETS.includes(o.preferFile) ? o.preferFile : null;
   const present = TARGETS.filter((t) => existsSync(path.join(cwd, t)));
+  if (prefer && !present.includes(prefer)) present.unshift(prefer);
   const done = [];
 
   if (present.length === 0) {
@@ -86,6 +91,8 @@ export function runInit(o) {
   console.log(c.green(`✓ Wired the project brain in: ${done.join(", ")}`));
   console.log(c.gray("  Your AI reads these at session start — so PROJECT-BRIEF.md + HANDOFF.md load automatically."));
   console.log(c.gray("  Re-run anytime; it updates its own marked block and never duplicates."));
-  console.log(c.gray(`  (Don't forget to run \`${binName()} brief\` once so the brain file exists.)`));
+  if (!existsSync(path.join(cwd, "PROJECT-BRIEF.md"))) {
+    console.log(c.gray(`  (Don't forget to run \`${binName()} brief\` once so the brain file exists.)`));
+  }
   return 0;
 }

@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
-import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ } from "./util.mjs";
+import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
 
 // ===========================================================================
@@ -100,13 +100,13 @@ export function checkDirtyTree(cwd) {
     return result(
       "fail",
       "Dirty-tree guard",
-      `${tracked.length} tracked file(s) modified/staged — a 'vercel --prod' would ship this unintended work.`,
+      `${tracked.length} tracked file${pl(tracked.length)} modified/staged — a 'vercel --prod' would ship this unintended work.`,
       [
         ...tracked.slice(0, 20).map((t) => t),
         ...(tracked.length > 20 ? [`…and ${tracked.length - 20} more`] : []),
         "Commit, stash, or revert before shipping. Deploy from a clean detached worktree of the intended commit.",
         ...(own.length
-          ? [`(Also ${own.length} getAdvantage brain/marker file(s) dirty — commit those when ready; they don't block alone.)`]
+          ? [`(Also ${own.length} getAdvantage brain/marker file${pl(own.length)} dirty — commit those when ready; they don't block alone.)`]
           : []),
       ],
     );
@@ -117,7 +117,7 @@ export function checkDirtyTree(cwd) {
     return result(
       "pass",
       "Dirty-tree guard",
-      `Working tree clean of ship-risk; ${own.length} getAdvantage brain/marker file(s) uncommitted (expected after brief/handoff — commit when ready).`,
+      `Working tree clean of ship-risk; ${own.length} getAdvantage brain/marker file${pl(own.length)} uncommitted (expected after brief/handoff — commit when ready).`,
       own.slice(0, 20),
     );
   }
@@ -129,13 +129,13 @@ export function checkDirtyTree(cwd) {
   ];
   if (own.length) {
     extras.push(
-      `(Plus ${own.length} getAdvantage brain/marker file(s) — not listed as risk; commit when ready.)`,
+      `(Plus ${own.length} getAdvantage brain/marker file${pl(own.length)} — not listed as risk; commit when ready.)`,
     );
   }
   return result(
     "warn",
     "Dirty-tree guard",
-    `${untracked.length} untracked file(s) present (not yet tracked — confirm they are meant to ship, or add them to .gitignore).`,
+    `${untracked.length} untracked file${pl(untracked.length)} present (not yet tracked — confirm they are meant to ship, or add them to .gitignore).`,
     extras,
   );
 }
@@ -410,14 +410,14 @@ export function checkSecrets(cwd) {
     partialFiles.slice(0, 5).join(", ") + (partial > 5 ? `, …and ${partial - 5} more` : "");
   const partialNote =
     partial > 0
-      ? [`${partial} oversized file(s) >2 MB scanned partially (first + last 256 KB each; scanned partially: ${partialNames}) — move giant blobs out of git for a full scan.`]
+      ? [`${partial} oversized file${pl(partial)} >2 MB scanned partially (first + last 256 KB each; scanned partially: ${partialNames}) — move giant blobs out of git for a full scan.`]
       : [];
 
   if (hits.size === 0) {
     return result(
       "pass",
       "Secret scan",
-      `Scanned ${scanned} tracked/staged file(s) — no leaked-secret patterns matched.`,
+      `Scanned ${scanned} tracked/staged file${pl(scanned)} — no leaked-secret patterns matched.`,
       partialNote,
     );
   }
@@ -428,7 +428,7 @@ export function checkSecrets(cwd) {
   return result(
     "fail",
     "Secret scan",
-    `${lines.length} possible secret(s) in committed/staged files — remove + rotate before shipping.`,
+    `${lines.length} possible secret${pl(lines.length)} in committed/staged files — remove + rotate before shipping.`,
     [...lines.slice(0, 30), ...partialNote],
   );
 }
@@ -459,7 +459,7 @@ export function checkTrackedEnv(cwd) {
     return result(
       "fail",
       "Tracked .env file",
-      `${tracked.length} .env file(s) tracked by git — a committed .env is a leak by itself, whatever it contains.`,
+      `${tracked.length} .env file${pl(tracked.length)} tracked by git — a committed .env is a leak by itself, whatever it contains.`,
       [
         ...tracked.slice(0, 10),
         "Remove it from git (git rm --cached <file>), add it to .gitignore, and ROTATE every key that file ever held — git history keeps old values.",
@@ -474,7 +474,7 @@ export function checkTrackedEnv(cwd) {
     return result(
       "warn",
       "Tracked .env file",
-      `${untrackedEnv.length} local .env file(s) are NOT gitignored — one 'git add .' away from committing your keys.`,
+      `${untrackedEnv.length} local .env file${pl(untrackedEnv.length)} are NOT gitignored — one 'git add .' away from committing your keys.`,
       [...untrackedEnv.slice(0, 10), "Add them to .gitignore so they can never be committed."],
     );
   }
@@ -548,7 +548,7 @@ function runCapture(cmd, args, cwd, opts = {}) {
       const mins = Math.round((opts.timeout ?? DEFAULT_CHECK_TIMEOUT_MS) / 60000);
       return {
         ok: false,
-        out: `Command timed out after ${mins} minute(s): ${cmd} ${args.join(" ")}`,
+        out: `Command timed out after ${mins} minute${pl(mins)}: ${cmd} ${args.join(" ")}`,
         timedOut: true,
       };
     }

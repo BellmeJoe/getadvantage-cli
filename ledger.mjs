@@ -11,7 +11,7 @@
 // Node built-ins only. ESM. Writes one repo-resident file.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { binName, c, gitSafe, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
+import { binName, c, gitSafe, relPath, markerFileForRead, markerFileForWrite, pl } from "./util.mjs";
 
 const HEAD_MARK = "<!-- getadvantage:ledger -->";
 const HEAD_MARK_LEGACY = "<!-- ship-safe:ledger -->";
@@ -71,7 +71,7 @@ export function appendLedger(cwd, { headSha, branch, lastHead, notes, now }) {
   const date = now.slice(0, 16).replace("T", " "); // YYYY-MM-DD HH:MM (UTC)
   const next = extractNext(notes);
   const entry =
-    `- **${date}** · \`${branch}\` @ \`${shortSha}\` · ${commitCount} commit(s) since last · next: ${next}`;
+    `- **${date}** · \`${branch}\` @ \`${shortSha}\` · ${commitCount} commit${pl(commitCount)} since last · next: ${next}`;
 
   // If the most recent entry is for THIS head sha, update it in place (re-running
   // handoff in one session shouldn't duplicate the save-point).
@@ -101,7 +101,7 @@ export function runLedger(o) {
   }
   const body = readFileSync(abs, "utf8");
   const entries = body.split("\n").filter((l) => l.startsWith("- **"));
-  console.log(c.bold(`\n  Session ledger — ${entries.length} save-point(s)  ${c.gray(`(${relPath(abs, cwd)})`)}\n`));
+  console.log(c.bold(`\n  Session ledger — ${entries.length} save-point${pl(entries.length)}  ${c.gray(`(${relPath(abs, cwd)})`)}\n`));
   const tail = entries.slice(-15);
   for (const e of tail) {
     console.log("  " + e.replace(/^- /, "").replace(/\*\*/g, "").replace(/`/g, ""));

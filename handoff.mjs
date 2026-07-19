@@ -23,7 +23,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { binName, c, gitSafe, readJsonFile, relPath, markerFileForRead, markerFileForWrite } from "./util.mjs";
+import { binName, c, gitSafe, readJsonFile, relPath, markerFileForRead, markerFileForWrite, pl } from "./util.mjs";
 import { runBrief, briefStaleness } from "./brief.mjs";
 import { appendLedger } from "./ledger.mjs";
 
@@ -152,7 +152,7 @@ function autoBlock(cwd, lastHead) {
   }
   L.push("");
   L.push(
-    `**Working tree right now:** ${tracked} uncommitted change(s), ${untracked} untracked file(s)` +
+    `**Working tree right now:** ${tracked} uncommitted change${pl(tracked)}, ${untracked} untracked file${pl(untracked)}` +
       `${tracked === 0 && untracked === 0 ? " — clean." : "."}`,
   );
 

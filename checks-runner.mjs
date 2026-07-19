@@ -2,7 +2,7 @@
 // verdict. Shared by both `ship-safe check` and `ship-safe deploy` so the gate
 // is identical in both paths.
 
-import { binName, c, GLYPH, printResult, section } from "./util.mjs";
+import { binName, c, GLYPH, printResult, section, pl } from "./util.mjs";
 import {
   checkDirtyTree,
   checkSecrets,
@@ -149,16 +149,16 @@ export async function runChecks(o) {
     `  ${GLYPH.pass} ${passes}   ${GLYPH.warn} ${warns}   ${GLYPH.fail} ${fails}   ${GLYPH.skip} ${skips} skipped`,
   );
 
-  const skipNote = skips > 0 ? c.gray(` (${skips} check(s) skipped — not applicable on this stack.)`) : "";
+  const skipNote = skips > 0 ? c.gray(` (${skips} check${pl(skips)} skipped — not applicable on this stack.)`) : "";
   if (fails > 0) {
     console.log(
-      "\n" + c.red(c.bold("  NO-GO")) + c.red(` — ${fails} blocking issue(s). Do not ship until these are clear.`),
+      "\n" + c.red(c.bold("  NO-GO")) + c.red(` — ${fails} blocking issue${pl(fails)}. Do not ship until these are clear.`),
     );
     return { exitCode: 1, results };
   }
   if (warns > 0) {
     console.log(
-      "\n" + c.green(c.bold("  GO")) + c.yellow(` — with ${warns} warning(s) to eyeball first.`) + skipNote,
+      "\n" + c.green(c.bold("  GO")) + c.yellow(` — with ${warns} warning${pl(warns)} to eyeball first.`) + skipNote,
     );
     return { exitCode: 0, results };
   }

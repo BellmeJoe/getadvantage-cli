@@ -125,7 +125,7 @@ export async function runDemo(o = {}) {
     makeLane(repo, base, 1, (laneDir) => {
       write(laneDir, "README.md", readmeIntro("A tiny sample project — with a friendlier intro, courtesy of lane 1."));
     }, "docs: friendlier README intro (lane 1)");
-    console.log(`     ${c.green("○")} lane 1 — rewrites the README intro line ${c.gray("(clean; overlaps lane 3)")}`);
+    console.log(`     ${c.green("✓")} lane 1 — rewrites the README intro line ${c.gray("(clean; overlaps lane 3)")}`);
 
     // lane 2 — QUARANTINE: edits app.js to add a feature but leaves a SYNTAX
     //          ERROR (a missing brace). Lane 1 didn't touch app.js, so this
@@ -142,14 +142,14 @@ export async function runDemo(o = {}) {
         "",
       ].join("\n"));
     }, "feat: app.js feature (has a syntax error)");
-    console.log(`     ${c.yellow("◆")} lane 2 — edits app.js but leaves a syntax error ${c.gray("(builds red → quarantined)")}`);
+    console.log(`     ${c.yellow("⚠")} lane 2 — edits app.js but leaves a syntax error ${c.gray("(builds red → quarantined)")}`);
 
     // lane 3 — CONFLICT: rewrites the SAME README intro line a different way. After
     //          lane 1 lands, this textually conflicts → train halts here.
     makeLane(repo, base, 3, (laneDir) => {
       write(laneDir, "README.md", readmeIntro("A tiny sample project, rewritten a totally different way by lane 3."));
     }, "docs: different README intro (lane 3)");
-    console.log(`     ${c.red("◆")} lane 3 — rewrites the SAME README intro line ${c.gray("(conflicts with lane 1)")}`);
+    console.log(`     ${c.red("✗")} lane 3 — rewrites the SAME README intro line ${c.gray("(conflicts with lane 1)")}`);
     console.log("");
 
     // ---- 3. Run the FULL conductor on the sample repo. ----------------------

@@ -34,7 +34,7 @@
 
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { c, section, gitSafe, readText } from "./util.mjs";
+import { c, section, gitSafe, readText, pl } from "./util.mjs";
 
 // --- thresholds (exported for the tests) -------------------------------------
 export const SIZE_NOTICE = 600; // lines — worth noticing
@@ -389,9 +389,9 @@ export function runArchitecture(o) {
       ` (${oversized.warn + oversized.flag} >${SIZE_WARN} · ${oversized.flag} >${SIZE_FLAG})`,
   );
   console.log(
-    `  ${c.gray("duplication:")} ${totalDupBlocks} repeated block(s) — ≥${DUP_WINDOW} similar lines appearing ≥${DUP_MIN_OCCURRENCES}× ${c.gray("(exact/near-exact repetition, approximate)")}`,
+    `  ${c.gray("duplication:")} ${totalDupBlocks} repeated block${pl(totalDupBlocks)} — ≥${DUP_WINDOW} similar lines appearing ≥${DUP_MIN_OCCURRENCES}× ${c.gray("(exact/near-exact repetition, approximate)")}`,
   );
-  console.log(`  ${c.gray("churn window:")} last ${commitsExamined} commit(s)`);
+  console.log(`  ${c.gray("churn window:")} last ${commitsExamined} commit${pl(commitsExamined)}`);
 
   // 4. candidates: anything oversized, duplicated, or hot-and-nontrivial
   const candidates = files
@@ -427,12 +427,12 @@ export function runArchitecture(o) {
         ? ` (shared with ${f.sharedWith.slice(0, 2).join(", ")}${f.sharedWith.length > 2 ? ", …" : ""})`
         : " (repeated within this file)";
       const first = f.dupBlocks[0];
-      signals.push(`${f.duplicateBlocks} duplicated block(s), e.g. lines ${first.from}–${first.to}${where}`);
+      signals.push(`${f.duplicateBlocks} duplicated block${pl(f.duplicateBlocks)}, e.g. lines ${first.from}–${first.to}${where}`);
     }
     if (f.complexity) {
       const cx = [];
       if (f.complexity.maxNesting >= 7) cx.push(`nesting depth ${f.complexity.maxNesting}`);
-      if (f.complexity.manyParamFns > 0) cx.push(`${f.complexity.manyParamFns} function(s) with 6+ params`);
+      if (f.complexity.manyParamFns > 0) cx.push(`${f.complexity.manyParamFns} function${pl(f.complexity.manyParamFns)} with 6+ params`);
       if (f.complexity.branchesPer100 >= 30) cx.push(`${f.complexity.branchesPer100} branches/100 lines`);
       if (cx.length) signals.push(`approx. complexity: ${cx.join(", ")}`);
     }
@@ -458,9 +458,12 @@ export function runArchitecture(o) {
 
   // 6. verdict — honest, advisory
   section("Verdict");
+  const bandStr =
+    band === "severe" ? c.red(c.bold("SEVERE")) : band === "notable" ? c.yellow(c.bold("NOTABLE")) : c.green(c.bold("QUIET"));
+  console.log(`  Signal band: ${bandStr} ${c.gray("— how loud the accretion signals are, not a grade of your code.")}`);
   if (candidates.length > 0) {
     console.log(
-      `  Accretion surfaced in ${c.bold(String(candidates.length))} file(s). This is a ${c.bold("measurement")}, not a` ,
+      `  Accretion surfaced in ${c.bold(String(candidates.length))} file${pl(c.bold(String(candidates.length)))}. This is a ${c.bold("measurement")}, not a` ,
     );
     console.log(`  judgment — a human (or your agent, now informed) decides what to collapse.`);
   } else {
@@ -497,7 +500,7 @@ export function architectureAdvisory(cwd) {
       if (lines > SIZE_FLAG || (lines > SIZE_WARN && (churn.get(rel) || 0) >= HOT_CHURN)) severe++;
     }
     if (severe === 0) return null;
-    return `architecture: ${severe} large/hot file(s) accreting — run \`getadvantage architecture\``;
+    return `architecture: ${severe} large/hot file${pl(severe)} accreting — run \`getadvantage architecture\``;
   } catch {
     return null;
   }

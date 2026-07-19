@@ -25,7 +25,7 @@
 
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
-import { result, walkFiles, readText, relPath, readJsonFile } from "./util.mjs";
+import { result, walkFiles, readText, relPath, readJsonFile, pl } from "./util.mjs";
 import { detectProject, detectRepoStack, pythonDeclaredDeps } from "./detect.mjs";
 
 // ===========================================================================
@@ -681,13 +681,13 @@ export function overviewApiSurface(cwd, stack = null) {
     const methodStr = r.methods.length ? r.methods.join(",") : "—";
     lines.push(`${r.url}  [${methodStr}]  ${apiRowTag(r)}`);
   }
-  if (rows.length > CAP) lines.push(`…and ${rows.length - CAP} more route(s)`);
+  if (rows.length > CAP) lines.push(`…and ${rows.length - CAP} more route${pl(rows.length - CAP)}`);
   if (dynamicCount > 0) {
     lines.push(`(${dynamicCount} route${dynamicCount === 1 ? "" : "s"} with computed paths not shown)`);
   }
 
   const detail =
-    `${rows.length} route(s) · ${gatedCount} look gated (session or cron secret) · ` +
+    `${rows.length} route${pl(rows.length)} · ${gatedCount} look gated (session or cron secret) · ` +
     `${mutatingCount} mutate (write) · ${dangerous.length} mutate without any obvious gate.`;
 
   if (dangerous.length > 0) {
@@ -830,7 +830,7 @@ export function overviewIntegrations(cwd, stack = null) {
     lines.push("MCP server is EXPOSED at /api/mcp — model-callable tools; confirm its auth posture (keyless vs key-scoped).");
   }
 
-  const detail = `${labels.length} integration(s) detected (declared dependencies + app/ source)${mcpRouteFound ? ", incl. an MCP server" : ""}.`;
+  const detail = `${labels.length} integration${pl(labels.length)} detected (declared dependencies + app/ source)${mcpRouteFound ? ", incl. an MCP server" : ""}.`;
 
   // Risk flag: secret key reachable from the client bundle.
   if (clientSecretHits.length > 0) {
@@ -899,8 +899,8 @@ export function overviewSchedules(cwd, stack = null) {
   }
 
   const detail =
-    `${rows.length} job(s) · ${cronCount} scheduled in vercel.json · ` +
-    `${ungated.length} ungated · ${orphanRoutes.length} cron route(s) not wired to a schedule.`;
+    `${rows.length} job${pl(rows.length)} · ${cronCount} scheduled in vercel.json · ` +
+    `${ungated.length} ungated · ${orphanRoutes.length} cron route${pl(orphanRoutes.length)} not wired to a schedule.`;
 
   const warnBits = [];
   if (ungated.length > 0) {
@@ -927,7 +927,7 @@ export function overviewSchedules(cwd, stack = null) {
   const extra = [...lines];
   if (orphanRoutes.length > 0) {
     extra.push(
-      `Note: ${orphanRoutes.length} cron route(s) have a handler but aren't wired into vercel.json — they only run if triggered manually.`,
+      `Note: ${orphanRoutes.length} cron route${pl(orphanRoutes.length)} have a handler but aren't wired into vercel.json — they only run if triggered manually.`,
     );
   }
   return result("pass", "Schedules & jobs map", detail, extra);
@@ -981,6 +981,9 @@ export function scanEstate(cwd) {
   for (const ent of entries) {
     if (ent.isDirectory()) {
       if (ESTATE_SKIP_DIR.has(ent.name)) continue;
+      // Hidden dirs (.claude, .github, .vercel, …) are tooling/config, not app
+      // modules — counting them as "estate" buries the real code under noise.
+      if (ent.name.startsWith(".")) continue;
       const abs = path.join(cwd, ent.name);
       const files = walkFiles(abs);
       if (files.length === 0) continue;
@@ -1018,16 +1021,16 @@ export function overviewEstate(cwd) {
   const totalFiles = modules.reduce((n, m) => n + m.files, 0) + looseFiles;
   const topLangs = languages.slice(0, 3).map(([lang, n]) => `${lang} (${n})`);
   const detail =
-    `${modules.length} top-level module(s) · ${totalFiles} file(s)` +
+    `${modules.length} top-level module${pl(modules.length)} · ${totalFiles} file${pl(totalFiles)}` +
     (topLangs.length ? ` · languages: ${topLangs.join(", ")}` : "");
 
   const lines = [];
   const CAP = 15;
   for (const m of modules.slice(0, CAP)) {
-    lines.push(`${m.dir}/ — ${m.files} file(s)${m.langs.length ? ` (${m.langs.join(", ")})` : ""}`);
+    lines.push(`${m.dir}/ — ${m.files} file${pl(m.files)}${m.langs.length ? ` (${m.langs.join(", ")})` : ""}`);
   }
-  if (modules.length > CAP) lines.push(`…and ${modules.length - CAP} more top-level dir(s)`);
-  if (looseFiles > 0) lines.push(`(plus ${looseFiles} file(s) at the repo root)`);
+  if (modules.length > CAP) lines.push(`…and ${modules.length - CAP} more top-level dir${pl(modules.length - CAP)}`);
+  if (looseFiles > 0) lines.push(`(plus ${looseFiles} file${pl(looseFiles)} at the repo root)`);
 
   if (depNames.length > 0) {
     const shown = depNames.slice(0, 12);

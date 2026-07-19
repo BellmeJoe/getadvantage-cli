@@ -701,7 +701,7 @@ scenario("oversized file (>2MB): secret at the tail is found via head+tail parti
     assert.ok(secret.extra.join("\n").includes("big-log.txt"), "the oversized file must be named as the hit");
     assert.ok(secret.extra.join("\n").includes("AWS access key id"));
     assert.ok(
-      /oversized file\(s\) >2 MB scanned partially/.test(secret.extra.join("\n")) &&
+      /oversized files? >2 MB scanned partially/.test(secret.extra.join("\n")) &&
         secret.extra.join("\n").includes("big-log.txt"),
       "the partial-scan note must disclose it scanned partially AND name the file",
     );

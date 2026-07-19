@@ -30,7 +30,7 @@
 import { existsSync, copyFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { c, git, gitSafe, gitRaw, relPath } from "./util.mjs";
+import { c, git, gitSafe, gitRaw, relPath, pl } from "./util.mjs";
 import { runHandoff } from "./handoff.mjs";
 import { runInit } from "./init.mjs";
 import { DEFAULT_OUT } from "./brief.mjs";
@@ -99,7 +99,7 @@ export function runFanOut(o) {
     return 1;
   }
 
-  console.log(c.bold(`\n  Fan-out — ${n} parallel lane(s) sharing one project brain\n`));
+  console.log(c.bold(`\n  Fan-out — ${n} parallel lane${pl(n)} sharing one project brain\n`));
 
   // Was the tree clean BEFORE we touched it? If so, we'll tidily commit the
   // brain refresh we're about to write — otherwise fan-out's OWN output dirties
@@ -124,7 +124,7 @@ export function runFanOut(o) {
   // Re-read HEAD: a brain-refresh commit above may have advanced it, and the
   // lanes branch off the CURRENT HEAD (so they already carry the same brain).
   const headNow = gitSafe(["rev-parse", "HEAD"], { cwd }) || head;
-  console.log(c.cyan(`  2. Creating ${n} worktree(s) off \`${headNow.slice(0, 10)}\``));
+  console.log(c.cyan(`  2. Creating ${n} worktree${pl(n)} off \`${headNow.slice(0, 10)}\``));
   const knownWorktrees = new Set(listWorktreePaths(cwd));
   const created = [];
   const skipped = [];
@@ -208,7 +208,7 @@ export function runFanOut(o) {
 
   // ---- 4. Point at fan-in for the merge/cleanup. --------------------------
   console.log(c.cyan("  4. When you're done"));
-  console.log(`     Review + merge the lane(s) you like, then clean up. See:`);
+  console.log(`     Review + merge the lanes you like, then clean up. See:`);
   console.log(c.bold("       getadvantage fan-in"));
   console.log(c.gray("     (Merging stays a guided 'review and merge' — nothing is merged automatically.)"));
   console.log("");
@@ -361,19 +361,19 @@ export async function runFanIn(o) {
         : c.green("clean");
       const toolStr = lane.tool ? c.gray(` · ${lane.tool}`) : "";
       console.log(
-        `     ${lane.colliding ? c.yellow("◆") : c.green("○")} ${c.bold("lane " + lane.i)} \`${lane.branch}\`${toolStr} — ${lane.files.length} file(s) · ${tag}`,
+        `     ${lane.colliding ? c.yellow("◆") : c.green("○")} ${c.bold("lane " + lane.i)} \`${lane.branch}\`${toolStr} — ${lane.files.length} file${pl(lane.files.length)} · ${tag}`,
       );
     }
     console.log("");
     if (overlaps.length === 0) {
       console.log(c.gray("     No file is touched by more than one lane — the lanes are disjoint."));
     } else {
-      console.log(`     ${c.yellow("Overlapping file(s)")} — edited by more than one lane:`);
+      console.log(`     ${c.yellow("Overlapping files")} — edited by more than one lane:`);
       for (const [file, set] of overlaps.slice(0, 30)) {
         const ids = [...set].sort((a, b) => a - b).map((i) => `lane ${i}`).join(", ");
         console.log(`       ${c.yellow("•")} ${file}  ${c.gray("(" + ids + ")")}`);
       }
-      if (overlaps.length > 30) console.log(c.gray(`       …and ${overlaps.length - 30} more overlapping file(s)`));
+      if (overlaps.length > 30) console.log(c.gray(`       …and ${overlaps.length - 30} more overlapping file${pl(overlaps.length - 30)}`));
       console.log("");
       console.log(c.gray("     Overlap is not the same as a conflict — two lanes can edit different parts of"));
       console.log(c.gray("     a file and still merge cleanly. The merge-train below proves which actually conflict."));
@@ -824,7 +824,7 @@ async function runMergeTrain(o) {
       console.log(`     ${c.red("✗ STOPPED — unexpected working-tree changes after the merge-train.")}`);
       console.log(c.gray(`       Where you are: \`${intoBranch}\` @ ${headNow ? headNow.slice(0, 10) : "?"}.`));
       if (landedCount > 0) {
-        console.log(c.gray(`       Your ${landedCount} landed lane(s) are SAFE — real merge commits on \`${intoBranch}\`; nothing was rolled back.`));
+        console.log(c.gray(`       Your ${landedCount} landed lane${pl(landedCount)} are SAFE — real merge commits on \`${intoBranch}\`; nothing was rolled back.`));
       }
       console.log(c.gray("       These tracked files changed outside the train's own merges:"));
       for (const f of leftover.slice(0, 10)) console.log(c.gray(`         ${f}`));
@@ -855,7 +855,7 @@ function printVerdict({ lanes, intoBranch, apply, train }) {
   const word = (o) => {
     switch (o) {
       case "landed": return c.green("landed");
-      case "clean": return c.green("ready (clean)");
+      case "clean": return c.green("clean vs main (tested alone)");
       case "quarantined": return c.yellow("quarantined");
       case "conflict": return c.red("needs you (conflict)");
       case "skipped": return c.gray("skipped");
@@ -939,15 +939,17 @@ function printVerdict({ lanes, intoBranch, apply, train }) {
     const ready = clean;
     const blocked = conflicts.length;
     if (blocked === 0) {
-      console.log("  " + c.green(c.bold(`${ready} of ${total} lane(s) merge cleanly`)) + c.gray(" (textually)."));
-      console.log(c.gray("  Run with --apply to land them — each is gated on the COMBINED tree as it merges,"));
+      console.log("  " + c.green(c.bold(`${ready} of ${total} lane${pl(total)} merge cleanly against main`)) + c.gray(" (each tested alone)."));
+      console.log(c.gray("  Run with --apply to land them in sequence — each merge is gated on the COMBINED tree,"));
       console.log(c.gray("  so a 'both-green-but-red-together' break is caught and quarantined, never landed."));
+      console.log(c.gray("  Lanes touching the same files (see the collision map) can still textually conflict"));
+      console.log(c.gray("  once an earlier lane lands — the train halts there for you to resolve."));
     } else {
       const conflIds = conflicts.map((l) => l.i);
       const conflVerb = conflIds.length === 1 ? "has a textual conflict" : "have textual conflicts";
       console.log(
         "  " + c.green(c.bold(`${ready} clean`)) + c.gray(" · ") + c.red(c.bold(`${blocked} conflicting`)) +
-        c.gray(` of ${total} lane(s).`),
+        c.gray(` of ${total} lane${pl(total)}.`),
       );
       console.log(c.gray(`  ${cap(describeBlockers(conflIds))} ${conflVerb} to resolve first.`));
       console.log(c.gray("  --apply will land the clean ones (gated on the combined tree) and halt at the first conflict."));

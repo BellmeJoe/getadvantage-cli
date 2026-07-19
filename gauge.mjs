@@ -11,7 +11,7 @@
 //
 // Node built-ins only. ESM. Read-only (writes nothing).
 
-import { binName, c, gitSafe, markerFileForRead, readJsonFile } from "./util.mjs";
+import { binName, c, gitSafe, markerFileForRead, readJsonFile, pl } from "./util.mjs";
 
 function readJson(abs) {
   return readJsonFile(abs).json;
@@ -84,7 +84,7 @@ export function runGauge(o) {
   console.log(
     c.gray(
       `      since your last save-point (${fmtAge(hours)}): ` +
-        `${commits} commit(s), ~${churn} line(s) changed.`,
+        `${commits} commit${pl(commits)}, ~${churn} line${pl(churn)} changed.`,
     ),
   );
   console.log(`      ${nudge}`);

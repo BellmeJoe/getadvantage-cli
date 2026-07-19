@@ -116,11 +116,22 @@ export function repoRoot(cwd = process.cwd()) {
 }
 
 /** Mask a matched secret to a recognisable fingerprint — NEVER echo the full
- *  value. Mirrors app/lib/safety.ts `fingerprint()`. */
+ *  value. Mirrors app/lib/safety.ts `fingerprint()`.
+ *  Keeps a well-known public prefix intact (sk_live_, ghp_, sk-ant-, …) so the
+ *  fingerprint reads instantly, but only when ≥8 chars stay hidden. */
 export function fingerprint(match) {
-  const head = match.slice(0, 6);
+  let head = match.slice(0, 6);
+  if (match.length > 14) {
+    const pre = match.slice(0, 12).match(/^.+[_-]/);
+    if (pre && match.length - pre[0].length >= 8) head = pre[0];
+  }
   const tail = match.length > 14 ? match.slice(-4) : "";
   return `${head}…${tail} (${match.length} chars)`;
+}
+
+/** Pluralization suffix: `${n} issue${pl(n)}` → "1 issue" / "2 issues". */
+export function pl(n) {
+  return n === 1 ? "" : "s";
 }
 
 /** Section header. */

@@ -35,6 +35,19 @@ const TOOL_TIPS = {
   gemini: "Gemini / any model: paste the prompt below to load your brain into the new chat.",
 };
 
+// The entry file each tool actually reads at startup — wired (created if
+// missing) when you switch TO that tool, so the tip above is always true.
+// cursor deliberately absent: we never create .cursorrules from scratch
+// (finding: switch-cursorrules-claim); Cursor also reads AGENTS.md.
+const TOOL_FILES = {
+  claude: "CLAUDE.md",
+  "claude-code": "CLAUDE.md",
+  windsurf: ".windsurfrules",
+  cline: ".clinerules",
+  copilot: ".github/copilot-instructions.md",
+  codex: "AGENTS.md",
+};
+
 export function runSwitch(o) {
   const cwd = o.cwd;
   const target = (o.target || "").toLowerCase();
@@ -48,9 +61,10 @@ export function runSwitch(o) {
     console.log(c.yellow("     (Couldn't refresh the handoff — see the note above; continuing.)"));
   }
 
-  // 2. Wire every AI-tool entry file so whatever you switch to auto-loads it.
+  // 2. Wire every AI-tool entry file so whatever you switch to auto-loads it —
+  //    including the target tool's own file, even if it doesn't exist yet.
   console.log(c.cyan("\n  2. Wiring your tools"));
-  runInit({ cwd });
+  runInit({ cwd, preferFile: TOOL_FILES[target] });
 
   // 3. The exact prompt to start the new session/tool/model.
   console.log(c.cyan("\n  3. Start the new session"));

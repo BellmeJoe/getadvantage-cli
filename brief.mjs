@@ -44,8 +44,7 @@ import {
   MARKER_DIR,
   LEGACY_MARKER_DIR,
   markerFileForRead,
-  markerFileForWrite,
-} from "./util.mjs";
+  markerFileForWrite, pl } from "./util.mjs";
 import {
   scanRoutes,
   apiRowTag,
@@ -207,7 +206,7 @@ function detectDeploy(cwd) {
   }
   if (existsSync(path.join(cwd, "netlify.toml"))) notes.push("Netlify (netlify.toml present).");
   if (existsSync(path.join(cwd, "Dockerfile"))) notes.push("Docker (Dockerfile present).");
-  if (existsSync(path.join(cwd, ".github", "workflows"))) notes.push("GitHub Actions workflow(s) present (.github/workflows).");
+  if (existsSync(path.join(cwd, ".github", "workflows"))) notes.push("GitHub Actions workflows present (.github/workflows).");
   if (notes.length === 0) notes.push("No deploy config detected (no .vercel / vercel.json / Dockerfile / CI workflow).");
   return notes;
 }
@@ -389,7 +388,7 @@ function renderBrief(cwd, notes) {
     }
   } else {
     L.push(
-      `${api.rows.length} route(s) · ${api.gatedCount} look gated (session or cron secret) · ` +
+      `${api.rows.length} route${pl(api.rows.length)} · ${api.gatedCount} look gated (session or cron secret) · ` +
         `${api.mutatingCount} mutate (write) · **${api.dangerous.length} mutate without any obvious gate**.`,
     );
     L.push("");
@@ -400,11 +399,11 @@ function renderBrief(cwd, notes) {
       const methods = r.methods.length ? r.methods.join(", ") : "—";
       L.push(`| \`${mdEscape(r.url)}\` | ${mdEscape(methods)} | ${mdEscape(apiRowTag(r))} |`);
     }
-    if (api.rows.length > CAP) L.push(`| … | | …and ${api.rows.length - CAP} more route(s) |`);
+    if (api.rows.length > CAP) L.push(`| … | | …and ${api.rows.length - CAP} more route${pl(api.rows.length - CAP)} |`);
     if (api.dangerous.length > 0) {
       L.push("");
       L.push(
-        `> ⚠ ${api.dangerous.length} route(s) mutate but show no auth/session/cron-secret check — confirm each is meant to be public.`,
+        `> ⚠ ${api.dangerous.length} route${pl(api.dangerous.length)} mutate but show no auth/session/cron-secret check — confirm each is meant to be public.`,
       );
     }
   }
@@ -417,9 +416,9 @@ function renderBrief(cwd, notes) {
   if (labels.length === 0 && integ.clientSecretHits.length === 0) {
     L.push("No external LLM / 3rd-party integrations detected in `app/`.");
   } else {
-    L.push(`${labels.length} integration(s) detected${integ.mcpRouteFound ? " (incl. an MCP server at `/api/mcp`)" : ""}.`);
+    L.push(`${labels.length} integration${pl(labels.length)} detected${integ.mcpRouteFound ? " (incl. an MCP server at `/api/mcp`)" : ""}.`);
     L.push("");
-    L.push("| Integration | Backing env key(s) | Files |");
+    L.push("| Integration | Backing env keys | Files |");
     L.push("|---|---|---|");
     for (const label of labels) {
       const e = integ.integrations.get(label);
@@ -430,7 +429,7 @@ function renderBrief(cwd, notes) {
     if (integ.clientSecretHits.length > 0) {
       L.push("");
       L.push(
-        `> ⚠ ${integ.clientSecretHits.length} secret env read(s) found in \`"use client"\` component(s) — those would ship in the browser bundle.`,
+        `> ⚠ ${integ.clientSecretHits.length} secret env read${pl(integ.clientSecretHits.length)} found in \`"use client"\` components — those would ship in the browser bundle.`,
       );
     }
   }
@@ -443,8 +442,8 @@ function renderBrief(cwd, notes) {
     L.push("No cron routes or `vercel.json` crons found.");
   } else {
     L.push(
-      `${sched.rows.length} job(s) · ${sched.cronCount} scheduled in \`vercel.json\` · ` +
-        `${sched.ungated.length} ungated · ${sched.orphanRoutes.length} cron route(s) not wired to a schedule.`,
+      `${sched.rows.length} job${pl(sched.rows.length)} · ${sched.cronCount} scheduled in \`vercel.json\` · ` +
+        `${sched.ungated.length} ungated · ${sched.orphanRoutes.length} cron route${pl(sched.orphanRoutes.length)} not wired to a schedule.`,
     );
     L.push("");
     L.push("| Job | Schedule | Gating |");
@@ -498,7 +497,7 @@ function renderBrief(cwd, notes) {
   L.push("");
   L.push(`- **Branch:** \`${git.branch}\`${git.head ? ` @ \`${git.head.slice(0, 10)}\`` : ""}`);
   L.push(
-    `- **Working tree:** ${git.tracked} tracked change(s), ${git.untracked} untracked file(s)` +
+    `- **Working tree:** ${git.tracked} tracked change${pl(git.tracked)}, ${git.untracked} untracked file${pl(git.untracked)}` +
       `${git.tracked === 0 && git.untracked === 0 ? " — clean" : " — uncommitted work present"}`,
   );
   if (git.defaultBranch) {

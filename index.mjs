@@ -302,6 +302,32 @@ ${c.bold("Or by config file")} — .mcp.json at the repo root (Claude Code) or
 `);
 }
 
+/** Command-specific help: `fan-out --help` / `fan-in --help` / `help fan-in`. */
+function printFanHelp() {
+  const bin = binName();
+  header();
+  console.log(`
+${c.bold("fan-out / fan-in")} — several AI sessions in parallel, ONE verified main.
+
+${c.bold("Usage")}
+  ${bin} fan-out <n> [--task "..."]   open n lanes (1–8) as git worktrees off HEAD,
+                                      each with the project brain wired
+  ${bin} fan-in                       dry-run: collision map (files >1 lane touched)
+                                      + each lane test-merged ALONE against main
+  ${bin} fan-in --apply               land the lanes in sequence, re-running the
+                                      check gate on the COMBINED tree after each
+                                      merge — a lane that is green alone but red
+                                      combined is quarantined (rolled back), and
+                                      a textual conflict halts the train there
+
+${c.bold("The point")}
+  Two lanes can each pass alone and still break together. Textual merging can't
+  see that; the combined-tree gate can. Nothing reaches main un-verified.
+
+Want the whole thing acted out in ~10 seconds, zero setup? ${c.cyan(`${bin} demo`)}
+`);
+}
+
 async function main() {
   let { cmd, arg, flags } = parseArgs(process.argv.slice(2));
 
@@ -329,6 +355,10 @@ async function main() {
     }
     if (topic === "mcp") {
       printMcpHelp();
+      process.exit(0);
+    }
+    if (topic === "fan-out" || topic === "fan-in" || topic === "fanout" || topic === "fanin") {
+      printFanHelp();
       process.exit(0);
     }
     printHelp();
