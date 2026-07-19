@@ -251,15 +251,17 @@ const SECRET_PATTERNS = [
 // (finding: F1-buildpath-secret-skip). Truly-huge trees that are normally
 // gitignored stay skipped for perf — if they're committed, that's a separate smell.
 const SKIP_DIR = new Set([".git", "node_modules", ".next", ".vercel", ".data"]);
-const SKIP_BASENAME = new Set([
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-]);
+// Lockfiles USED to be skipped for perf, but a committed npm/yarn _authToken (or a
+// key pasted into one) then slipped through silently — so nothing is skipped by
+// basename anymore; they're scanned like any other text file.
+const SKIP_BASENAME = new Set([]);
+// Truly BINARY assets only (images, fonts, video, archives, PDFs). Text formats
+// that can carry a copied key are deliberately NOT skipped so the README's "every
+// tracked text file" claim is honest: .map sourcemaps embed original sourcesContent
+// (a classic place a bundled key hides), .svg is XML, lockfiles are JSON/YAML.
 const SKIP_EXT = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".pdf",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
   ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".webm", ".zip", ".gz",
-  ".lock", ".map",
 ]);
 
 const MAX_FILE_BYTES = 2_000_000; // full-scan cap (same cap as safety.ts corpus)

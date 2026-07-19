@@ -1055,7 +1055,7 @@ scenario("map on an Express repo: routes parsed with methods + gating + mutating
     assert.equal(r.code, 0, r.stderr);
     // (a) the scope line states the stack IS parsed now (no "estate view" dodge).
     assert.ok(/Detected: Express project/.test(r.stdout), `expected the stack scope line:\n${r.stdout}`);
-    assert.ok(/parses Express\/Fastify/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    assert.ok(/reads your server.s route/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
     // (b) the ROUTE TABLE is real: correct methods + gating tags.
     assert.ok(/\/health/.test(r.stdout) && /auth-gated/.test(r.stdout), `/health must show auth-gated:\n${r.stdout}`);
     assert.ok(/\/users/.test(r.stdout) && /public \(read-only\)/.test(r.stdout), `/users must be public read-only:\n${r.stdout}`);
@@ -1112,7 +1112,7 @@ scenario("map on a Flask repo: @app.route parsed with methods; @login_required g
     const r = run(["map"], repo);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(/Detected: Python \(Flask\) project/.test(r.stdout), `expected Python stack detection:\n${r.stdout}`);
-    assert.ok(/parses Flask\/FastAPI/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    assert.ok(/reads your Python route/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
     // Route table: methods correct; /submit gated by @login_required; POST /pay ⚠.
     assert.ok(/\/submit/.test(r.stdout) && /auth-gated/.test(r.stdout), `/submit must be auth-gated:\n${r.stdout}`);
     assert.ok(/\/pay/.test(r.stdout) && /\[POST\]/.test(r.stdout), `/pay must show [POST]:\n${r.stdout}`);
@@ -1165,7 +1165,7 @@ scenario("map on a FastAPI repo: @router.get/post parsed; POST /items ⚠ (mutat
     const r = run(["map"], repo);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(/Detected: Python \(FastAPI\) project/.test(r.stdout), `expected FastAPI stack detection:\n${r.stdout}`);
-    assert.ok(/parses Flask\/FastAPI/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
+    assert.ok(/reads your Python route/.test(r.stdout), `route parsing must be stated:\n${r.stdout}`);
     // GET + POST on /items both parsed; POST is the mutating, ungated ⚠.
     assert.ok(/\/items/.test(r.stdout) && /\[POST\]/.test(r.stdout) && /\[GET\]/.test(r.stdout), `both /items verbs must appear:\n${r.stdout}`);
     assert.ok(/mutates but no auth\/session check found/.test(r.stdout), `POST /items must be flagged ⚠:\n${r.stdout}`);
@@ -1608,6 +1608,77 @@ scenario("secret scan: a committed key inside a build/ dir is scanned → NO-GO 
     assert.ok(sec, "secret scan present");
     assert.equal(sec.status, "fail", `build/ secret must fail: ${JSON.stringify(sec)}`);
     assert.ok(!JSON.stringify(doc).includes(fakeKey), "the full key must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 33. secret scan: lockfiles + sourcemaps are scanned, not silently skipped (0.7.3 A4)
+// ---------------------------------------------------------------------------
+scenario("secret scan: a key committed in a lockfile or a .map sourcemap is caught → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const key = "sk_live_" + "3".repeat(26);
+    // A key pasted into a lockfile and into a bundle sourcemap — both used to be skipped.
+    write(repo, "package-lock.json", `{"name":"x","lockfileVersion":3,"note":"${key}"}\n`);
+    write(repo, "dist/bundle.js.map", `{"version":3,"sourcesContent":["const K='${key}';"]}\n`);
+    write(repo, "public/logo.svg", `<svg><!-- ${key} --></svg>\n`);
+    commitAll(repo, "chore: commit lockfile + sourcemap + svg carrying a key");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 1, `key in lockfile/sourcemap must NO-GO: ${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    const sec = doc.checks.find((cc) => /Secret scan/i.test(cc.label));
+    assert.equal(sec.status, "fail", `must fail: ${JSON.stringify(sec)}`);
+    const joined = JSON.stringify(doc);
+    assert.ok(/package-lock\.json/.test(joined), "lockfile must be named as a hit");
+    assert.ok(/bundle\.js\.map/.test(joined), "sourcemap must be named as a hit");
+    assert.ok(!joined.includes(key), "full key never echoed");
+    // A genuinely binary asset must still be skipped (no false positive / no crash).
+    const clean = scaffold(path.join(base, "bin"));
+    write(clean, "img/logo.png", "\x89PNG\r\n\x1a\n binary junk");
+    commitAll(clean, "chore: png");
+    const rc = run(["check", "--json", "--no-brief-check", "--no-overview"], clean);
+    assert.equal(rc.code, 0, `binary-only repo must GO: ${rc.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 34. outside-git error points to a next step (0.7.3 A2)
+// ---------------------------------------------------------------------------
+scenario("outside git: the error offers demo + git init instead of a dead-end", () => {
+  const base = freshBase();
+  try {
+    const dir = path.join(base, "nogit");
+    mkdirSync(dir, { recursive: true });
+    write(dir, "package.json", '{"name":"x","version":"1.0.0"}\n');
+    const r = run(["check"], dir);
+    assert.equal(r.code, 1, "still exits 1 outside a git repo");
+    const out = r.stderr + r.stdout;
+    assert.ok(/demo/i.test(out), `must point to demo: ${out}`);
+    assert.ok(/git init/i.test(out), `must point to git init: ${out}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 35. client-only React/Vite map: no Express/Fastify jargon, friendly empty line (0.7.3 A1)
+// ---------------------------------------------------------------------------
+scenario("map on a client-only React/Vite app: de-jargoned, friendly empty-SPA line", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base, { pkg: { dependencies: { react: "^19.0.0" }, devDependencies: { vite: "^5.0.0" } } });
+    write(repo, "index.html", "<div id=root></div>");
+    write(repo, "src/App.jsx", "export default function App(){return null}");
+    commitAll(repo, "chore: vite react spa");
+    const r = run(["map"], repo);
+    const out = r.stdout + r.stderr;
+    assert.ok(!/Express\/Fastify|Flask\/FastAPI/.test(out), `no backend jargon for a React user: ${out}`);
+    assert.ok(/client-side|client-only|nothing server-side/i.test(out), `friendly empty-SPA copy expected: ${out}`);
   } finally {
     cleanup(base);
   }

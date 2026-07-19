@@ -180,13 +180,20 @@ export function detectRepoStack(cwd) {
       return { kind: "next", label: "Next.js project", nextJs: true, project };
     }
     let label = "Node project";
+    let frontend = false; // a client-side app (no server framework) → nothing server-side to map
     if (deps.has("express")) label = "Express project";
     else if (deps.has("fastify")) label = "Fastify project";
     else if (deps.has("koa")) label = "Koa project";
-    else if (deps.has("react")) label = "React project";
-    else if (deps.has("vue")) label = "Vue project";
+    else if (deps.has("react")) { label = "React project"; frontend = true; }
+    else if (deps.has("vue")) { label = "Vue project"; frontend = true; }
+    else if (deps.has("svelte")) { label = "Svelte project"; frontend = true; }
+    else if (deps.has("vite")) { label = "Vite project"; frontend = true; }
     else if (project.packageJsonBroken) label = "Node project (package.json exists but could not be parsed)";
-    return { kind: "node", label, nextJs: false, project };
+    // A frontend build tool alongside a UI lib still means client-only if no server framework is present.
+    if (!frontend && deps.has("vite") && !deps.has("express") && !deps.has("fastify") && !deps.has("koa")) {
+      frontend = true;
+    }
+    return { kind: "node", label, nextJs: false, frontend, project };
   }
 
   if (has("requirements.txt") || has("pyproject.toml") || has("setup.py") || has("Pipfile")) {

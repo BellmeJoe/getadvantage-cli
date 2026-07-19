@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// getAdvantage CLI — land the fleet safely: parallel AI agents, one verified main.
+// getAdvantage CLI — the pre-deploy gate for AI-built apps: a local GO/NO-GO
+// (secrets, dirty tree, build) you run before you ship.
 //
 // The control layer for AI-built apps: spin up parallel worktree lanes
 // (`fan-out`), then reconcile them into ONE verified main with the SAFE FAN-IN
@@ -81,7 +82,7 @@ function parseArgs(argv) {
 
 function header() {
   console.log(c.bold("┌────────────────────────────────────────┐"));
-  console.log(c.bold("│  getAdvantage — land the fleet safely  │"));
+  console.log(c.bold("│  getAdvantage — check before you ship  │"));
   console.log(c.bold("└────────────────────────────────────────┘"));
 }
 
@@ -383,7 +384,9 @@ async function main() {
   try {
     cwd = repoRoot();
   } catch {
-    console.error(c.red("✗ Not inside a git repository. getAdvantage must run in your project's repo."));
+    console.error(c.red("✗ This folder isn't a git repository yet — getAdvantage gates the git history of your project."));
+    console.error(c.gray("  → Try it with no setup:  getadvantage demo"));
+    console.error(c.gray("  → Or gate this folder:   git init && git add -A   (then re-run getadvantage check)"));
     process.exit(1);
   }
 
@@ -411,14 +414,16 @@ async function main() {
     } catch { /* best-effort — lanes still run below */ }
     if (stack) {
       if (stack.nextJs) {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — deep route mapping reads the Next.js App Router (app/ + src/app/).`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Next.js App Router pages + API routes (app/ + src/app/).`);
+      } else if (stack.kind === "node" && stack.frontend) {
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — a client-side app; the map looks for any server routes + the services it calls (there may be none to show, and that's fine).`);
       } else if (stack.kind === "node") {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — route mapping parses Express/Fastify definitions (best-effort regex).`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your server's route definitions (best-effort).`);
       } else if (stack.kind === "python") {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — route mapping parses Flask/FastAPI decorators (best-effort regex).`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Python route decorators (best-effort).`);
       } else {
-        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. Route mapping covers Next.js, Express/Fastify, and Flask/FastAPI;`);
-        console.log(`  ${c.gray("for this stack the map shows the generic estate view.")}`);
+        console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)}. The map covers Next.js, Node, and Python web apps;`);
+        console.log(`  ${c.gray("for this stack it shows the generic estate view.")}`);
       }
     }
 

@@ -652,13 +652,16 @@ function emptyRouteDetail(kind, stack, dynamicCount) {
     return "No Next.js App Router routes (app/api/**/route.* or src/app/api/**/route.*) found — this lane reads Next.js App Router route files only.";
   }
   if (kind === "node") {
-    return `No Express/Fastify routes found${dyn} — this lane parses app/router/fastify route definitions; none matched in ${stack ? stack.label : "this project"}.`;
+    if (stack && stack.frontend) {
+      return `No server routes${dyn} — this looks like a client-side app, so there's nothing server-side to map. That's expected, not a problem.`;
+    }
+    return `No server routes found${dyn} — this lane reads your server's route definitions; none matched in ${stack ? stack.label : "this project"}.`;
   }
   if (kind === "python") {
-    return `No Flask/FastAPI routes found${dyn} — this lane parses @app/@router route decorators; none matched in ${stack ? stack.label : "this project"}.`;
+    return `No server routes found${dyn} — this lane reads your Python route decorators; none matched in ${stack ? stack.label : "this project"}.`;
   }
   const what = stack ? stack.label.replace(/ project$/, "") : "this stack";
-  return `No routes parsed — ${what} routes aren't parsed yet (this lane parses Next.js, Express/Fastify, and Flask/FastAPI).`;
+  return `No routes parsed — ${what} routes aren't parsed yet (this lane reads Next.js, Node, and Python web apps).`;
 }
 
 export function overviewApiSurface(cwd, stack = null) {

@@ -24,8 +24,8 @@ independently reproduced 1:1 against the live npm package.
 | Version | Theme | State |
 |---|---|---|
 | 0.7.0 | Route-map (Express/Fastify/Flask/FastAPI) + prior cold-QA fixes | **Released** (npm) |
-| **0.7.1** | **Trust-critical correctness** — 3 verified false-GO/unsafe-exec blockers + first-run dead-ends | **Code complete (uncommitted / unpublished)** |
-| **0.7.2** | Honesty + branding sweep (the minors/polish) | **Code complete (uncommitted / unpublished)** |
+| 0.7.1 + 0.7.2 | Trust-critical correctness + honesty/branding sweep | **Released** (npm, 2026-07-19) |
+| **0.7.3** | Public-readiness: gate-value banner, honest secret-scan coverage (lockfiles + sourcemaps), outside-git next steps, de-jargoned client-app map | **Code complete (uncommitted / unpublished)** |
 | 0.8 | Table stakes for CI adoption + the False-Positive escape hatch | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |
