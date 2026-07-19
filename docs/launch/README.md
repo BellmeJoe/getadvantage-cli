@@ -18,14 +18,15 @@ https://claude.ai/code/artifact/f23a9526-535b-44e9-82dc-c9ca3ec8ccbe
 
 | Asset | Keep as |
 |-------|---------|
-| **This folder** | Canonical **repo** visuals (brand law, offline, PR-reviewable) |
+| **This folder** | Canonical **repo** visuals (brand law, in-repo, PR-reviewable — fonts load from Google Fonts, so screenshot while online for exact brand type) |
 | **Claude Artifact** | Optional polished **animation** for social — export GIF/MP4 if you prefer motion |
 | Do not | Maintain a third HTML storyboard elsewhere |
 
-Brand rules for any future visual: match `getadvantage` `docs/BRAND.md` /
+Brand rules for any future visual: match `docs/BRAND.md` in the **getadvantage
+site repo** (`C:\Users\ben\projects\getadvantage`, separate from this CLI repo) /
 live site — **not** retired teal A-chip.
 
 ## Caption (X / Show HN)
 
-> Committed a live key in a sourcemap. Gate said NO-GO. Fixed. GO.  
+> Commit a live-style key in a sourcemap → gate says NO-GO. Fix it, re-run → GO.  
 > `npx getadvantage check`

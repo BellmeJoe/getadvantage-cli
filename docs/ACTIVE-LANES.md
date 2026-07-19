@@ -13,6 +13,9 @@ Empty board = nobody claims exclusive work — first writer updates this.
 3. When done: set Status `done` or delete the row + write a `docs/sessions/…-SESSION.md`.  
 4. Canonical tools: evidence = `npm run evidence` · launch HTML = `docs/launch/` only.
 
-### Example row
+### Example rows
+
+| Lane | Owner (tool/person) | Path / concern | Status | Updated |
+|------|---------------------|----------------|--------|---------|
 | launch-visual | Grok | docs/launch/ | done | 2026-07-19 |
 | evidence-gate | Claude | ops/evidence-suite.mjs | done | 2026-07-19 |

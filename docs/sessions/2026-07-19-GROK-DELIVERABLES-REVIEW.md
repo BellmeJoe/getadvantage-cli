@@ -152,8 +152,8 @@ npm run owner                 # version line + evidence
 
 ## 8. Open items (not done by Grok in final step)
 
-- [ ] Wire `npm run evidence` into publish CI before npm publish  
-- [ ] Founder decision on push=publish / provenance (`docs/publish.yml.proposed` if present)  
+- [x] Wire `npm run evidence` into publish CI before npm publish — done 2026-07-19 post-review (`npm test` + `npm run evidence` now gate publish in `.github/workflows/publish.yml`)  
+- [ ] Founder decision on publish trigger / provenance. **Note (post-review correction):** push=publish is the *live* behavior — `.github/workflows/publish.yml` auto-publishes any version bump pushed to `main`. The open decision is whether to keep that or switch to the tag-triggered `docs/publish.yml.proposed` (which exists, committed in `5884c58`). npm provenance still open.  
 - [ ] Commit/deploy **getadvantage** site brand purge if still uncommitted  
 - [ ] Regenerate OG PNGs if still teal-era  
 - [ ] 0.8 backlog from readiness reviews (UTF-16-no-BOM heuristic, demo dry-run honesty, FastAPI label, false-positive allowlist)  

@@ -13,7 +13,8 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 | Was ist **live auf npm**? | **0.7.3** | `npm view getadvantage version` |
 | Was kann ich lokal laufen lassen? | Dieselbe Version im Repo | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | | `npm test` |
+| Tests grün? | **40/40** erwartet | `npm test` |
+| Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
 > **0.7.2 und 0.7.3 sind bereits published** (founder-approved).  
 > „0.7.2 final live schalten“ ist erledigt; nächste sinnvolle Release-Nummer ist **0.8** (Backlog), nicht noch ein 0.7.x-Chaos.
@@ -29,7 +30,7 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 |------------------------------|-----------------------------------------------|
 | **„Kein Live-Key im Repo“** | Secret-Scan inkl. Sourcemaps/Dist, Redaction, kein Full-Key in Output |
 | **„Kein .env committed“** | Tracked-.env-Check (History = Leak) |
-| **„Ich shippe nicht aus Versehen uncommitted Dreck“** | Dirty-tree (vercel --prod = Working Tree) |
+| **„Ich shippe nicht aus Versehen ungespeicherten Dreck“** | Dirty-tree-Check: warnt bei lokal geänderten, noch nicht committeten Dateien — Hosts wie Vercel deployen genau diesen Stand |
 | **„Ein sauberes Projekt wird nicht falsch blockiert“** | Clean fixture → GO |
 | **„Ich verstehe mich auch als Vite/React-Mensch“** | Map ohne Express-Jargon auf Client-Apps |
 | **„Backend-Routen sehe ich“** | Map Express/Next/… + Warnung bei offenem POST |
@@ -61,7 +62,8 @@ Alles andere (Brief, Handoff, Fan-out, MCP, Architecture) ist **Werkzeug für Bu
 ┌─────────────────────────────────────────────────────────────┐
 │  LOOP C — Vor Public / Show HN (1 Stunde)                   │
 │  evidence GREEN + npm test                                  │
-│  + 2. Modell mit ops/loop1/REFUTE-PROMPT.md                 │
+│  + 2. Modell: Scoreboard in ops/loop1/REFUTE-PROMPT.md      │
+│    einfügen und einem ANDEREN Modell geben                  │
 │  + docs/launch/ Visual (Outcome-Karte)                      │
 │  → GREEN = hard pitch · SOFT = beta · RED = halt            │
 └─────────────────────────────────────────────────────────────┘
@@ -99,10 +101,13 @@ Features ohne grünes Evidence = Lärm.
    Zweiter Agent muss die Session-Logs und ACTIVE-LANES lesen.
 
 4. **Publish nur du**  
-   Agenten bauen und testen; du sagst „yes“ zu npm (auch wenn CI auto-publish auf main sitzt — das bewusst halten oder umbauen).
+   Agenten bauen und testen; du sagst „yes“ zu npm. **Achtung:** CI publisht
+   automatisch, sobald ein Versions-Bump auf `main` gepusht wird
+   (`.github/workflows/publish.yml`) — seit 2026-07-19 laufen davor `npm test`
+   und `npm run evidence` als Gate. Version-Bump pushen = Release freigeben.
 
 5. **Nach Session: Session-Log**  
-   `docs/sessions/YYYY-MM-DD-…-SESSION.md` mit: live version, evidence, uncommitted, nächster Schritt.
+   `docs/sessions/YYYY-MM-DD-…-SESSION.md` mit: Live-Version, Evidence-Stand, was noch nicht committed ist, nächster Schritt.
 
 ---
 
@@ -126,7 +131,7 @@ Nicht Architecture Diagrams. **Ein Outcome-Moment:**
 |--------|-----|---------|
 | **Verdict-Karte** NO-GO → GO | `docs/launch/verdict-hero.html` | „Key im Sourcemap → blockiert → fix → grün“ |
 | **15s Storyboard** | `docs/launch/gif-storyboard-15s.html` | Gleicher Story-Arc für GIF/X |
-| **Live-Demo** | `npx getadvantage demo` | Fan-in Wow (fortgeschritten) — Pitch **zweitrangig** |
+| **Live-Demo** | `npx getadvantage demo` | Fan-in-Wow: mehrere Agenten-Arbeitszweige sicher zusammenführen (fortgeschritten) — Pitch **zweitrangig** |
 
 **Marketing-Regel (wie du sagst):**  
 - **Was rauskommt:** simpel genug für jeden.  
@@ -164,11 +169,10 @@ Wenn ein Review **nach** 0.7.3 kommt:
 ## 7. Deine wöchentliche 10-Minuten-Routine
 
 ```text
-1. npm view getadvantage version
-2. npm run evidence
-3. ACTIVE-LANES.md leer / aktuell?
-4. Ein Satz notieren: „Diese Woche pitchen wir: ____“
-5. Wenn Evidence rot: nichts pitchen, nur fixen
+1. npm run owner        (Live-Version vs. lokal + Evidence-Scoreboard, ein Befehl)
+2. ACTIVE-LANES.md leer / aktuell?
+3. Ein Satz notieren: „Diese Woche pitchen wir: ____“
+4. Wenn Evidence rot: nichts pitchen, nur fixen
 ```
 
 Mehr brauchst du nicht, um Owner zu bleiben, während Agents bauen.

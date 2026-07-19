@@ -3,6 +3,10 @@
 Use with `docs/launch/verdict-hero.html` (screenshot) and/or a 15s GIF from
 `gif-storyboard-15s.html`. Soft/beta framing — not “we own the category.”
 
+> **Formatting note:** HN renders no markdown bold, fences, or quotes — only
+> *single-asterisk italics* and code indented by spaces. The Body and Short
+> version below are already written that way: **paste them as-is**.
+
 ---
 
 ## Title (Show HN)
@@ -16,51 +20,47 @@ Alternatives (pick one):
 
 ---
 
-## Body (Show HN)
+## Body (Show HN) — HN-safe, paste as-is
 
 AI can scaffold an app in an afternoon. Deploying it is still a good way to
-ship a live API key in a sourcemap, a committed `.env`, or whatever was sitting
-uncommitted when `vercel --prod` ran.
+ship a live API key in a sourcemap, a committed .env, or whatever was sitting
+uncommitted when vercel --prod ran.
 
-**getAdvantage** is a small, dependency-free CLI that answers one question in
-plain language:
+getAdvantage is a small, dependency-free CLI that answers one question in
+plain language: is this safe to ship? *GO* or *NO-GO*.
 
-> Is this safe to ship? **GO** or **NO-GO.**
-
-```bash
-npx getadvantage check
-```
+    npx getadvantage check
 
 What it actually blocks (we re-check these on every release with an evidence suite):
 
-- committed secret-shaped keys (including inside **sourcemaps / dist**)
-- a tracked **`.env`**
+- committed secret-shaped keys (including inside sourcemaps / dist)
+- a tracked .env
 - a dirty working tree (because many hosts deploy the working tree, not a clean commit)
-- and it still returns **GO** on a clean repo (no false panic)
+- and it still returns GO on a clean repo (no false panic)
 
-Also: `map` for “what does this app have?” without calling a React SPA an Express
-app; `demo` if you want the safe multi-lane fan-in story on a throwaway sample.
+Also: map for "what does this app have?" without calling a React SPA an Express
+app; demo if you want the safe multi-lane fan-in story on a throwaway sample.
 
-**Local by default.** Nothing leaves your machine unless you opt into reporting.
+Local by default. Nothing leaves your machine unless you opt into reporting.
 
-We’re early. The pitch is narrow on purpose: not “rank in ChatGPT,” not
-“enterprise control plane on day one” — **check before you ship.**
+We're early. The pitch is narrow on purpose: not "rank in ChatGPT," not
+"enterprise control plane on day one" — check before you ship.
 
-- npm: https://www.npmjs.com/package/getadvantage  
-- GitHub: https://github.com/BellmeJoe/getadvantage-cli  
-- Site: https://getadvantage.app  
+npm: https://www.npmjs.com/package/getadvantage  
+GitHub: https://github.com/BellmeJoe/getadvantage-cli  
+Site: https://getadvantage.app
 
 Happy to take feedback on false positives, missing patterns, and whatever
 broke on *your* stack.
 
 ---
 
-## Short version (if the form is tight)
+## Short version (if the form is tight) — HN-safe, paste as-is
 
 AI ships apps fast; secrets and dirty trees still ship with them.
 
-`npx getadvantage check` → plain **GO / NO-GO** before deploy. Blocks committed
-keys (incl. sourcemaps), tracked `.env`, dirty working trees. Local, open source.
+npx getadvantage check → plain GO / NO-GO before deploy. Blocks committed
+keys (incl. sourcemaps), tracked .env, dirty working trees. Local, open source.
 
 https://www.npmjs.com/package/getadvantage
 
@@ -68,26 +68,30 @@ https://www.npmjs.com/package/getadvantage
 
 ## X / LinkedIn caption (with image or GIF)
 
+*(X renders no markdown either — these are plain text. The card image is a
+staged demo, so the caption frames it as one — don’t narrate it as a real
+incident.)*
+
 **Primary (with verdict-hero screenshot):**
 
-> Committed a live key in a sourcemap.  
-> Gate said **NO-GO**. Fixed. **GO.**  
+> Commit a live-style key in a sourcemap → gate says NO-GO.  
+> Fix it, re-run → GO.  
 >
-> `npx getadvantage check`  
+> npx getadvantage check  
 > Local pre-deploy gate for AI-built apps — open source.  
 > getadvantage.app
 
 **Even shorter:**
 
-> Don’t ship the `.env`.  
-> `npx getadvantage check` → GO or NO-GO.  
+> Don’t ship the .env.  
+> npx getadvantage check → GO or NO-GO.  
 > #buildinpublic
 
 **If you attach the 15s GIF:**
 
 > 15 seconds: leak in the map → blocked → fix → green.  
 > That’s the whole product.  
-> `npx getadvantage check`
+> npx getadvantage check
 
 ---
 
@@ -114,4 +118,6 @@ npm view getadvantage version   # expect 0.7.3
 npm run evidence                # expect 8/8 GREEN
 ```
 
-Open `docs/launch/verdict-hero.html` → screenshot. Soft language: early / feedback welcome.
+Open `docs/launch/verdict-hero.html` **while online** (fonts load from Google
+Fonts; offline falls back to system faces) → screenshot. Paste the HN-safe
+sections above without reformatting. Soft language: early / feedback welcome.

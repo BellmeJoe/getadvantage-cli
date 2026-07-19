@@ -136,7 +136,8 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
 
 - [ ] **Policy config + baseline/fingerprint-ignore + severity thresholds**
   (`.getadvantage` config) — add #6 (research). Fixes `gate-placeholder-false-positive`:
-  today `.env.example` placeholders and AWS' own `AKIAIOSFODNN7EXAMPLE` doc key
+  today `.env.example` placeholders and AWS' own `AKIA…EXAMPLE` doc key (elided
+  here so the gate's own scan doesn't NO-GO this file — itself proof of the bug)
   hard-block with no allowlist. Precedent: gitleaks `.gitleaksignore` + baseline,
   semgrep blocking/non-blocking. The config is also the "policy version" the
   proof-records need. **M**

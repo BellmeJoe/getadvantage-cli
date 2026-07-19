@@ -28,7 +28,7 @@ blind-deleted. This file is the **decision record**.
 | Concern | Canonical | Status |
 |---------|-----------|--------|
 | Unit/integration tests | `npm test` | 40/40 expected |
-| Release evidence gate | **`npm run evidence`** → `ops/evidence-suite.mjs` | Keep; commit recommended |
+| Release evidence gate | **`npm run evidence`** → `ops/evidence-suite.mjs` | Committed in `ec670df` |
 | Loop1 path | `ops/loop1/run.mjs` = **wrapper** to evidence-suite | Not a second suite |
 | Refute prompt | `ops/loop1/REFUTE-PROMPT.md` | Keep |
 | In-repo launch HTML | **`docs/launch/`** | Keep (live brand chrome) |
@@ -46,17 +46,17 @@ Exactly the multi-agent problem: no shared lock on “who owns Loop 1 / launch v
 1. One **canonical** path per concern (table above).  
 2. Session logs under `docs/sessions/` with **ID + timestamp**.  
 3. Before starting a lane: `git status` + read latest session log.  
-4. Optional: a one-line `docs/ACTIVE-LANES.md` (who / what / path) — founder-owned.
+4. Done: `docs/ACTIVE-LANES.md` (who / what / path) — committed in `ec670df`, founder-owned.
 
 ---
 
 ## Founder checklist
 
 - [ ] Prefer **`npm run evidence`** over inventing a new suite  
-- [ ] Commit `ops/evidence-suite.mjs` + `package.json` `evidence` script when ready  
+- [x] Commit `ops/evidence-suite.mjs` + `package.json` `evidence` script — done in `ec670df`  
 - [ ] Use `docs/launch/` for brand-correct static assets; use Artifact only if you want motion  
-- [ ] Publish trigger / provenance still open (`docs/publish.yml.proposed`)  
-- [ ] Wire `npm run evidence` into publish workflow when you harden release  
+- [ ] Publish trigger: **live behavior today is push=publish** — `.github/workflows/publish.yml` auto-publishes any version bump pushed to `main`. Open decision: keep that, or switch to the tag-triggered `docs/publish.yml.proposed`. npm provenance still open.  
+- [x] Wire `npm run evidence` into publish workflow — done 2026-07-19 post-review (`npm test` + `npm run evidence` gate publish)  
 
 ## Verify
 
