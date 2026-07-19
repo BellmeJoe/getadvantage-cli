@@ -1,6 +1,6 @@
 # What getAdvantage CLI does (market one-pager)
 
-**Live:** `npx getadvantage@0.7.3` · **Owner proof (repo checkout only):** `npm run evidence`
+**Live:** `npx getadvantage@0.8.0` · **Owner proof (repo checkout only):** `npm run evidence`
 
 ---
 

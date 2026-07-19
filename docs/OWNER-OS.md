@@ -10,14 +10,14 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.7.3** | `npm view getadvantage version` |
+| Was ist **live auf npm**? | **0.8.0** | `npm view getadvantage version` |
 | Was kann ich lokal laufen lassen? | Dieselbe Version im Repo | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
 | Tests grün? | **40/40** erwartet | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **0.7.2 und 0.7.3 sind bereits published** (founder-approved).  
-> „0.7.2 final live schalten“ ist erledigt; nächste sinnvolle Release-Nummer ist **0.8** (Backlog), nicht noch ein 0.7.x-Chaos.
+> **0.8.0 ist live** (2026-07-19): Launch-Polish + gated Publish-CI.  
+> 0.7.x ist abgeschlossen; weitere Arbeit läuft als **0.8.x** (siehe ROADMAP), kein Versions-Chaos mehr.
 
 ---
 

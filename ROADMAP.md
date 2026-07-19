@@ -25,8 +25,9 @@ independently reproduced 1:1 against the live npm package.
 |---|---|---|
 | 0.7.0 | Route-map (Express/Fastify/Flask/FastAPI) + prior cold-QA fixes | **Released** (npm) |
 | 0.7.1 + 0.7.2 | Trust-critical correctness + honesty/branding sweep | **Released** (npm, 2026-07-19) |
-| **0.7.3** | Public-readiness: gate-value banner, honest secret-scan coverage (lockfiles + sourcemaps), outside-git next steps, de-jargoned client-app map | **Code complete (uncommitted / unpublished)** |
-| 0.8 | Table stakes for CI adoption + the False-Positive escape hatch | Planned |
+| 0.7.3 | Public-readiness: gate-value banner, honest secret-scan coverage (lockfiles + sourcemaps), outside-git next steps, de-jargoned client-app map | **Released** (npm, 2026-07-19) |
+| **0.8.0** | Launch polish: demo-ready output (real plurals, prefix-aware fingerprints), truthful `switch`/fan-in wording, per-command fan help, architecture signal band, owner ops + test+evidence-gated publish CI | **Released** (npm, 2026-07-19) |
+| 0.8.x | Table stakes for CI adoption + the False-Positive escape hatch | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |
 
@@ -37,16 +38,18 @@ independently reproduced 1:1 against the live npm package.
 The release that makes the GO promise trustworthy again. Everything here is a
 reproducible way the gate lies or dead-ends on the most likely first-run path.
 
-- [ ] **UTF-16 secret false-GO** — `gate-utf16-false-go` (blocker). A committed
+- [x] **UTF-16 secret false-GO** — `gate-utf16-false-go` (blocker). A committed
   `sk_live_…` key in a UTF-16-LE file (the PowerShell `>` / `Out-File` default)
   is invisible to the scanner → `GO`, exit 0. Root cause: UTF-16 bytes trip the
   null-byte "looks binary" skip. Fix: BOM-detect UTF-16 LE/BE and decode before
-  the binary check. `checks.mjs`.
-- [ ] **Non-ASCII filenames silently skipped** — `gate-nonascii-filename-skipped`
+  the binary check. `checks.mjs`. **Done — shipped + regression-tested (test 21).
+  Residual (0.8.x): BOM-less UTF-16 heuristic (BOM covers the PowerShell default).**
+- [x] **Non-ASCII filenames silently skipped** — `gate-nonascii-filename-skipped`
   (blocker). `git ls-files` octal-escapes non-ASCII paths (`core.quotepath` on
   by default), so `geheime Datei über prod.txt` never gets read — a committed
   key in it passes. Daily reality for the DACH ICP. Fix: list files with `-z`
-  (NUL-terminated, unquoted). `util.mjs` + `checks.mjs`.
+  (NUL-terminated, unquoted). `util.mjs` + `checks.mjs`. **Done — shipped +
+  regression-tested (umlaut-filename test).**
 - [ ] **Gate downloads + runs third-party code** — `gate-npx-tsc-thirdparty`
   (blocker). The typecheck calls `npx --yes tsc`; with TypeScript declared but
   not installed (a fresh clone, and exactly the state in the CLI's own generated
@@ -129,7 +132,10 @@ The residue that a skeptical buyer notices. None break the gate, all cost trust.
 
 ---
 
-## 0.8 — CI table stakes + the False-Positive escape hatch
+## 0.8.x — CI table stakes + the False-Positive escape hatch
+
+*(0.8.0 shipped 2026-07-19 as the launch-polish release; the items below
+continue in 0.8.x patch/minor releases.)*
 
 What every serious gate tool has, and what makes the gate adoptable in an
 existing repo. Also closes the `gate-placeholder-false-positive` major.
