@@ -1,0 +1,23 @@
+name: Check request
+description: A check the gate should run before code ships — tell us what would make GO/NO-GO trustworthy for your stack
+labels: [check-request]
+body:
+  - type: textarea
+    id: check
+    attributes:
+      label: What should the gate check?
+      description: What would have to be true (or false) for you to trust a GO on your project?
+    validations:
+      required: true
+  - type: textarea
+    id: stack
+    attributes:
+      label: Your stack
+      placeholder: "Next.js + Vercel · Python/FastAPI · Rails · …"
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you catch this today?
+      description: Manual review, another tool, or not at all?

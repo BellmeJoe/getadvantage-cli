@@ -1,7 +1,33 @@
 # getadvantage
 
+> **The open-source GO / NO-GO gate for AI-built code.** One command tells you whether it's safe to ship — leaked secrets, committed `.env`, dirty tree, typecheck, build — and exits `0` (GO) or `1` (NO-GO). Local, dependency-free, nothing leaves your machine.
+
 [![npm version](https://img.shields.io/npm/v/getadvantage)](https://www.npmjs.com/package/getadvantage)
 [![npm downloads](https://img.shields.io/npm/dm/getadvantage)](https://www.npmjs.com/package/getadvantage)
+[![license](https://img.shields.io/npm/l/getadvantage)](./LICENSE)
+[![node](https://img.shields.io/node/v/getadvantage)](https://nodejs.org)
+
+AI agents write the code. **Who checks it before it ships?**
+
+```bash
+npx getadvantage                 # GO / NO-GO in seconds — no install, no signup
+```
+
+Give your agent an outside checker it must pass (Claude Code · Cursor · Codex · Grok Build):
+
+```bash
+claude mcp add getadvantage -- npx getadvantage mcp
+```
+
+Put the same gate in front of every push:
+
+```bash
+npx getadvantage github-action   # writes the CI workflow for you
+```
+
+If the gate caught something before it shipped, **[star the repo](https://github.com/BellmeJoe/getadvantage-cli/stargazers)** — stars are how other builders know they can rely on it. Hit a problem or want a check we don't have? **[Open an issue](https://github.com/BellmeJoe/getadvantage-cli/issues)** — every one gets read and answered.
+
+## What you get
 
 A local, dependency-free **pre-deploy gate + portable project brain** for apps
 built with AI — Claude Code, Cursor, Lovable, Bolt, v0, Replit, and friends.

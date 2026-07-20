@@ -1,0 +1,44 @@
+name: Bug report
+description: The gate did something wrong — false GO, false NO-GO, crash, or confusing output
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `npx getadvantage --version` (or the version npm shows)
+      placeholder: "0.8.1"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Windows 11 / macOS 15 / Ubuntu 24.04 · Node 20"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command you ran and what the gate said. Paste output — secrets are masked by the CLI, but double-check before pasting.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - CLI (npx getadvantage)
+        - MCP server (agent calling the gate)
+        - CI (GitHub Actions)
+        - fan-out / fan-in conductor
+        - other
+    validations:
+      required: true
