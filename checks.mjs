@@ -53,10 +53,15 @@ function isOwnArtifact(rel) {
  * a tracked edit or deletion there is real human/agent work (or tampering), not
  * CLI churn, so it must go through the normal tracked-change gate instead of being
  * reported as "clean of ship-risk" (finding: dirty-own-artifact-tracked-mod-pass).
+ *
+ * Policy config (`config.json` under the marker dirs) is never rewritten by the
+ * CLI — it authorizes secret ignores. Tracked/staged edits there are ship-risk,
+ * not regenerated churn (0.8.3 Fable audit P1).
  */
 function isRegeneratedArtifact(rel) {
   const p = String(rel || "").replace(/\\/g, "/").replace(/^\.\//, "");
   if (p === "PROJECT-BRIEF.md" || p === "HANDOFF.md") return true;
+  if (p === ".getadvantage/config.json" || p === ".ship-safe/config.json") return false;
   if (p.startsWith(".getadvantage/") || p.startsWith(".ship-safe/")) return true;
   return false;
 }
@@ -177,7 +182,36 @@ const SECRET_PATTERNS = [
   { id: "github-fine", label: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g },
   { id: "google-oauth", label: "Google OAuth secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/g },
   { id: "slack", label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
-  { id: "private-key", label: "Private key block", re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/g },
+  // Full PEM block (BEGIN…END), not the header alone. Header-only matches make
+  // every key of the same type share one secretAuthId — a hash copied from one
+  // fixture must never authorize a different private key (0.8.3 re-review P1).
+  {
+    id: "private-key",
+    label: "Private key block",
+    re: /-----BEGIN ((?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
+  },
+  // Incomplete / truncated PEM: BEGIN present without a matching END for that
+  // key type. Full-block regex misses material when the footer is stripped —
+  // removing the footer must not turn NO-GO into GO (0.8.3 final re-review P1).
+  // Match string is the constant header → non-unique; value/hash allowlisting
+  // is refused in secretAllowDecision for this patternId.
+  {
+    id: "private-key-incomplete",
+    label: "Incomplete private key block",
+    re: /-----BEGIN ((?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY)-----/g,
+    validate: (_tok, m) => {
+      const keyType = m?.[1];
+      if (!keyType || m.index == null) return false;
+      // Escape type for RegExp (spaces/letters only in practice, but stay strict).
+      const esc = String(keyType).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const fromHere = m.input.slice(m.index);
+      const complete = new RegExp(
+        `^-----BEGIN ${esc}-----[\\s\\S]*?-----END ${esc}-----`,
+      );
+      // Fire only when this BEGIN is not the start of a complete PEM block.
+      return !complete.test(fromHere);
+    },
+  },
   { id: "sendgrid", label: "SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g },
   // --- from CLAUDE.md hard-rule #2 (the pre-commit scan literals) ---
   { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /\bwhsec_[A-Za-z0-9]{20,}/g },
@@ -418,6 +452,7 @@ export function checkSecrets(cwd) {
               file: rel,
               label: p.label,
               fp: decision.fp,
+              authId: decision.authId,
               count: 1,
               reason: decision.reason,
             });
@@ -427,7 +462,15 @@ export function checkSecrets(cwd) {
         const k = `${rel}::${p.label}`;
         const prev = hits.get(k);
         if (prev) prev.count++;
-        else hits.set(k, { file: rel, label: p.label, fp: decision.fp, count: 1 });
+        else {
+          hits.set(k, {
+            file: rel,
+            label: p.label,
+            fp: decision.fp,
+            authId: decision.authId,
+            count: 1,
+          });
+        }
       }
     }
   }
@@ -439,6 +482,11 @@ export function checkSecrets(cwd) {
       ? [`${partial} oversized file${pl(partial)} >2 MB scanned partially (first + last 256 KB each; scanned partially: ${partialNames}) — move giant blobs out of git for a full scan.`]
       : [];
 
+  // Display fingerprint is human-readable only; sha256 auth id is the
+  // copy-paste allowlist identity (never the full secret).
+  const hitLine = (h) =>
+    `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`;
+
   const allowedList = [...allowed.values()];
   const allowedNote =
     allowedList.length > 0
@@ -446,7 +494,7 @@ export function checkSecrets(cwd) {
           `${allowedList.length} allowlisted hit${pl(allowedList.length)} (disclosed, not blocking):`,
           ...allowedList.slice(0, 20).map(
             (h) =>
-              `  ${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more)` : ""} [${h.reason}]`,
+              `  ${hitLine(h)} [${h.reason}]`,
           ),
           ...(allowedList.length > 20 ? [`  …and ${allowedList.length - 20} more allowlisted`] : []),
         ]
@@ -467,7 +515,8 @@ export function checkSecrets(cwd) {
   }
 
   const lines = [...hits.values()].map(
-    (h) => `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}`,
+    (h) =>
+      `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`,
   );
   return result(
     "fail",

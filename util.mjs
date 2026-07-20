@@ -1,6 +1,7 @@
 // Ship-Safe — shared helpers (ANSI color, git wrappers, formatting).
 // Node built-ins only. No npm deps.
 
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -85,6 +86,33 @@ export function gitSafe(args, opts = {}) {
   }
 }
 
+/**
+ * Read a path's blob from the git index (staged / tracked content), not the
+ * working tree. Used for policy authorization so unstaged edits cannot
+ * suppress secrets while the path is still "in the index".
+ * @param {string} cwd
+ * @param {string} rel repo-relative path (forward slashes preferred)
+ * @returns {string|null} file text, or null if missing / not in index
+ */
+export function readGitIndexText(cwd, rel) {
+  const want = String(rel || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  if (!want) return null;
+  try {
+    // Do not trim — policy JSON must match the staged blob exactly for
+    // worktree-diff disclosure; trailing newline is part of the blob.
+    return execFileSync("git", ["show", `:${want}`], {
+      encoding: "utf8",
+      cwd: cwd ?? process.cwd(),
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
+
 /** List repo files with `git <args> -z` and return an array of paths.
  *  The `-z` (NUL-terminated) output is CRITICAL: without it, `git ls-files`
  *  octal-escapes and quotes any non-ASCII path (core.quotepath is on by
@@ -118,7 +146,11 @@ export function repoRoot(cwd = process.cwd()) {
 /** Mask a matched secret to a recognisable fingerprint — NEVER echo the full
  *  value. Mirrors app/lib/safety.ts `fingerprint()`.
  *  Keeps a well-known public prefix intact (sk_live_, ghp_, sk-ant-, …) so the
- *  fingerprint reads instantly, but only when ≥8 chars stay hidden. */
+ *  fingerprint reads instantly, but only when ≥8 chars stay hidden.
+ *
+ *  DISPLAY ONLY. Do not use this string as an allowlist authorization identity —
+ *  distinct secrets can share the same prefix/tail/length form. Use
+ *  `secretAuthId()` for policy matching. */
 export function fingerprint(match) {
   let head = match.slice(0, 6);
   if (match.length > 14) {
@@ -127,6 +159,18 @@ export function fingerprint(match) {
   }
   const tail = match.length > 14 ? match.slice(-4) : "";
   return `${head}…${tail} (${match.length} chars)`;
+}
+
+/**
+ * Collision-resistant authorization identity for a secret match.
+ * SHA-256 hex of the raw match bytes (UTF-8). Safe to print and to store in
+ * repo policy (`secrets.ignore.hashes` / legacy `fingerprints` field when the
+ * entry is a full digest). Never confusable with the display fingerprint.
+ * @param {string} match
+ * @returns {string} 64-char lowercase hex
+ */
+export function secretAuthId(match) {
+  return createHash("sha256").update(String(match ?? ""), "utf8").digest("hex");
 }
 
 /** Pluralization suffix: `${n} issue${pl(n)}` → "1 issue" / "2 issues". */

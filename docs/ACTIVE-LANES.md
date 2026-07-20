@@ -5,7 +5,7 @@ Empty board = nobody claims exclusive work — first writer updates this.
 
 | Lane | Owner (tool/person) | Path / concern | Status | Updated |
 |------|---------------------|----------------|--------|---------|
-| — | — | — | idle · last ship: **getadvantage@0.8.2** allowlist (npm live) | 2026-07-20 |
+| `0.8.3-policy-safety-repair` | Grok Build | `policy.mjs`, `util.mjs`, `checks.mjs` index-blob policy, PEM full-block + incomplete, dirty-tree config carve-out, tests, README, package, social pack | `REVIEW_GO` · **RELEASE_AUTHORIZED** · candidate **0.8.3** · independent re-review cleared all P1/P2 (48/48 tests · 8/8 evidence · incomplete PEM + index-blob policy hostile checks) · **npm still getadvantage@0.8.2** until gated publish + live verification succeed | 2026-07-20 |
 
 ### Rules
 1. Before starting: add a row.  

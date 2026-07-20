@@ -26,8 +26,15 @@
 //  9c. clean repo / false positives — placeholder DB URL, CSS class, gitignored .env all pass;
 //                                     sk-ant- labeled "Anthropic secret key", not OpenAI
 //  9d. oversized file (>2MB)        — head+tail partial scan finds a trailing secret, discloses it
-//  9e. allowlist (0.8.2)            — AWS EXAMPLE built-in + .getadvantage/config.json
-//                                     (value/fingerprint/path); real keys still NO-GO; disclosed
+//  9e. allowlist (0.8.2/0.8.3)      — AWS EXAMPLE built-in + tracked policy
+//                                     (value/hash/path); real keys still NO-GO; disclosed
+//  9f. policy safety (0.8.3)        — untracked/ignored policy cannot authorize;
+//                                     display fp ≠ auth id; patternIds; version;
+//                                     current-vs-legacy precedence; collisions;
+//                                     two distinct PEM private keys: hash of one
+//                                     must not authorize the other;
+//                                     incomplete/truncated PEM (no END) still NO-GO
+//                                     and never value/hash-allowlistable
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
@@ -63,12 +70,29 @@
 //  28. typo did-you-mean (0.7.2)    — unknown cmd suggests, does not dump full help
 //  29. own-artifacts dirty (0.7.2)  — PROJECT-BRIEF.md alone is not "scratch" risk
 
+import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+
+/** Same as util.mjs secretAuthId — local so scenarios never import production modules. */
+function hashOf(match) {
+  return createHash("sha256").update(String(match ?? ""), "utf8").digest("hex");
+}
+
+/** Same as util.mjs fingerprint — display-only; for collision fixtures. */
+function displayFp(match) {
+  let head = match.slice(0, 6);
+  if (match.length > 14) {
+    const pre = match.slice(0, 12).match(/^.+[_-]/);
+    if (pre && match.length - pre[0].length >= 8) head = pre[0];
+  }
+  const tail = match.length > 14 ? match.slice(-4) : "";
+  return `${head}…${tail} (${match.length} chars)`;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INDEX = path.join(__dirname, "..", "index.mjs");
@@ -714,7 +738,7 @@ scenario("oversized file (>2MB): secret at the tail is found via head+tail parti
 });
 
 // ---------------------------------------------------------------------------
-// 9e. allowlist (0.8.2) — built-in AWS EXAMPLE + policy config escape hatch
+// 9e. allowlist (0.8.2/0.8.3) — built-in AWS EXAMPLE + tracked policy escape hatch
 // ---------------------------------------------------------------------------
 scenario("allowlist: AWS EXAMPLE key is built-in allowlisted (GO, disclosed); real AKIA still NO-GO", () => {
   const base = freshBase();
@@ -762,7 +786,7 @@ scenario("allowlist: AWS EXAMPLE key is built-in allowlisted (GO, disclosed); re
   }
 });
 
-scenario("allowlist: .getadvantage/config.json value + path + fingerprint rules; real key not listed still fails", () => {
+scenario("allowlist: .getadvantage/config.json value + path + hash rules; real key not listed still fails", () => {
   const base = freshBase();
   try {
     // --- value allowlist ---
@@ -828,44 +852,33 @@ scenario("allowlist: .getadvantage/config.json value + path + fingerprint rules;
     assert.equal(psec.status, "pass");
     assert.ok(/policy: path/i.test((psec.extra || []).join("\n")));
 
-    // --- fingerprint allowlist (copy-paste from a prior gate report) ---
-    // Same algorithm as util.mjs fingerprint() — kept local so this file never
-    // imports production modules (scenarios only spawn the CLI).
-    function fp(match) {
-      let head = match.slice(0, 6);
-      if (match.length > 14) {
-        const pre = match.slice(0, 12).match(/^.+[_-]/);
-        if (pre && match.length - pre[0].length >= 8) head = pre[0];
-      }
-      const tail = match.length > 14 ? match.slice(-4) : "";
-      return `${head}…${tail} (${match.length} chars)`;
-    }
-    const fpRepo = path.join(base, "fp-ignore");
-    initRepo(fpRepo);
-    const fpKey = "sk_live_" + "f1f2f3f4f5f6f7f8f9f0a1b2c3";
-    const printedFp = fp(fpKey);
-    write(fpRepo, "package.json", JSON.stringify({ name: "fp-ignore", version: "1.0.0", private: true }, null, 2) + "\n");
-    write(fpRepo, "lib/keys.js", `export const K = "${fpKey}";\n`);
+    // --- hash allowlist (sha256 auth id from a prior gate report) ---
+    const hashRepo = path.join(base, "hash-ignore");
+    initRepo(hashRepo);
+    const hashKey = "sk_live_" + "f1f2f3f4f5f6f7f8f9f0a1b2c3";
+    const auth = hashOf(hashKey);
+    write(hashRepo, "package.json", JSON.stringify({ name: "hash-ignore", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(hashRepo, "lib/keys.js", `export const K = "${hashKey}";\n`);
     write(
-      fpRepo,
+      hashRepo,
       path.join(".getadvantage", "config.json"),
       JSON.stringify(
         {
           version: 1,
-          secrets: { ignore: { fingerprints: [printedFp] } },
+          secrets: { ignore: { hashes: [auth] } },
         },
         null,
         2,
       ) + "\n",
     );
-    commitAll(fpRepo, "chore: fingerprint allowlist");
-    const rf = run(["check", "--json"], fpRepo);
-    assert.equal(rf.code, 0, `fingerprint allowlist must GO\n${rf.stderr}\n${rf.stdout}`);
+    commitAll(hashRepo, "chore: hash allowlist");
+    const rf = run(["check", "--json"], hashRepo);
+    assert.equal(rf.code, 0, `hash allowlist must GO\n${rf.stderr}\n${rf.stdout}`);
     const fdoc = parseJson(rf);
     assert.equal(fdoc.verdict, "GO");
     const fsec = fdoc.checks.find((c) => c.label === "Secret scan");
     assert.equal(fsec.status, "pass");
-    assert.ok(/policy: fingerprint/i.test((fsec.extra || []).join("\n")));
+    assert.ok(/policy: hash/i.test((fsec.extra || []).join("\n")));
 
     // --- still-live key outside allowlist must fail ---
     const live = path.join(base, "still-live");
@@ -893,6 +906,667 @@ scenario("allowlist: .getadvantage/config.json value + path + fingerprint rules;
     const lsec = ldoc.checks.find((c) => c.label === "Secret scan");
     assert.equal(lsec.status, "fail");
     assert.ok(lsec.extra.join("\n").includes("src/app.js"));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9f. policy safety (0.8.3) — hostile regressions for false-GO paths
+// ---------------------------------------------------------------------------
+scenario("policy safety: untracked and gitignored policy cannot authorize ignores (NO-GO + warning)", () => {
+  const base = freshBase();
+  try {
+    const fixtureKey = "sk_live_" + "u1n2t3r4a5c6k7e8d9f0a1b2c3";
+
+    // --- untracked policy under own-artifact dirty-tree exception ---
+    const untracked = path.join(base, "untracked-policy");
+    initRepo(untracked);
+    write(untracked, "package.json", JSON.stringify({ name: "untracked-policy", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(untracked, "app.js", `export const KEY = "${fixtureKey}";\n`);
+    commitAll(untracked, "chore: committed secret, no policy yet");
+    // Write policy AFTER commit so it stays untracked. Dirty-tree treats
+    // .getadvantage/* as own-artifact, so GO would be false if policy applied.
+    write(
+      untracked,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        { version: 1, secrets: { ignore: { values: [fixtureKey] } } },
+        null,
+        2,
+      ) + "\n",
+    );
+    const ru = run(["check", "--json"], untracked);
+    assert.equal(ru.code, 1, `untracked policy must not authorize GO\n${ru.stderr}\n${ru.stdout}`);
+    const udoc = parseJson(ru);
+    assert.equal(udoc.verdict, "NO-GO");
+    const usec = udoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(usec.status, "fail");
+    const uextra = (usec.extra || []).join("\n");
+    assert.ok(/not tracked or staged/i.test(uextra), uextra);
+    assert.ok(!/policy: value/i.test(uextra), "must not claim policy:value allowlist");
+
+    // Staged policy is in the index → secret-scan ignore rules apply from the
+    // index blob. config.json is ship-risk (not regenerated churn), so dirty-tree
+    // still NO-GOs until the policy is committed.
+    g(["add", path.join(".getadvantage", "config.json")], untracked);
+    const rs = run(["check", "--json"], untracked);
+    assert.equal(rs.code, 1, `staged-but-uncommitted policy must dirty-tree NO-GO\n${rs.stderr}\n${rs.stdout}`);
+    const sdoc = parseJson(rs);
+    assert.equal(sdoc.verdict, "NO-GO");
+    const ssec = sdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(ssec.status, "pass", "index-backed staged policy must authorize the secret");
+    assert.ok(/policy: value/i.test((ssec.extra || []).join("\n")));
+    const sdirty = sdoc.checks.find((c) => c.label === "Dirty-tree guard");
+    assert.equal(sdirty.status, "fail", "config.json staged edit is ship-risk, not marker churn");
+
+    // After commit, policy authorizes and the tree is clean of ship-risk → GO.
+    commitAll(untracked, "chore: commit policy allowlist");
+    const rc = run(["check", "--json"], untracked);
+    assert.equal(rc.code, 0, `committed policy must authorize GO\n${rc.stderr}\n${rc.stdout}`);
+    assert.equal(parseJson(rc).verdict, "GO");
+
+    // --- gitignored policy: exists on disk but not in index ---
+    const ignored = path.join(base, "ignored-policy");
+    initRepo(ignored);
+    write(ignored, "package.json", JSON.stringify({ name: "ignored-policy", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(ignored, "app.js", `export const KEY = "${fixtureKey}";\n`);
+    write(ignored, ".gitignore", ".getadvantage/\n");
+    commitAll(ignored, "chore: secret + ignore marker dir");
+    write(
+      ignored,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        { version: 1, secrets: { ignore: { values: [fixtureKey] } } },
+        null,
+        2,
+      ) + "\n",
+    );
+    const ri = run(["check", "--json"], ignored);
+    assert.equal(ri.code, 1, `gitignored policy must not authorize GO\n${ri.stderr}\n${ri.stdout}`);
+    const idoc = parseJson(ri);
+    assert.equal(idoc.verdict, "NO-GO");
+    const isec = idoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(isec.status, "fail");
+    assert.ok(/not tracked or staged/i.test((isec.extra || []).join("\n")));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("policy safety: display fingerprint is not an auth id; hash collisions isolated; patternIds; versions; precedence", () => {
+  const base = freshBase();
+  try {
+    // Craft two distinct keys with identical display fingerprint (prefix, last4, len).
+    const key1 = "sk_live_" + "11111111111111111111" + "zzzz";
+    const key2 = "sk_live_" + "22222222222222222222" + "zzzz";
+    assert.equal(displayFp(key1), displayFp(key2), "fixture keys must collide on display fp");
+    assert.notEqual(hashOf(key1), hashOf(key2), "auth ids must differ");
+
+    // --- display fingerprint in policy must NOT authorize ---
+    const disp = path.join(base, "display-fp");
+    initRepo(disp);
+    write(disp, "package.json", JSON.stringify({ name: "display-fp", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(disp, "a.js", `export const A = "${key1}";\n`);
+    write(
+      disp,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { fingerprints: [displayFp(key1)] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(disp, "chore: display fingerprint in policy (must not authorize)");
+    const rd = run(["check", "--json"], disp);
+    assert.equal(rd.code, 1, `display fingerprint must not authorize\n${rd.stderr}\n${rd.stdout}`);
+    const ddoc = parseJson(rd);
+    assert.equal(ddoc.verdict, "NO-GO");
+    const dsec = ddoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(dsec.status, "fail");
+    const dextra = (dsec.extra || []).join("\n");
+    assert.ok(/display fingerprint|auth id|hashes/i.test(dextra), dextra);
+
+    // --- auth hash for key1 must allow key1 only, not display-colliding key2 ---
+    const coll = path.join(base, "hash-collision");
+    initRepo(coll);
+    write(coll, "package.json", JSON.stringify({ name: "hash-collision", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(coll, "one.js", `export const A = "${key1}";\n`);
+    write(coll, "two.js", `export const B = "${key2}";\n`);
+    write(
+      coll,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { hashes: [hashOf(key1)] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(coll, "chore: hash allowlists only key1");
+    const rc = run(["check", "--json"], coll);
+    assert.equal(rc.code, 1, `key2 must still NO-GO despite display collision\n${rc.stderr}\n${rc.stdout}`);
+    const cdoc = parseJson(rc);
+    assert.equal(cdoc.verdict, "NO-GO");
+    const csec = cdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(csec.status, "fail");
+    const cextra = (csec.extra || []).join("\n");
+    assert.ok(cextra.includes("two.js"), "key2 file must be listed as a hit");
+    assert.ok(/allowlisted/i.test(csec.detail + "\n" + cextra), "key1 should be disclosed as allowlisted");
+    assert.ok(/policy: hash/i.test(cextra));
+    assert.ok(!JSON.stringify(cdoc).includes(key1) && !JSON.stringify(cdoc).includes(key2));
+
+    // --- patternIds allowlist (id: stripe-live) ---
+    const pat = path.join(base, "pattern-ids");
+    initRepo(pat);
+    const stripeKey = "sk_live_" + "p1a2t3t4e5r6n7i8d9s0x1y2z3";
+    write(pat, "package.json", JSON.stringify({ name: "pattern-ids", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(pat, "token.js", `export const T = "${stripeKey}";\n`);
+    write(
+      pat,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { patternIds: ["stripe-live"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(pat, "chore: patternIds allowlist");
+    const rp = run(["check", "--json"], pat);
+    assert.equal(rp.code, 0, `patternIds must GO\n${rp.stderr}\n${rp.stdout}`);
+    const pdoc = parseJson(rp);
+    assert.equal(pdoc.verdict, "GO");
+    const psec = pdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(psec.status, "pass");
+    assert.ok(/policy: patternId/i.test((psec.extra || []).join("\n")));
+
+    // patternIds must not blanket-allow unrelated pattern families
+    write(pat, "aws.js", `export const A = "AKIA${"0".repeat(16)}";\n`);
+    write(
+      pat,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { patternIds: ["stripe-live"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(pat, "chore: aws key not covered by stripe patternId");
+    const ra = run(["check", "--json"], pat);
+    assert.equal(ra.code, 1, "patternIds must not allow other pattern families");
+    assert.equal(parseJson(ra).verdict, "NO-GO");
+
+    // --- malformed JSON ---
+    const mal = path.join(base, "malformed");
+    initRepo(mal);
+    write(mal, "package.json", JSON.stringify({ name: "malformed", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(mal, "app.js", `export const KEY = "${stripeKey}";\n`);
+    write(mal, path.join(".getadvantage", "config.json"), "{ not valid json\n");
+    commitAll(mal, "chore: malformed policy");
+    const rm = run(["check", "--json"], mal);
+    assert.equal(rm.code, 1, "malformed policy must not authorize");
+    const mdoc = parseJson(rm);
+    assert.equal(mdoc.verdict, "NO-GO");
+    const msec = mdoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(/could not be parsed|not applied/i.test((msec.extra || []).join("\n")));
+
+    // --- unsupported version ---
+    const ver = path.join(base, "bad-version");
+    initRepo(ver);
+    write(ver, "package.json", JSON.stringify({ name: "bad-version", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(ver, "app.js", `export const KEY = "${stripeKey}";\n`);
+    write(
+      ver,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        { version: 99, secrets: { ignore: { values: [stripeKey] } } },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(ver, "chore: unsupported policy version");
+    const rv = run(["check", "--json"], ver);
+    assert.equal(rv.code, 1, "unsupported version must not authorize");
+    const vdoc = parseJson(rv);
+    assert.equal(vdoc.verdict, "NO-GO");
+    const vsec = vdoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(/unsupported version/i.test((vsec.extra || []).join("\n")));
+
+    // --- current .getadvantage wins over legacy .ship-safe when both exist ---
+    const prec = path.join(base, "precedence");
+    initRepo(prec);
+    const precKey = "sk_live_" + "c1u2r3r4e5n6t7w8i9n0s1x2y3";
+    write(prec, "package.json", JSON.stringify({ name: "precedence", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(prec, "app.js", `export const KEY = "${precKey}";\n`);
+    // Legacy would allow the key; current only allowlists docs/** → must NOT allow.
+    write(
+      prec,
+      path.join(".ship-safe", "config.json"),
+      JSON.stringify(
+        { version: 1, secrets: { ignore: { values: [precKey] } } },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(
+      prec,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify({ version: 1, secrets: { ignore: { paths: ["docs/**"] } } }, null, 2) + "\n",
+    );
+    commitAll(prec, "chore: current wins over legacy");
+    const rpr = run(["check", "--json"], prec);
+    assert.equal(rpr.code, 1, "current policy must take precedence (no value allow)");
+    assert.equal(parseJson(rpr).verdict, "NO-GO");
+
+    // Legacy alone still works when current is absent.
+    const leg = path.join(base, "legacy-only");
+    initRepo(leg);
+    write(leg, "package.json", JSON.stringify({ name: "legacy-only", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(leg, "app.js", `export const KEY = "${precKey}";\n`);
+    write(
+      leg,
+      path.join(".ship-safe", "config.json"),
+      JSON.stringify(
+        { version: 1, secrets: { ignore: { values: [precKey] } } },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(leg, "chore: legacy-only policy");
+    const rl = run(["check", "--json"], leg);
+    assert.equal(rl.code, 0, `legacy-only tracked policy must authorize\n${rl.stderr}\n${rl.stdout}`);
+    const ldoc = parseJson(rl);
+    assert.equal(ldoc.verdict, "GO");
+    assert.ok(/policy: value/i.test((ldoc.checks.find((c) => c.label === "Secret scan").extra || []).join("\n")));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("policy safety: tracked-then-modified and staged-then-modified policy cannot authorize unstaged ignores", () => {
+  const base = freshBase();
+  try {
+    const fixtureKey = "sk_live_" + "t1r2a3c4k5e6d7m8o9d0i1f2y3";
+    const benignPolicy =
+      JSON.stringify({ version: 1, secrets: { ignore: { paths: ["docs/**"] } } }, null, 2) + "\n";
+    const hostilePolicy =
+      JSON.stringify({ version: 1, secrets: { ignore: { values: [fixtureKey] } } }, null, 2) + "\n";
+
+    // --- tracked + committed benign policy, then unstaged worktree value allowlist ---
+    const tracked = path.join(base, "tracked-then-modified");
+    initRepo(tracked);
+    write(tracked, "package.json", JSON.stringify({ name: "tracked-then-mod", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(tracked, "app.js", `export const KEY = "${fixtureKey}";\n`);
+    write(tracked, path.join(".getadvantage", "config.json"), benignPolicy);
+    commitAll(tracked, "chore: secret + benign tracked policy");
+    // Baseline: committed secret + path-only policy → NO-GO
+    const r0 = run(["check", "--json"], tracked);
+    assert.equal(r0.code, 1, "benign tracked policy must not allow the secret");
+    assert.equal(parseJson(r0).verdict, "NO-GO");
+
+    // Hostile: overwrite worktree only (no git add) with a value allowlist.
+    write(tracked, path.join(".getadvantage", "config.json"), hostilePolicy);
+    const r1 = run(["check", "--json"], tracked);
+    assert.equal(
+      r1.code,
+      1,
+      `tracked-then-modified unstaged value ignore must not GO\n${r1.stderr}\n${r1.stdout}`,
+    );
+    const d1 = parseJson(r1);
+    assert.equal(d1.verdict, "NO-GO");
+    const sec1 = d1.checks.find((c) => c.label === "Secret scan");
+    assert.equal(sec1.status, "fail", "unstaged worktree ignore must not authorize");
+    const extra1 = (sec1.extra || []).join("\n");
+    assert.ok(!/policy: value/i.test(extra1), "must not claim policy:value from unstaged edit");
+    assert.ok(
+      /working tree differs|git index/i.test(extra1) || sec1.status === "fail",
+      extra1,
+    );
+    const dirty1 = d1.checks.find((c) => c.label === "Dirty-tree guard");
+    assert.equal(
+      dirty1.status,
+      "fail",
+      "modified tracked config.json must be ship-risk, not regenerated marker churn",
+    );
+    assert.ok(
+      /config\.json/i.test((dirty1.detail || "") + "\n" + (dirty1.extra || []).join("\n")),
+      dirty1.detail,
+    );
+
+    // --- staged benign policy, then further unstaged hostile worktree edit ---
+    const staged = path.join(base, "staged-then-modified");
+    initRepo(staged);
+    write(staged, "package.json", JSON.stringify({ name: "staged-then-mod", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(staged, "app.js", `export const KEY = "${fixtureKey}";\n`);
+    commitAll(staged, "chore: committed secret only");
+    write(staged, path.join(".getadvantage", "config.json"), benignPolicy);
+    g(["add", path.join(".getadvantage", "config.json")], staged);
+    // Index has benign paths-only; overwrite worktree with value allowlist without re-staging.
+    write(staged, path.join(".getadvantage", "config.json"), hostilePolicy);
+    const r2 = run(["check", "--json"], staged);
+    assert.equal(
+      r2.code,
+      1,
+      `staged-then-modified unstaged value ignore must not GO\n${r2.stderr}\n${r2.stdout}`,
+    );
+    const d2 = parseJson(r2);
+    assert.equal(d2.verdict, "NO-GO");
+    const sec2 = d2.checks.find((c) => c.label === "Secret scan");
+    assert.equal(sec2.status, "fail", "index still paths-only; unstaged values must not authorize");
+    const extra2 = (sec2.extra || []).join("\n");
+    assert.ok(!/policy: value/i.test(extra2), "must not claim policy:value from unstaged edit");
+    assert.ok(/working tree differs|git index/i.test(extra2), extra2);
+    const dirty2 = d2.checks.find((c) => c.label === "Dirty-tree guard");
+    assert.equal(dirty2.status, "fail", "staged/modified config.json is ship-risk");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("policy safety: two distinct PEM private keys — hash of one must not authorize the other", () => {
+  const base = freshBase();
+  try {
+    // Distinct bodies under the same PEM header type. Header-only detectors
+    // would hash both to the same auth id and let a copied hash false-GO.
+    const pem1 =
+      "-----BEGIN RSA PRIVATE KEY-----\n" +
+      "MIIEowIBAAKCAQEA1111111111111111111111111111111111111111111111111\n" +
+      "AAAA1111KEYONE1111AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n" +
+      "-----END RSA PRIVATE KEY-----";
+    const pem2 =
+      "-----BEGIN RSA PRIVATE KEY-----\n" +
+      "MIIEowIBAAKCAQEA2222222222222222222222222222222222222222222222222\n" +
+      "BBBB2222KEYTWO2222BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n" +
+      "-----END RSA PRIVATE KEY-----";
+    assert.notEqual(hashOf(pem1), hashOf(pem2), "fixture PEMs must have distinct auth ids");
+    // Header alone (the pre-fix detector match) collides — prove the fixtures
+    // would have been unsafe under header-only hashing.
+    const headerOnly = "-----BEGIN RSA PRIVATE KEY-----";
+    assert.equal(hashOf(headerOnly), hashOf(headerOnly));
+
+    const repo = path.join(base, "pem-hash-isolation");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "pem-hash-isolation", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "keys/one.pem", pem1 + "\n");
+    write(repo, "keys/two.pem", pem2 + "\n");
+    write(
+      repo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { hashes: [hashOf(pem1)] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: two PEMs; allowlist hash of pem1 only");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `pem2 must still NO-GO when only pem1 hash is allowlisted\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(extra.includes("two.pem") || /Private key block/.test(extra), `pem2 must be a blocking hit\n${extra}`);
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "pem1 should be disclosed as allowlisted");
+    assert.ok(/policy: hash/i.test(extra), extra);
+    // Full PEM bodies must never appear in the report.
+    assert.ok(!JSON.stringify(doc).includes("KEYONE"), "pem1 body must not be echoed");
+    assert.ok(!JSON.stringify(doc).includes("KEYTWO"), "pem2 body must not be echoed");
+
+    // value allowlist of pem1 must not allow pem2 either
+    const valRepo = path.join(base, "pem-value-isolation");
+    initRepo(valRepo);
+    write(valRepo, "package.json", JSON.stringify({ name: "pem-value-isolation", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(valRepo, "keys/one.pem", pem1 + "\n");
+    write(valRepo, "keys/two.pem", pem2 + "\n");
+    write(
+      valRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { values: [pem1] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(valRepo, "chore: value-allowlist pem1 only");
+    const rv = run(["check", "--json"], valRepo);
+    assert.equal(rv.code, 1, "value allowlist of pem1 must not authorize pem2");
+    assert.equal(parseJson(rv).verdict, "NO-GO");
+
+    // patternId private-key is explicit and honest (blanket for that family)
+    const patRepo = path.join(base, "pem-patternid");
+    initRepo(patRepo);
+    write(patRepo, "package.json", JSON.stringify({ name: "pem-patternid", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(patRepo, "keys/one.pem", pem1 + "\n");
+    write(
+      patRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { patternIds: ["private-key"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(patRepo, "chore: patternId private-key allowlist");
+    const rp = run(["check", "--json"], patRepo);
+    assert.equal(rp.code, 0, `patternId private-key must GO when intentional\n${rp.stderr}\n${rp.stdout}`);
+    const pdoc = parseJson(rp);
+    assert.equal(pdoc.verdict, "GO");
+    assert.ok(/policy: patternId/i.test((pdoc.checks.find((c) => c.label === "Secret scan").extra || []).join("\n")));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("policy safety: incomplete/truncated PEM (no END) stays NO-GO; header hash never allowlists", () => {
+  const base = freshBase();
+  try {
+    // Truncated forms: BEGIN + body, footer removed. Full-block-only detectors
+    // would miss these and turn a removed footer into a false GO.
+    const truncated = {
+      rsa:
+        "-----BEGIN RSA PRIVATE KEY-----\n" +
+        "MIIEowIBAAKCAQEA1111TRUNCATEDRSA11111111111111111111111111111111\n" +
+        "AAAA1111TRUNC1AAAA\n",
+      ec:
+        "-----BEGIN EC PRIVATE KEY-----\n" +
+        "MHcCAQEEIIec1111TRUNCATEDEC11111111111111111111111111111111111\n",
+      openssh:
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n" +
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n" +
+        "QyNTUxOQAAACB1111TRUNCATEDOPENSSH1111111111111111111111111111\n",
+      generic:
+        "-----BEGIN PRIVATE KEY-----\n" +
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC1111TRUNCATED\n" +
+        "GENERIC11111111111111111111111111111111111111111111111111111111\n",
+    };
+
+    // --- each truncated form alone must NO-GO ---
+    for (const [name, body] of Object.entries(truncated)) {
+      const repo = path.join(base, `trunc-${name}`);
+      initRepo(repo);
+      write(repo, "package.json", JSON.stringify({ name: `trunc-${name}`, version: "1.0.0", private: true }, null, 2) + "\n");
+      write(repo, `keys/${name}.pem`, body);
+      commitAll(repo, `chore: truncated ${name} PEM without END`);
+      const r = run(["check", "--json"], repo);
+      assert.equal(r.code, 1, `truncated ${name} PEM must NO-GO\n${r.stderr}\n${r.stdout}`);
+      const doc = parseJson(r);
+      assert.equal(doc.verdict, "NO-GO", name);
+      const secret = doc.checks.find((c) => c.label === "Secret scan");
+      assert.equal(secret.status, "fail", name);
+      const extra = (secret.extra || []).join("\n");
+      assert.ok(
+        /Incomplete private key block|Private key block/i.test(extra),
+        `truncated ${name} must be labeled as incomplete/private-key hit\n${extra}`,
+      );
+      assert.ok(extra.includes(`${name}.pem`) || /private key/i.test(extra), extra);
+      // Full body material must never be echoed.
+      assert.ok(!JSON.stringify(doc).includes("TRUNCATED"), `body must not be echoed (${name})`);
+    }
+
+    // --- removed footer on a previously complete key must stay NO-GO ---
+    const stripRepo = path.join(base, "footer-stripped");
+    initRepo(stripRepo);
+    const complete =
+      "-----BEGIN RSA PRIVATE KEY-----\n" +
+      "MIIEowIBAAKCAQEA9999COMPLETE99999999999999999999999999999999999\n" +
+      "CCCC9999COMPLETE9999CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n" +
+      "-----END RSA PRIVATE KEY-----\n";
+    const stripped =
+      "-----BEGIN RSA PRIVATE KEY-----\n" +
+      "MIIEowIBAAKCAQEA9999COMPLETE99999999999999999999999999999999999\n" +
+      "CCCC9999COMPLETE9999CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";
+    write(stripRepo, "package.json", JSON.stringify({ name: "footer-stripped", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(stripRepo, "keys/live.pem", complete);
+    commitAll(stripRepo, "chore: complete PEM");
+    const rFull = run(["check", "--json"], stripRepo);
+    assert.equal(rFull.code, 1, "complete PEM must NO-GO");
+    // Strip footer in a new commit (simulates attacker deleting END to evade full-block regex).
+    write(stripRepo, "keys/live.pem", stripped);
+    commitAll(stripRepo, "chore: strip PEM footer");
+    const rStrip = run(["check", "--json"], stripRepo);
+    assert.equal(
+      rStrip.code,
+      1,
+      `removing PEM footer must not turn NO-GO into GO\n${rStrip.stderr}\n${rStrip.stdout}`,
+    );
+    assert.equal(parseJson(rStrip).verdict, "NO-GO");
+    const stripSec = parseJson(rStrip).checks.find((c) => c.label === "Secret scan");
+    assert.equal(stripSec.status, "fail");
+    assert.ok(
+      /Incomplete private key block/i.test((stripSec.extra || []).join("\n")),
+      (stripSec.extra || []).join("\n"),
+    );
+
+    // --- constant header hash/value must not authorize incomplete PEMs ---
+    const rsaHeader = "-----BEGIN RSA PRIVATE KEY-----";
+    const headerHash = hashOf(rsaHeader);
+    const hashRepo = path.join(base, "header-hash-no-auth");
+    initRepo(hashRepo);
+    write(hashRepo, "package.json", JSON.stringify({ name: "header-hash-no-auth", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(hashRepo, "keys/a.pem", truncated.rsa);
+    write(hashRepo, "keys/b.pem", truncated.rsa.replace(/TRUNC1/, "TRUNC2"));
+    write(
+      hashRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { hashes: [headerHash], values: [rsaHeader] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(hashRepo, "chore: try to allowlist PEM header via hash+value");
+    const rh = run(["check", "--json"], hashRepo);
+    assert.equal(
+      rh.code,
+      1,
+      `header hash/value must not authorize incomplete private keys\n${rh.stderr}\n${rh.stdout}`,
+    );
+    const hdoc = parseJson(rh);
+    assert.equal(hdoc.verdict, "NO-GO");
+    const hsec = hdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(hsec.status, "fail");
+    const hextra = (hsec.extra || []).join("\n");
+    assert.ok(!/policy: hash|policy: value/i.test(hextra), `must not disclose value/hash allow for incomplete:\n${hextra}`);
+    assert.ok(/Incomplete private key block/i.test(hextra), hextra);
+
+    // path allowlist remains honest for incomplete PEMs (explicit fixture path)
+    const pathRepo = path.join(base, "incomplete-path-ok");
+    initRepo(pathRepo);
+    write(pathRepo, "package.json", JSON.stringify({ name: "incomplete-path-ok", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(pathRepo, "fixtures/sample.pem", truncated.rsa);
+    write(
+      pathRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { paths: ["fixtures/**"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(pathRepo, "chore: path allowlist for truncated fixture");
+    const rpath = run(["check", "--json"], pathRepo);
+    assert.equal(rpath.code, 0, `path allowlist must still work for incomplete PEMs\n${rpath.stderr}\n${rpath.stdout}`);
+    assert.equal(parseJson(rpath).verdict, "GO");
+    assert.ok(
+      /policy: path/i.test(
+        (parseJson(rpath).checks.find((c) => c.label === "Secret scan").extra || []).join("\n"),
+      ),
+    );
+
+    // patternId private-key-incomplete is explicit; private-key alone must not blanket it
+    const onlyFull = path.join(base, "patternid-full-only");
+    initRepo(onlyFull);
+    write(onlyFull, "package.json", JSON.stringify({ name: "patternid-full-only", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(onlyFull, "keys/trunc.pem", truncated.rsa);
+    write(
+      onlyFull,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { patternIds: ["private-key"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(onlyFull, "chore: patternId private-key only");
+    const rOnly = run(["check", "--json"], onlyFull);
+    assert.equal(
+      rOnly.code,
+      1,
+      "patternId private-key must not blanket private-key-incomplete",
+    );
+    assert.equal(parseJson(rOnly).verdict, "NO-GO");
+
+    const expl = path.join(base, "patternid-incomplete");
+    initRepo(expl);
+    write(expl, "package.json", JSON.stringify({ name: "patternid-incomplete", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(expl, "keys/trunc.pem", truncated.rsa);
+    write(
+      expl,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { patternIds: ["private-key-incomplete"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(expl, "chore: explicit incomplete patternId");
+    const rExpl = run(["check", "--json"], expl);
+    assert.equal(rExpl.code, 0, `explicit private-key-incomplete patternId must GO\n${rExpl.stderr}\n${rExpl.stdout}`);
+    assert.equal(parseJson(rExpl).verdict, "GO");
   } finally {
     cleanup(base);
   }
