@@ -121,7 +121,7 @@ run getAdvantage.
 | Check | Verdict | Detail |
 |---|---|---|
 | Dirty-tree guard | **BLOCKS** | Tracked files modified/staged would ship with `vercel --prod`. Untracked-only files warn instead. |
-| Secret scan | **BLOCKS** | Leaked-secret patterns over every tracked + staged **text** file — including lockfiles and `.map` sourcemaps, where a copied key often hides: OpenAI, Anthropic, Stripe (live/restricted/webhook), AWS, GitHub (classic + fine-grained), Google OAuth, Slack, SendGrid, npm tokens, bare JWTs, database URLs with embedded passwords, Vercel tokens, KV/REST credentials, private-key blocks, Bearer literals, and getAdvantage's own platform keys (`adv_live_`). Hits are reported as **masked fingerprints with a per-file count**; the full value is never printed. Files over 2 MB are scanned partially (first + last 256 KB), disclosed and named — never silent. |
+| Secret scan | **BLOCKS** | Leaked-secret patterns over every tracked + staged **text** file — including lockfiles and `.map` sourcemaps, where a copied key often hides: OpenAI, Anthropic, Stripe (live/restricted/webhook), AWS, GitHub (classic + fine-grained), Google OAuth, Slack, SendGrid, npm tokens, bare JWTs, database URLs with embedded passwords, Vercel tokens, KV/REST credentials, private-key blocks, Bearer literals, and getAdvantage's own platform keys (`adv_live_`). Hits are reported as **masked fingerprints with a per-file count**; the full value is never printed. Files over 2 MB are scanned partially (first + last 256 KB), disclosed and named — never silent. **Allowlist (0.8.2):** built-in ignore for public AWS documentation keys (`AKIA…EXAMPLE`); repo policy in `.getadvantage/config.json` (`secrets.ignore`: `values`, `fingerprints`, `paths`, `patternIds`). Allowlisted hits are disclosed, never silent. |
 | Tracked .env file | **BLOCKS** | A committed `.env` is a leak by itself, whatever it contains, because git history keeps every value. Local `.env` files that are *not* gitignored warn instead. Gitignored `.env` files are never read. Templates (`.env.example` etc.) are fine. |
 | Typecheck | **BLOCKS** | `tsc --noEmit`, only when the project actually has a `tsconfig.json` plus a local TypeScript dependency (project-aware, via the same detection `fan-in`'s combined-tree gate uses). Plain-JS projects get an honest skip, not a fake failure. |
 | Build | **BLOCKS** | Runs the project's own `build` script, only with `--build` and only if one exists. |
@@ -139,6 +139,33 @@ run getAdvantage.
   hold source-pasted keys. Text is detected by content, so a file in an unusual
   encoding *without* a byte-order mark (e.g. UTF-16 with no BOM) may be treated as
   binary and skipped; UTF-8 and BOM-marked files are always scanned.
+
+### Secret allowlist (policy config)
+
+False-positive escape hatch for docs fixtures and baselined sample tokens —
+without silent GOs. Built-in: AWS public documentation access key IDs
+(`AKIAIOSFODNN7EXAMPLE` and any `AKIA…EXAMPLE`). For everything else, commit a
+repo policy:
+
+```json
+// .getadvantage/config.json
+{
+  "version": 1,
+  "secrets": {
+    "ignore": {
+      "values": ["sk_live_…exact fixture value…"],
+      "fingerprints": ["sk_live_…abcd (32 chars)"],
+      "paths": ["docs/**", "fixtures/*"],
+      "patternIds": ["jwt"]
+    }
+  }
+}
+```
+
+Copy a fingerprint from a prior `getadvantage check` report, or pin the exact
+fixture value / path. Every allowlisted hit is still **named in the Secret scan
+output** with a reason (`built-in:…` or `policy:…`). Real keys outside the
+allowlist still **NO-GO**.
 
 ## Use it as an MCP server (call the brain mid-session)
 

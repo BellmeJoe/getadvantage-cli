@@ -28,7 +28,8 @@ independently reproduced 1:1 against the live npm package.
 | 0.7.3 | Public-readiness: gate-value banner, honest secret-scan coverage (lockfiles + sourcemaps), outside-git next steps, de-jargoned client-app map | **Released** (npm, 2026-07-19) |
 | **0.8.0** | Launch polish: demo-ready output (real plurals, prefix-aware fingerprints), truthful `switch`/fan-in wording, per-command fan help, architecture signal band, owner ops + test+evidence-gated publish CI | **Released** (npm, 2026-07-19) |
 | **0.8.1** | MCP parity for the read-only lenses: `map` + `architecture` as MCP tools (one shared `renderMap` implementation, live-protocol test) | **Released** (npm, 2026-07-20) |
-| 0.8.x | Table stakes for CI adoption + the False-Positive escape hatch | Planned |
+| **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Shipped locally** (publish founder-gated) |
+| 0.8.x | Remaining table stakes: SARIF, GitHub Action product, client-bundle keys | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |
 
@@ -141,13 +142,13 @@ continue in 0.8.x patch/minor releases.)*
 What every serious gate tool has, and what makes the gate adoptable in an
 existing repo. Also closes the `gate-placeholder-false-positive` major.
 
-- [ ] **Policy config + baseline/fingerprint-ignore + severity thresholds**
-  (`.getadvantage` config) — add #6 (research). Fixes `gate-placeholder-false-positive`:
-  today `.env.example` placeholders and AWS' own `AKIA…EXAMPLE` doc key (elided
-  here so the gate's own scan doesn't NO-GO this file — itself proof of the bug)
-  hard-block with no allowlist. Precedent: gitleaks `.gitleaksignore` + baseline,
-  semgrep blocking/non-blocking. The config is also the "policy version" the
-  proof-records need. **M**
+- [x] **Policy config + baseline/fingerprint-ignore** (`.getadvantage/config.json`)
+  — fixes `gate-placeholder-false-positive`. Built-in: AWS public doc keys
+  (`AKIAIOSFODNN7EXAMPLE` and any `AKIA…EXAMPLE`). User rules: `secrets.ignore`
+  with `values`, `fingerprints`, `paths` (simple globs), `patternIds`. Every
+  allowlisted hit is **disclosed** on the Secret scan result (never silent GO).
+  Severity thresholds deferred. `policy.mjs` + `checkSecrets` filter; tests 9e.
+  **Done in 0.8.2.**
 - [ ] **SARIF 2.1.0 export (`--sarif`)** — add #5. GitHub Code Scanning ingests
   it natively; a checklist question for every enterprise evaluator. Pure
   serializer, dependency-free. **S**

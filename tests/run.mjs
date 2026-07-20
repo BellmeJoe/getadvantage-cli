@@ -26,6 +26,8 @@
 //  9c. clean repo / false positives — placeholder DB URL, CSS class, gitignored .env all pass;
 //                                     sk-ant- labeled "Anthropic secret key", not OpenAI
 //  9d. oversized file (>2MB)        — head+tail partial scan finds a trailing secret, discloses it
+//  9e. allowlist (0.8.2)            — AWS EXAMPLE built-in + .getadvantage/config.json
+//                                     (value/fingerprint/path); real keys still NO-GO; disclosed
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
@@ -706,6 +708,191 @@ scenario("oversized file (>2MB): secret at the tail is found via head+tail parti
       "the partial-scan note must disclose it scanned partially AND name the file",
     );
     assert.ok(!JSON.stringify(doc).includes(awsKey), "the full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9e. allowlist (0.8.2) — built-in AWS EXAMPLE + policy config escape hatch
+// ---------------------------------------------------------------------------
+scenario("allowlist: AWS EXAMPLE key is built-in allowlisted (GO, disclosed); real AKIA still NO-GO", () => {
+  const base = freshBase();
+  try {
+    // Built-in: AWS docs key ending in EXAMPLE must not hard-block.
+    const repo = path.join(base, "docs-example");
+    initRepo(repo);
+    // Assembled so the test source itself doesn't hard-code the full EXAMPLE
+    // string in a way that confuses human readers; the runtime value is the
+    // public AWS documentation sample.
+    const awsExample = "AKIA" + "IOSFODNN7" + "EXAMPLE";
+    write(repo, "package.json", JSON.stringify({ name: "docs-example", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "ROADMAP.md", `AWS docs sample access key id: ${awsExample}\n`);
+    commitAll(repo, "docs: AWS EXAMPLE key in markdown");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `EXAMPLE key must not NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "pass", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "must disclose the allowlisted hit");
+    assert.ok(extra.includes("ROADMAP.md"), "must name the file");
+    assert.ok(/built-in/i.test(extra), "reason must cite built-in");
+    assert.ok(!JSON.stringify(doc).includes(awsExample), "full value must never be echoed");
+
+    // Real-looking AKIA (not EXAMPLE) still blocks.
+    const bad = path.join(base, "real-akia");
+    initRepo(bad);
+    const realAkia = "AKIA" + "0".repeat(16);
+    write(bad, "package.json", JSON.stringify({ name: "real-akia", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(bad, "config.js", `export const KEY = "${realAkia}";\n`);
+    commitAll(bad, "chore: real-looking AKIA");
+    const rb = run(["check", "--json"], bad);
+    assert.equal(rb.code, 1, "non-EXAMPLE AKIA must NO-GO");
+    const bdoc = parseJson(rb);
+    assert.equal(bdoc.verdict, "NO-GO");
+    const bsec = bdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(bsec.status, "fail");
+    assert.ok(bsec.extra.join("\n").includes("AWS access key id"));
+    assert.ok(!JSON.stringify(bdoc).includes(realAkia), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("allowlist: .getadvantage/config.json value + path + fingerprint rules; real key not listed still fails", () => {
+  const base = freshBase();
+  try {
+    // --- value allowlist ---
+    const repo = path.join(base, "value-ignore");
+    initRepo(repo);
+    // Stripe-shaped fixture key the user has knowingly baselined.
+    const fixtureKey = "sk_live_" + "a1b2c3d4e5f6g7h8i9j0k1l2m3";
+    write(repo, "package.json", JSON.stringify({ name: "value-ignore", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "fixtures/sample.js", `export const KEY = "${fixtureKey}";\n`);
+    write(
+      repo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: {
+            ignore: {
+              values: [fixtureKey],
+            },
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: fixture key + value allowlist");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `value allowlist must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "pass", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra));
+    assert.ok(/policy: value/i.test(extra), extra);
+    assert.ok(!JSON.stringify(doc).includes(fixtureKey), "full value must never be echoed");
+
+    // --- path allowlist ---
+    const pathRepo = path.join(base, "path-ignore");
+    initRepo(pathRepo);
+    const pathKey = "sk_live_" + "z9y8x7w6v5u4t3s2r1q0p9o8n7";
+    write(pathRepo, "package.json", JSON.stringify({ name: "path-ignore", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(pathRepo, "docs/examples.md", `Example key: ${pathKey}\n`);
+    write(
+      pathRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { paths: ["docs/**"] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(pathRepo, "chore: docs path allowlist");
+    const rp = run(["check", "--json"], pathRepo);
+    assert.equal(rp.code, 0, `path allowlist must GO\n${rp.stderr}`);
+    const pdoc = parseJson(rp);
+    assert.equal(pdoc.verdict, "GO");
+    const psec = pdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(psec.status, "pass");
+    assert.ok(/policy: path/i.test((psec.extra || []).join("\n")));
+
+    // --- fingerprint allowlist (copy-paste from a prior gate report) ---
+    // Same algorithm as util.mjs fingerprint() — kept local so this file never
+    // imports production modules (scenarios only spawn the CLI).
+    function fp(match) {
+      let head = match.slice(0, 6);
+      if (match.length > 14) {
+        const pre = match.slice(0, 12).match(/^.+[_-]/);
+        if (pre && match.length - pre[0].length >= 8) head = pre[0];
+      }
+      const tail = match.length > 14 ? match.slice(-4) : "";
+      return `${head}…${tail} (${match.length} chars)`;
+    }
+    const fpRepo = path.join(base, "fp-ignore");
+    initRepo(fpRepo);
+    const fpKey = "sk_live_" + "f1f2f3f4f5f6f7f8f9f0a1b2c3";
+    const printedFp = fp(fpKey);
+    write(fpRepo, "package.json", JSON.stringify({ name: "fp-ignore", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(fpRepo, "lib/keys.js", `export const K = "${fpKey}";\n`);
+    write(
+      fpRepo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { fingerprints: [printedFp] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(fpRepo, "chore: fingerprint allowlist");
+    const rf = run(["check", "--json"], fpRepo);
+    assert.equal(rf.code, 0, `fingerprint allowlist must GO\n${rf.stderr}\n${rf.stdout}`);
+    const fdoc = parseJson(rf);
+    assert.equal(fdoc.verdict, "GO");
+    const fsec = fdoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(fsec.status, "pass");
+    assert.ok(/policy: fingerprint/i.test((fsec.extra || []).join("\n")));
+
+    // --- still-live key outside allowlist must fail ---
+    const live = path.join(base, "still-live");
+    initRepo(live);
+    const liveKey = "sk_live_" + "9".repeat(26);
+    write(live, "package.json", JSON.stringify({ name: "still-live", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(live, "src/app.js", `const k = "${liveKey}";\n`);
+    write(
+      live,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { paths: ["docs/**"], values: [fixtureKey] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(live, "chore: live key not allowlisted");
+    const rl = run(["check", "--json"], live);
+    assert.equal(rl.code, 1, "unallowlisted live key must NO-GO");
+    const ldoc = parseJson(rl);
+    assert.equal(ldoc.verdict, "NO-GO");
+    const lsec = ldoc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(lsec.status, "fail");
+    assert.ok(lsec.extra.join("\n").includes("src/app.js"));
   } finally {
     cleanup(base);
   }

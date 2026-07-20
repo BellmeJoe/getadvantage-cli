@@ -11,6 +11,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import path from "node:path";
 import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
+import { loadPolicy, secretAllowDecision } from "./policy.mjs";
 
 // ===========================================================================
 // a. DIRTY-TREE GUARD
@@ -343,9 +344,13 @@ export function checkSecrets(cwd) {
   const files = filesToScan(cwd);
   // (file,label) → { fp, count } so repeated hits are COUNTED, not dropped.
   const hits = new Map();
+  // Allowlisted hits (built-in EXAMPLE keys + `.getadvantage/config.json` rules).
+  // Always disclosed — never a silent false GO (finding: gate-placeholder-false-positive).
+  const allowed = new Map(); // (file,label,reason) → { fp, count, reason }
   let scanned = 0;
   let partial = 0; // oversized files scanned head+tail only
   const partialFiles = []; // relative paths of those files (named in the note)
+  const policy = loadPolicy(cwd);
 
   for (const rel of files) {
     const base = path.basename(rel);
@@ -398,10 +403,31 @@ export function checkSecrets(cwd) {
         // too, for validators that need more context (e.g. the DB-URL host).
         const token = m[1] ?? m[0];
         if (p.validate && !p.validate(token, m)) continue;
+        const raw = m[0];
+        const decision = secretAllowDecision(raw, {
+          file: rel,
+          patternId: p.id,
+          policy,
+        });
+        if (decision.allowed) {
+          const ak = `${rel}::${p.label}::${decision.reason}`;
+          const prevA = allowed.get(ak);
+          if (prevA) prevA.count++;
+          else {
+            allowed.set(ak, {
+              file: rel,
+              label: p.label,
+              fp: decision.fp,
+              count: 1,
+              reason: decision.reason,
+            });
+          }
+          continue;
+        }
         const k = `${rel}::${p.label}`;
         const prev = hits.get(k);
         if (prev) prev.count++;
-        else hits.set(k, { file: rel, label: p.label, fp: fingerprint(m[0]), count: 1 });
+        else hits.set(k, { file: rel, label: p.label, fp: decision.fp, count: 1 });
       }
     }
   }
@@ -413,12 +439,30 @@ export function checkSecrets(cwd) {
       ? [`${partial} oversized file${pl(partial)} >2 MB scanned partially (first + last 256 KB each; scanned partially: ${partialNames}) — move giant blobs out of git for a full scan.`]
       : [];
 
+  const allowedList = [...allowed.values()];
+  const allowedNote =
+    allowedList.length > 0
+      ? [
+          `${allowedList.length} allowlisted hit${pl(allowedList.length)} (disclosed, not blocking):`,
+          ...allowedList.slice(0, 20).map(
+            (h) =>
+              `  ${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more)` : ""} [${h.reason}]`,
+          ),
+          ...(allowedList.length > 20 ? [`  …and ${allowedList.length - 20} more allowlisted`] : []),
+        ]
+      : [];
+  const policyNote = (policy.warnings || []).map((w) => `policy: ${w}`);
+
   if (hits.size === 0) {
+    const allowSummary =
+      allowedList.length > 0
+        ? ` (${allowedList.length} allowlisted hit${pl(allowedList.length)} disclosed)`
+        : "";
     return result(
       "pass",
       "Secret scan",
-      `Scanned ${scanned} tracked/staged file${pl(scanned)} — no leaked-secret patterns matched.`,
-      partialNote,
+      `Scanned ${scanned} tracked/staged file${pl(scanned)} — no leaked-secret patterns matched.${allowSummary}`,
+      [...allowedNote, ...policyNote, ...partialNote],
     );
   }
 
@@ -429,7 +473,7 @@ export function checkSecrets(cwd) {
     "fail",
     "Secret scan",
     `${lines.length} possible secret${pl(lines.length)} in committed/staged files — remove + rotate before shipping.`,
-    [...lines.slice(0, 30), ...partialNote],
+    [...lines.slice(0, 30), ...allowedNote, ...policyNote, ...partialNote],
   );
 }
 

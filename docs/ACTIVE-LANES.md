@@ -5,7 +5,7 @@ Empty board = nobody claims exclusive work — first writer updates this.
 
 | Lane | Owner (tool/person) | Path / concern | Status | Updated |
 |------|---------------------|----------------|--------|---------|
-| — | — | — | idle | 2026-07-19 |
+| `0.8.2-policy-allowlist` | Grok Build | `policy.mjs`, `checks.mjs`, tests, README/ROADMAP, package version | shipping — tests+evidence GREEN; gate is arbiter for push/publish | 2026-07-20 |
 
 ### Rules
 1. Before starting: add a row.  
