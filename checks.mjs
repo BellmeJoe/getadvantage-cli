@@ -463,12 +463,29 @@ export function checkSecrets(cwd) {
         const prev = hits.get(k);
         if (prev) prev.count++;
         else {
+          // Region from match index when defensible (1-based line/column).
+          // Partial head+tail scans can mis-number middle lines — still emit
+          // file + fingerprint; only attach region for full-file scans.
+          let startLine;
+          let startColumn;
+          let endColumn;
+          if (!isPartial && typeof m.index === "number" && m.index >= 0) {
+            const rc = offsetToLineCol(text, m.index);
+            startLine = rc.line;
+            startColumn = rc.col;
+            const end = offsetToLineCol(text, m.index + raw.length);
+            if (end.line === rc.line) endColumn = end.col;
+          }
           hits.set(k, {
             file: rel,
             label: p.label,
+            patternId: p.id,
             fp: decision.fp,
             authId: decision.authId,
             count: 1,
+            startLine,
+            startColumn,
+            endColumn,
           });
         }
       }
@@ -514,16 +531,50 @@ export function checkSecrets(cwd) {
     );
   }
 
-  const lines = [...hits.values()].map(
+  const hitList = [...hits.values()];
+  const lines = hitList.map(
     (h) =>
       `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`,
   );
-  return result(
+  // Structured findings for SARIF (and optional --json consumers). Never carry
+  // the raw match — only fingerprint, auth id, path, patternId, region.
+  const findings = hitList.map((h) => ({
+    ruleId: `secret/${h.patternId || "unknown"}`,
+    patternId: h.patternId,
+    label: h.label,
+    file: h.file,
+    fp: h.fp,
+    authId: h.authId,
+    count: h.count,
+    ...(typeof h.startLine === "number" ? { startLine: h.startLine } : {}),
+    ...(typeof h.startColumn === "number" ? { startColumn: h.startColumn } : {}),
+    ...(typeof h.endColumn === "number" ? { endColumn: h.endColumn } : {}),
+    message: `${h.label}: ${h.fp}${h.authId ? ` · auth ${h.authId}` : ""}`,
+  }));
+  const r = result(
     "fail",
     "Secret scan",
     `${lines.length} possible secret${pl(lines.length)} in committed/staged files — remove + rotate before shipping.`,
     [...lines.slice(0, 30), ...allowedNote, ...policyNote, ...partialNote],
   );
+  r.findings = findings;
+  return r;
+}
+
+/** 1-based line + column for a byte/char offset into a decoded UTF-16-or-UTF-8 string. */
+function offsetToLineCol(text, offset) {
+  let line = 1;
+  let col = 1;
+  const n = Math.min(offset, text.length);
+  for (let i = 0; i < n; i++) {
+    if (text[i] === "\n") {
+      line++;
+      col = 1;
+    } else {
+      col++;
+    }
+  }
+  return { line, col };
 }
 
 // ===========================================================================
@@ -549,7 +600,7 @@ export function checkTrackedEnv(cwd) {
     .filter((f) => isRealEnvFile(path.basename(f)));
 
   if (tracked.length > 0) {
-    return result(
+    const r = result(
       "fail",
       "Tracked .env file",
       `${tracked.length} .env file${pl(tracked.length)} tracked by git — a committed .env is a leak by itself, whatever it contains.`,
@@ -558,18 +609,32 @@ export function checkTrackedEnv(cwd) {
         "Remove it from git (git rm --cached <file>), add it to .gitignore, and ROTATE every key that file ever held — git history keeps old values.",
       ],
     );
+    r.findings = tracked.map((file) => ({
+      ruleId: "check/tracked-env-file",
+      label: "Tracked .env file",
+      file,
+      message: "Committed .env is a leak by itself — remove from git, gitignore, rotate keys.",
+    }));
+    return r;
   }
 
   const untrackedEnv = gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })
     .filter((f) => isRealEnvFile(path.basename(f)));
 
   if (untrackedEnv.length > 0) {
-    return result(
+    const r = result(
       "warn",
       "Tracked .env file",
       `${untrackedEnv.length} local .env file${pl(untrackedEnv.length)} are NOT gitignored — one 'git add .' away from committing your keys.`,
       [...untrackedEnv.slice(0, 10), "Add them to .gitignore so they can never be committed."],
     );
+    r.findings = untrackedEnv.map((file) => ({
+      ruleId: "check/tracked-env-file",
+      label: "Unignored .env file",
+      file,
+      message: "Local .env is not gitignored — one git add away from committing keys.",
+    }));
+    return r;
   }
 
   return result(

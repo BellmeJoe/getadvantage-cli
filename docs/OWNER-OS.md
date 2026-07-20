@@ -11,12 +11,17 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
 | Was ist **live auf npm**? | **0.8.3** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | Dieselbe Version im Repo (**0.8.3**) | `node index.mjs --version` |
+| Was kann ich lokal laufen lassen? | Kandidat **0.8.4** im Repo (noch nicht published) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | **48/48** erwartet | `npm test` |
+| Tests grün? | **57/57** erwartet (inkl. SARIF path-credential fix) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **0.8.3 ist LIVE** (2026-07-20): policy-safety — index-blob-only authorization, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, tracked config ship-risk. Independent **REVIEW_GO**; gated Actions publish; cold `npx getadvantage@0.8.3` verified. Tag `v0.8.3`.
+> **0.8.3 ist LIVE** (2026-07-20). **0.8.4 Kandidat** (lokal): SARIF 2.1 export
+> (`check --sarif <path>`) + generated GitHub workflow upload path
+> (`github-action` → `upload-sarif@v4` mit `always()`, `checkout@v6` /
+> `setup-node@v6`, `actions: read` + Code Security note for private repos).
+> Status: `RELEASE_READY_PENDING_INDEPENDENT_REVIEW` nach integration + path-
+> credential P1 micro-repair. Nicht publishen bis Independent Review sauber ist.
 
 ---
 
@@ -99,11 +104,12 @@ Features ohne grünes Evidence = Lärm.
 3. **Kein paralleles „gleiche Aufgabe, zwei Suiten“**  
    Zweiter Agent muss die Session-Logs und ACTIVE-LANES lesen.
 
-4. **Publish nur du**  
-   Agenten bauen und testen; du sagst „yes“ zu npm. **Achtung:** CI publisht
-   automatisch, sobald ein Versions-Bump auf `main` gepusht wird
-   (`.github/workflows/publish.yml`) — seit 2026-07-19 laufen davor `npm test`
-   und `npm run evidence` als Gate. Version-Bump pushen = Release freigeben.
+4. **Publish nach objektivem Gate, nicht nach Owner-Klick**
+   Ein Release braucht: genau eine beabsichtigte Lane, aktuelle Tests,
+   `npm run evidence` 8/8, Pack- und Cold-Path-Prüfung, unabhängiges
+   `REVIEW_GO`, keine offene P1/P2, sauberen beabsichtigten Repo-Stand und
+   Rollback. Ein späterer Grok-Zyklus darf danach den Versions-Bump pushen; CI
+   publisht automatisch. Benjamin ist Empfänger des Berichts, kein Routine-Gate.
 
 5. **Nach Session: Session-Log**  
    `docs/sessions/YYYY-MM-DD-…-SESSION.md` mit: Live-Version, Evidence-Stand, was noch nicht committed ist, nächster Schritt.  

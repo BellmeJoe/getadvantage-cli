@@ -69,10 +69,17 @@
 //  27. map --json (0.7.2)           — emits a JSON document (no longer ignored)
 //  28. typo did-you-mean (0.7.2)    — unknown cmd suggests, does not dump full help
 //  29. own-artifacts dirty (0.7.2)  — PROJECT-BRIEF.md alone is not "scratch" risk
+//  37. SARIF export (0.8.4)         — clean GO + secret NO-GO + redaction + paths +
+//                                     unicode/special filenames + multi-finding + stable
+//                                     rule ids + security-vs-quality metadata + no
+//                                     credential-shaped filename URI leak + github-action
+//                                     workflow majors/permissions + idempotence/refusal
+//  38. packed-package SARIF cold path — tarball includes sarif.mjs; cold npx writes
+//                                     and parses SARIF outside the source tree
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2609,6 +2616,511 @@ scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X
     cleanup(base);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 37. SARIF 2.1 export (0.8.4) — hostile paths
+// ---------------------------------------------------------------------------
+scenario("sarif: clean GO writes valid SARIF 2.1 with tool name/version; exit 0", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const out = path.join(repo, "out", "clean.sarif");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 0, `clean must GO:\n${r.stderr}\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.verdict, "GO");
+    assert.ok(existsSync(out), "SARIF file must exist");
+    const sarif = JSON.parse(readFileSync(out, "utf8"));
+    assert.equal(sarif.version, "2.1.0");
+    assert.ok(Array.isArray(sarif.runs) && sarif.runs.length === 1);
+    const run0 = sarif.runs[0];
+    assert.equal(run0.tool.driver.name, "getAdvantage");
+    assert.equal(run0.tool.driver.version, JSON.parse(readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).version);
+    assert.ok(Array.isArray(run0.results));
+    // Clean GO: no fail/warn findings required (empty results is valid).
+    assert.equal(run0.invocations[0].exitCode, 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: committed secret → NO-GO, SARIF has error + stable rule id; fixture secret absent", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Distinct fixture — must never appear in SARIF serialization.
+    const secret = "sk_live_" + "SARIFHOSTILEKEY9x8y7z6w5v4u";
+    write(repo, "src/leak.js", `// bad\nexport const k = "${secret}";\n`);
+    commitAll(repo, "chore: commit hostile secret");
+    const out = path.join(repo, "hostile.sarif");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 1, `must NO-GO:\n${r.stderr}\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.verdict, "NO-GO");
+    // Human + json still work
+    const sec = doc.checks.find((cc) => /Secret scan/i.test(cc.label));
+    assert.equal(sec.status, "fail");
+    assert.ok(!JSON.stringify(doc).includes(secret), "full secret must not appear in --json");
+
+    const raw = readFileSync(out, "utf8");
+    assert.ok(!raw.includes(secret), "full secret must not appear anywhere in SARIF file");
+    const sarif = JSON.parse(raw);
+    assert.equal(sarif.version, "2.1.0");
+    const results = sarif.runs[0].results;
+    assert.ok(results.length >= 1, "must emit at least one SARIF result");
+    const secretResults = results.filter((x) => String(x.ruleId).startsWith("secret/"));
+    assert.ok(secretResults.length >= 1, `expected secret/* rule: ${JSON.stringify(results)}`);
+    assert.ok(
+      secretResults.some((x) => x.ruleId === "secret/stripe-live"),
+      `stable rule id secret/stripe-live expected: ${secretResults.map((x) => x.ruleId).join(",")}`,
+    );
+    assert.ok(secretResults.every((x) => x.level === "error"));
+    const rules = sarif.runs[0].tool.driver.rules || [];
+    const stripeRule = rules.find((rr) => rr.id === "secret/stripe-live");
+    assert.ok(stripeRule, "driver.rules must list stable id");
+    // Hostile: secret findings MUST carry security-severity + security tag
+    assert.ok(
+      stripeRule.properties && stripeRule.properties["security-severity"],
+      "secret rule must have security-severity",
+    );
+    assert.ok(
+      Array.isArray(stripeRule.properties.tags) && stripeRule.properties.tags.includes("security"),
+      `secret rule must include security tag: ${JSON.stringify(stripeRule.properties?.tags)}`,
+    );
+    // Location + region when defensible
+    const withLoc = secretResults.find((x) => x.locations?.[0]?.physicalLocation?.artifactLocation?.uri);
+    assert.ok(withLoc, "artifact location required");
+    assert.ok(/leak\.js/.test(withLoc.locations[0].physicalLocation.artifactLocation.uri));
+    const region = withLoc.locations[0].physicalLocation.region;
+    if (region) {
+      assert.ok(region.startLine >= 1, "startLine 1-based when present");
+    }
+    // Message redacted (fingerprint form, not full secret)
+    const msg = JSON.stringify(secretResults);
+    assert.ok(!msg.includes(secret));
+    assert.ok(/…|\.\.\.|redact|chars|auth/i.test(msg), `expected fingerprint/auth style message: ${msg}`);
+    assert.equal(sarif.runs[0].invocations[0].exitCode, 1, "invocation exit stays NO-GO");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: non-security failure has no security-severity/security tag; secret still has both", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Dirty tracked file → non-security ship-gate finding (quality/reliability).
+    write(repo, "app.js", "console.log('dirty');\n");
+    // Do NOT commit — leave working tree dirty so dirty-tree fails.
+    const secret = "sk_live_" + "SECQUALITYSPLIT0000000001";
+    write(repo, "src/also-secret.js", `export const k = "${secret}";\n`);
+    commitAll(repo, "chore: commit secret for dual classification");
+    // Make a dirty modification after commit so dirty-tree also fires.
+    write(repo, "app.js", "console.log('still dirty after commit');\n");
+
+    const out = path.join(repo, "classify.sarif");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 1, `must NO-GO:\n${r.stderr}\n${r.stdout}`);
+    const raw = readFileSync(out, "utf8");
+    assert.ok(!raw.includes(secret), "fixture secret absent from entire SARIF");
+    const sarif = JSON.parse(raw);
+    const rules = sarif.runs[0].tool.driver.rules || [];
+    assert.ok(rules.length >= 1, "expected rules");
+
+    const secretRules = rules.filter((rr) => String(rr.id).startsWith("secret/"));
+    assert.ok(secretRules.length >= 1, `expected secret/* rules: ${rules.map((x) => x.id)}`);
+    for (const rr of secretRules) {
+      assert.ok(
+        rr.properties?.["security-severity"],
+        `secret ${rr.id} must have security-severity`,
+      );
+      assert.ok(
+        rr.properties?.tags?.includes("security"),
+        `secret ${rr.id} must tag security`,
+      );
+      assert.equal(
+        rr.properties?.["problem.severity"],
+        undefined,
+        `secret ${rr.id} should not use problem.severity`,
+      );
+    }
+
+    // Non-security rules: dirty-tree, typecheck-style, etc. — anything not secret/tracked-env
+    const nonSec = rules.filter(
+      (rr) =>
+        !String(rr.id).startsWith("secret/") &&
+        rr.id !== "check/tracked-env-file" &&
+        !String(rr.id).startsWith("check/tracked-env"),
+    );
+    // Dirty tree should produce at least one non-security rule when dirty.
+    assert.ok(
+      nonSec.length >= 1,
+      `expected ≥1 non-security rule from dirty tree; rules=${rules.map((x) => x.id).join(",")}`,
+    );
+    for (const rr of nonSec) {
+      assert.equal(
+        rr.properties?.["security-severity"],
+        undefined,
+        `non-security ${rr.id} must NOT have security-severity (would create fake security alerts)`,
+      );
+      assert.ok(
+        !rr.properties?.tags?.includes("security"),
+        `non-security ${rr.id} must NOT have security tag: ${JSON.stringify(rr.properties?.tags)}`,
+      );
+      assert.ok(
+        rr.properties?.["problem.severity"],
+        `non-security ${rr.id} must use problem.severity`,
+      );
+      assert.ok(
+        rr.properties?.tags?.some((t) => t === "quality" || t === "reliability"),
+        `non-security ${rr.id} should tag quality/reliability: ${JSON.stringify(rr.properties?.tags)}`,
+      );
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: malformed/empty path fails honestly; does not flip prior NO-GO to success", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Empty path (flag present, no value)
+    const r0 = run(["check", "--no-brief-check", "--no-overview", "--sarif"], repo);
+    assert.equal(r0.code, 1, `empty --sarif must fail:\n${r0.stderr}\n${r0.stdout}`);
+    assert.ok(/SARIF|path|file/i.test(r0.stderr + r0.stdout), `must explain path:\n${r0.stderr}\n${r0.stdout}`);
+
+    // Path is an existing directory → write fails
+    const dir = path.join(repo, "sarif-dir");
+    mkdirSync(dir, { recursive: true });
+    const r1 = run(["check", "--no-brief-check", "--no-overview", "--sarif", dir], repo);
+    assert.equal(r1.code, 1, `directory path must fail:\n${r1.stderr}`);
+    assert.ok(/SARIF|write|path|directory|EISDIR|not a file/i.test(r1.stderr + r1.stdout), r1.stderr);
+
+    // Clean GO + bad SARIF path + --json: process exit 1 AND JSON must not claim GO/0
+    const rGoBad = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", dir], repo);
+    assert.equal(rGoBad.code, 1, `clean GO + bad SARIF path must exit 1:\n${rGoBad.stderr}`);
+    const docGoBad = JSON.parse(rGoBad.stdout);
+    assert.equal(docGoBad.exitCode, 1, "JSON exitCode must match final CLI exit (not frozen gate GO)");
+    assert.equal(docGoBad.verdict, "NO-GO", "JSON verdict must match final CLI outcome");
+
+    // Secret NO-GO + bad path: still exit 1 (never success)
+    const secret = "sk_live_" + "PATHFAILSECRET00000000001";
+    write(repo, "bad.js", `const x="${secret}";\n`);
+    commitAll(repo, "chore: secret + bad sarif path");
+    const r2 = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", dir], repo);
+    assert.equal(r2.code, 1, "NO-GO + SARIF write fail must stay non-zero");
+    const doc = JSON.parse(r2.stdout);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.exitCode, 1);
+    assert.ok(!JSON.stringify(doc).includes(secret));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: unicode + special filename URIs are percent-encoded; multi secrets; stable rule ids", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const s1 = "sk_live_" + "MULTISECRETAAAA1111111111";
+    const s2 = "ghp_" + "A".repeat(36);
+    const s3 = "sk_live_" + "SPECIALPCTAMP00000000001";
+    write(repo, "geheime Datei über prod.txt", `key=${s1}\n`);
+    write(repo, "other/token#frag.js", `export const t = "${s2}";\n`);
+    // Legitimate special chars: space, #, %, &, =, Unicode — must round-trip via percent-encoding.
+    write(repo, "cfg/a%b&c=d.js", `export const k = "${s3}";\n`);
+    commitAll(repo, "chore: unicode + multi secrets");
+    const out = path.join(repo, "multi.sarif");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 1);
+    const raw = readFileSync(out, "utf8");
+    assert.ok(!raw.includes(s1) && !raw.includes(s2) && !raw.includes(s3), "fixture secrets absent from SARIF");
+    const sarif = JSON.parse(raw);
+    const results = sarif.runs[0].results.filter((x) => String(x.ruleId).startsWith("secret/"));
+    assert.ok(results.length >= 3, `expected ≥3 secret results, got ${results.length}: ${JSON.stringify(results)}`);
+    const ids = new Set(results.map((x) => x.ruleId));
+    assert.ok(ids.has("secret/stripe-live"), `missing stripe-live: ${[...ids]}`);
+    assert.ok(ids.has("secret/github-pat"), `missing github-pat: ${[...ids]}`);
+    // Artifact URIs must be valid references: no raw spaces; unicode/special percent-encoded.
+    const uris = results
+      .map((x) => x.locations?.[0]?.physicalLocation?.artifactLocation?.uri || "")
+      .filter(Boolean);
+    assert.ok(uris.length >= 1, "expected artifact locations");
+    for (const u of uris) {
+      assert.ok(!/\s/.test(u), `URI must not contain raw whitespace: ${u}`);
+      assert.ok(!u.includes("#"), `URI must encode #: ${u}`);
+      // Raw unencoded specials in a path segment would be ambiguous URI refs.
+      assert.ok(!u.split("/").some((seg) => /[%&=]/.test(seg) && !/%[0-9A-Fa-f]{2}/.test(seg)),
+        `URI segments with %, &, = must be percent-encoded: ${u}`);
+    }
+    const decoded = uris
+      .map((u) => {
+        try {
+          return decodeURIComponent(u);
+        } catch {
+          return u;
+        }
+      })
+      .join("\n");
+    assert.ok(/über|geheime/i.test(decoded), `unicode path expected after decode:\n${uris.join("\n")}`);
+    assert.ok(
+      uris.some((u) => /%20|%C3%BC|geheime/i.test(u)),
+      `expected percent-encoding for space/unicode: ${uris.join(" | ")}`,
+    );
+    // Round-trip: % & = in legitimate filenames survive encode → decode.
+    assert.ok(
+      uris.some((u) => {
+        try {
+          const d = decodeURIComponent(u);
+          return d.includes("a%b&c=d.js") || /a%b&c=d/.test(d);
+        } catch {
+          return false;
+        }
+      }) || decoded.includes("a%b&c=d"),
+      `expected percent-encoded special filename a%b&c=d.js in URIs:\n${uris.join("\n")}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: credential-shaped filename must not appear in artifactLocation.uri or full SARIF", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Filename IS the credential (P1: naive URI encode would upload the full token).
+    const pathCred = "sk_live_" + "PATHLEAKFILENAME00000001";
+    const contentCred = "sk_live_" + "CONTENTONLYSECRET0000001";
+    const leakName = pathCred + ".js";
+    write(repo, path.join("src", leakName), `export const k = "${contentCred}";\n`);
+    commitAll(repo, "chore: secret-shaped filename");
+    const out = path.join(repo, "path-leak.sarif");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 1, `must NO-GO on content secret:\n${r.stderr}\n${r.stdout}`);
+    assert.ok(existsSync(out), "SARIF must be written");
+    const raw = readFileSync(out, "utf8");
+    // Exact path credential must be absent from the entire serialization (not just messages).
+    assert.ok(!raw.includes(pathCred), `path credential must not appear anywhere in SARIF:\n${raw.slice(0, 400)}`);
+    assert.ok(!raw.includes(contentCred), "content credential must not appear in SARIF");
+    assert.ok(!raw.includes(leakName), "credential-shaped filename must not appear in SARIF");
+    const sarif = JSON.parse(raw);
+    const secretResults = (sarif.runs[0].results || []).filter((x) => String(x.ruleId).startsWith("secret/"));
+    assert.ok(secretResults.length >= 1, "must still emit secret finding (content)");
+    // Location omitted when path is credential-shaped — no fake redacted path.
+    for (const res of secretResults) {
+      const uri = res.locations?.[0]?.physicalLocation?.artifactLocation?.uri;
+      if (uri) {
+        assert.ok(!uri.includes(pathCred), `uri must not contain path credential: ${uri}`);
+        assert.ok(!decodeURIComponent(uri).includes(pathCred), `decoded uri must not contain path credential: ${uri}`);
+      }
+    }
+    // Prefer omit: if every secret result lacks a location pointing at the leaky name, that is correct.
+    const anyLeakyUri = secretResults.some((res) => {
+      const uri = res.locations?.[0]?.physicalLocation?.artifactLocation?.uri || "";
+      return uri.includes("PATHLEAK") || uri.includes(pathCred) || /sk_live_/.test(uri);
+    });
+    assert.ok(!anyLeakyUri, "no secret result may expose sk_live_ material in artifact URI");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("sarif: build stdout with credentials never reaches SARIF (no generic extra dump)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Hostile fixture values that must never appear in the full SARIF serialization.
+    const sk = "sk_live_" + "BUILDSTDOUTLEAK000000001";
+    const bearer = "Bearer " + "b".repeat(40);
+    const dbUrl = "postgres://user:SuperSecretPass99@db.example.com:5432/app";
+    const tokenUrl = "https://api.example.com/v1?token=" + sk;
+    // Failing build that prints credential-shaped stdout (classic false path into SARIF).
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "build-leak",
+          version: "1.0.0",
+          scripts: {
+            build:
+              `node -e "console.log(${JSON.stringify(tokenUrl)}); console.log(${JSON.stringify(bearer)}); console.log(${JSON.stringify(dbUrl)}); process.exit(1)"`,
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: failing build with secret-shaped stdout");
+    const out = path.join(repo, "build-leak.sarif");
+    const r = run(["check", "--build", "--json", "--no-brief-check", "--no-overview", "--sarif", out], repo);
+    assert.equal(r.code, 1, `build fail must NO-GO:\n${r.stderr}\n${r.stdout}`);
+    assert.ok(existsSync(out), "SARIF must still be written on NO-GO");
+    const raw = readFileSync(out, "utf8");
+    for (const leak of [sk, bearer, "SuperSecretPass99", tokenUrl, dbUrl]) {
+      assert.ok(!raw.includes(leak), `SARIF must not contain build stdout credential: ${leak.slice(0, 24)}…`);
+    }
+    const sarif = JSON.parse(raw);
+    const rules = sarif.runs[0].tool.driver.rules || [];
+    const buildRules = rules.filter((rr) => /build/i.test(rr.id) || /build/i.test(rr.name || ""));
+    // Build failures are quality, not security alerts
+    for (const rr of buildRules) {
+      assert.equal(rr.properties?.["security-severity"], undefined, `build rule ${rr.id} must not be security`);
+      assert.ok(!rr.properties?.tags?.includes("security"), `build rule ${rr.id} must not tag security`);
+    }
+    // Messages should be summaries only — not multi-line compiler dumps with fixtures
+    const msgs = (sarif.runs[0].results || []).map((x) => x.message?.text || "").join("\n");
+    assert.ok(!msgs.includes(sk) && !msgs.includes("SuperSecretPass99"));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("github-action: generates workflow with SARIF upload; idempotent; refuses differing without --force", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const wf = path.join(repo, ".github", "workflows", "getadvantage.yml");
+    const r1 = run(["github-action"], repo);
+    assert.equal(r1.code, 0, r1.stderr + r1.stdout);
+    assert.ok(existsSync(wf), "workflow must be written");
+    const body1 = readFileSync(wf, "utf8");
+    // Hostile: current supported majors (would fail on old @v3/@v4 checkout candidate)
+    assert.ok(/upload-sarif@v4/.test(body1), "must pin github/codeql-action/upload-sarif@v4");
+    assert.ok(!/upload-sarif@v3/.test(body1), "must not pin stale upload-sarif@v3");
+    assert.ok(/actions\/checkout@v6/.test(body1), "must pin actions/checkout@v6");
+    assert.ok(/actions\/setup-node@v6/.test(body1), "must pin actions/setup-node@v6");
+    assert.ok(/node-version:\s*['"]?20['"]?/.test(body1), "Node runtime must be explicit");
+    assert.ok(
+      !/cache:\s*['"]?npm['"]?/.test(body1),
+      "must not enable unnecessary package-manager caching on this security-sensitive gate",
+    );
+    assert.ok(/security-events:\s*write/.test(body1), "needs security-events: write");
+    assert.ok(/contents:\s*read/.test(body1), "needs contents: read");
+    assert.ok(
+      /actions:\s*read/.test(body1),
+      "needs actions: read (required for private-repository workflows per GitHub docs)",
+    );
+    assert.ok(/if:\s*always\(\)/.test(body1), "upload must use always()");
+    assert.ok(/continue-on-error:\s*true/.test(body1), "gate step continue-on-error for NO-GO upload");
+    assert.ok(/--sarif\s+getadvantage\.sarif/.test(body1), "gate must write getadvantage.sarif");
+    assert.ok(/Fail job on NO-GO/.test(body1), "final step retains verdict");
+    assert.ok(/codeql-action\/upload-sarif/.test(body1));
+    assert.ok(
+      /Code Security/i.test(body1),
+      "workflow comments must state private repos need Code Security",
+    );
+
+    // Idempotent re-run
+    const r2 = run(["github-action"], repo);
+    assert.equal(r2.code, 0, r2.stderr);
+    assert.ok(/already in place|up to date|nothing changed/i.test(r2.stdout + r2.stderr));
+    assert.equal(readFileSync(wf, "utf8"), body1, "idempotent: content unchanged");
+
+    // Differing file without --force refuses
+    writeFileSync(wf, body1 + "\n# hand edit\n", "utf8");
+    const r3 = run(["github-action"], repo);
+    assert.equal(r3.code, 1, "must refuse overwrite without --force");
+    assert.ok(/differs|not overwriting|--force/i.test(r3.stderr + r3.stdout));
+    assert.ok(readFileSync(wf, "utf8").includes("# hand edit"), "user file preserved");
+
+    // --force replaces
+    const r4 = run(["github-action", "--force"], repo);
+    assert.equal(r4.code, 0, r4.stderr);
+    assert.equal(readFileSync(wf, "utf8"), body1);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 38. packed-package cold path for SARIF (0.8.4)
+// ---------------------------------------------------------------------------
+scenario("packed package: tarball includes sarif.mjs; cold install writes parseable SARIF", () => {
+  const base = freshBase();
+  try {
+    const pkgRoot = path.join(__dirname, "..");
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    // npm pack into packDir
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgz = path.join(packDir, readdirPack(packDir));
+    assert.ok(tgz && existsSync(tgz), `expected a tarball in ${packDir}`);
+
+    // Inspect tarball listing for serializer + runtime files
+    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    const must = [
+      "package/sarif.mjs",
+      "package/action.mjs",
+      "package/checks.mjs",
+      "package/index.mjs",
+      "package/package.json",
+    ];
+    for (const m of must) {
+      assert.ok(listing.includes(m) || listing.replace(/\\/g, "/").includes(m), `tarball missing ${m}:\n${listing.slice(0, 500)}`);
+    }
+
+    // Cold install + run outside source tree
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--ignore-scripts", tgz], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const bin = path.join(cold, "node_modules", "getadvantage", "index.mjs");
+    assert.ok(existsSync(bin), "packed index.mjs must install");
+    assert.ok(existsSync(path.join(cold, "node_modules", "getadvantage", "sarif.mjs")), "sarif.mjs must install");
+
+    const sample = path.join(base, "sample-repo");
+    initRepo(sample);
+    write(sample, "package.json", '{"name":"cold-sarif","version":"1.0.0"}\n');
+    write(sample, "app.js", "console.log('ok');\n");
+    commitAll(sample, "chore: cold clean");
+    const out = path.join(sample, "cold.sarif");
+    const r = spawnSync(process.execPath, [bin, "check", "--no-brief-check", "--no-overview", "--sarif", out], {
+      cwd: sample,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(r.status, 0, `cold clean GO:\n${r.stderr}\n${r.stdout}`);
+    const sarif = JSON.parse(readFileSync(out, "utf8"));
+    assert.equal(sarif.version, "2.1.0");
+    assert.equal(sarif.runs[0].tool.driver.name, "getAdvantage");
+
+    // Hostile secret on cold path
+    const secret = "sk_live_" + "COLDPACKSECRET00000000001";
+    write(sample, "leak.js", `export const k="${secret}";\n`);
+    commitAll(sample, "chore: cold secret");
+    const out2 = path.join(sample, "cold-nogo.sarif");
+    const r2 = spawnSync(
+      process.execPath,
+      [bin, "check", "--json", "--no-brief-check", "--no-overview", "--sarif", out2],
+      { cwd: sample, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(r2.status, 1, `cold secret NO-GO:\n${r2.stderr}\n${r2.stdout}`);
+    const raw2 = readFileSync(out2, "utf8");
+    assert.ok(!raw2.includes(secret), "cold SARIF must not contain fixture secret");
+    const s2 = JSON.parse(raw2);
+    assert.ok(s2.runs[0].results.some((x) => x.ruleId === "secret/stripe-live"));
+  } finally {
+    cleanup(base);
+  }
+});
+
+function readdirPack(dir) {
+  const names = readdirSync(dir).filter((n) => n.endsWith(".tgz"));
+  assert.ok(names.length >= 1, `no .tgz in ${dir}`);
+  return names[0];
+}
 
 // ---------------------------------------------------------------------------
 // runner

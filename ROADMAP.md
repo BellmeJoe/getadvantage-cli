@@ -10,8 +10,12 @@ evidence trail is never lost. Fix repros for each blocker/major were
 independently reproduced 1:1 against the live npm package.
 
 **Ground rules**
-- Nothing publishes/pushes/deploys without the founder. Releases are cut by the
-  founder.
+- `docs/NORTHSTAR.md` is the portfolio priority and anti-idle contract. This file
+  remains the technical evidence trail and backlog.
+- Founder approval is not a routine release gate. A version ships only after the
+  objective release contract passes: one intentional lane, current full tests,
+  8/8 evidence, packed-package and cold-path verification, independent
+  `REVIEW_GO`, no open P1/P2, clean intentional repository state, and rollback.
 - The honesty principle stays: the gate reads and reports, it never calls an app
   secure; skips are honest, not fake passes; "not checkable ≠ GO".
 - Node built-ins only, zero dependencies, local-by-default (one opt-in network
@@ -30,9 +34,10 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.1** | MCP parity for the read-only lenses: `map` + `architecture` as MCP tools (one shared `renderMap` implementation, live-protocol test) | **Released** (npm, 2026-07-20) |
 | **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Released** (npm, 2026-07-20; later independent review found false-GO risks) |
 | **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **Released** (npm + tag v0.8.3, 2026-07-20) |
-| 0.8.x | Remaining table stakes: SARIF, GitHub Action product, client-bundle keys | Planned |
+| **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Candidate** — `RELEASE_READY_PENDING_INDEPENDENT_REVIEW` (local package.json; not published) |
+| 0.8.x | Remaining table stakes: first-party Action product, client-bundle keys | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
-| Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |
+| Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
 
@@ -78,8 +83,8 @@ reproducible way the gate lies or dead-ends on the most likely first-run path.
   runs. `action.mjs`.
 
 **Not in 0.7.1 (deliberate):** provenance publishing and the GitHub tag/source
-sync (`no-npm-provenance`, `github-source-lag`) are release-process changes that
-need the founder — see "Later / founder-gated".
+sync (`no-npm-provenance`, `github-source-lag`) are release-process changes — see
+"Later / demand-gated". Source/tag sync is now enforced by the release routine.
 
 ---
 
@@ -152,9 +157,18 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
   (0.8.3). Every allowlisted hit is **disclosed** on the Secret scan result
   (never silent GO). Severity thresholds deferred. `policy.mjs` + `checkSecrets`
   filter; tests 9e/9f. **Done in 0.8.2; safety hardened in 0.8.3.**
-- [ ] **SARIF 2.1.0 export (`--sarif`)** — add #5. GitHub Code Scanning ingests
-  it natively; a checklist question for every enterprise evaluator. Pure
-  serializer, dependency-free. **S**
+- [x] **SARIF 2.1.0 export (`--sarif <path>`)** — add #5. Dependency-free
+  serializer; redacted messages (fingerprints + auth ids only); stable rule ids
+  (`secret/<patternId>`, `check/<slug>`); regions when line data is defensible;
+  security vs quality classification (`security-severity` only for secret/
+  tracked-env; `problem.severity` for other gate checks). Generated
+  `github-action` workflow runs the gate, uploads via
+  `github/codeql-action/upload-sarif@v4` with `always()` so NO-GO still reaches
+  code scanning, then fails the job on gate failure. Pins `checkout@v6` +
+  `setup-node@v6`; permissions `contents: read`, `security-events: write`,
+  `actions: read` (private workflows). Honest scope: public-repo code scanning;
+  private needs Code Security entitlement. **Done in 0.8.4 candidate** (tests +
+  pack cold path; pending independent review before publish).
 - [ ] **Published GitHub Action + PR comment** — add #6. `check --json` already
   exists; ship `uses: getadvantage/…-action@v1` + a PR summary comment. **M**
 - [ ] **Client-bundle key exposure check** (built `dist/`, `.next/static`,
@@ -188,7 +202,7 @@ AI-*built* apps — and finally runs on what the ICP actually ships.
 
 ---
 
-## Later / founder-gated (backlog)
+## Later / demand-gated (backlog)
 
 Real for the sovereign buyer, but either release-process decisions or premature
 until a paying compliance use-case is in the pipeline.
@@ -196,11 +210,10 @@ until a paying compliance use-case is in the pipeline.
 - [ ] **npm provenance publish** — `no-npm-provenance`. Publish with
   `npm publish --provenance` from GitHub Actions (repo is public). The colliding
   `ship-safe` package already has SLSA provenance; a trust product should too.
-  *Founder decision (a publish).* **S**
-- [ ] **GitHub source/tag sync** — `github-source-lag`. Every npm version must be
-  a tag/release with matching source; today GitHub is on 0.6.1 while npm ships
-  0.7.0. "Read the source" must be honest for the version npx runs. *Release
-  process.* **S**
+  Objective release-process change; no founder click required. **S**
+- [x] **GitHub source/tag sync** — `github-source-lag`. Every npm version has a
+  tag/release with matching source. Verified for 0.8.3: source commit, `v0.8.3`,
+  GitHub Release, npm package, and cold npx path agree. **Done 2026-07-20.**
 - [ ] **Gate-run proof record** (in-toto-shaped statement per check: commit SHA,
   tool + policy version, checks + verdicts, hashes) + `--report` to the run
   ledger — add #8. The bridge from free CLI to Ship-Gate SaaS. Start UNSIGNED

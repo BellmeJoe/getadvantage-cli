@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.8.3 LIVE**
+# Social / advertising pack — getadvantage **0.8.3 LIVE** · **0.8.4 candidate**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -11,6 +11,12 @@
 > secret NO-GO). Policy-safety repairs shipped (index-blob auth, sha256 auth ids,
 > full-block + incomplete PEM). Prefer leading with the eight core GO/NO-GO claims
 > below; do not lead ads with the allowlist surface.
+>
+> **Candidate (not live):** **0.8.4** — `check --sarif <path>` writes SARIF 2.1
+> for GitHub code scanning; `github-action` generates a workflow that uploads
+> via `upload-sarif@v4` (public repos; private needs Code Security **and** the
+> workflow’s `actions: read`). Not a security guarantee. Advertise only after
+> 0.8.4 is published and evidence remains 8/8.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -21,11 +27,11 @@ their named current test or source. Anything marked *roadmap* is not live.
 | Field | Value |
 |--------|--------|
 | **npm (live)** | `getadvantage@0.8.3` |
-| **Checkout** | `0.8.3` matches live |
+| **Checkout / candidate** | Live **0.8.3**; local candidate **0.8.4** (SARIF; not published) |
 | **Install** | `npx getadvantage` or `npx getadvantage@0.8.3` (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.8.3](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.8.3) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · tests **48/48** · cold path verified (2026-07-20) |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · live tree was **48/48** @ 0.8.3 · local candidate **57/57** @ 0.8.4 · cold path verified (2026-07-20) |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -73,7 +79,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | **MCP server** | Exposes the gate to agent clients over MCP; registration examples are documented for Claude, Codex, and Grok Build. Do not say a named client is confirmed without a current end-to-end client test. | `npx getadvantage mcp` · 8 tools; evidence proves protocol list + call |
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
-| **CI** | Same gate on every PR. | `github-action` · publish pipeline runs tests + evidence |
+| **CI** | Same gate on every PR. (0.8.4 candidate: SARIF upload to code scanning on public repos — not live until published.) | `github-action` · publish pipeline runs tests + evidence |
 
 ### D. Do **not** lead with (true but wrong first sentence)
 
@@ -178,7 +184,8 @@ If evidence is red, **do not post**.
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer |
+| `github-action` | CI workflow writer (0.8.4 candidate: gate + SARIF → code scanning upload) |
+| `check --sarif` | (0.8.4 candidate) Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.

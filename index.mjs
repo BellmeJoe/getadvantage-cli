@@ -57,6 +57,7 @@ import { runArchitecture } from "./architecture.mjs";
 import { runDemo } from "./demo.mjs";
 import { envReportOn, reportRun, lanesForIngest, ciDefaultBaseRef, runLogin, runLogout } from "./report.mjs";
 import { runGithubAction } from "./action.mjs";
+import { buildSarif, writeSarifFile } from "./sarif.mjs";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
@@ -67,9 +68,28 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       // value-taking flags vs boolean flags
-      const valueFlags = new Set(["expect-prefix", "scope", "commit", "token-env", "base-ref", "out", "task", "into", "top"]);
+      const valueFlags = new Set([
+        "expect-prefix",
+        "scope",
+        "commit",
+        "token-env",
+        "base-ref",
+        "out",
+        "task",
+        "into",
+        "top",
+        "sarif",
+      ]);
       if (valueFlags.has(key)) {
-        flags[key] = argv[++i];
+        const val = argv[++i];
+        // Missing value (end of argv or next flag) — record empty so callers
+        // can fail honestly instead of treating --sarif as a boolean.
+        if (val === undefined || (typeof val === "string" && val.startsWith("--"))) {
+          flags[key] = "";
+          if (val !== undefined && val.startsWith("--")) i--; // re-process next flag
+        } else {
+          flags[key] = val;
+        }
       } else {
         flags[key] = true;
       }
@@ -164,8 +184,10 @@ ${c.bold("Commands")}
   ${c.cyan("login")}    Connect this machine to your getAdvantage account: store an ${c.bold("adv_live_")} API key
            in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
            GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
-  ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — run ${c.bold("check --ci --report")} on every
-           push + pull request (reporting needs the GETADVANTAGE_API_KEY repo secret).
+  ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — run ${c.bold("check --ci --report --sarif")} on every
+           push + pull request, then upload findings to GitHub code scanning via
+           ${c.bold("upload-sarif@v4")} (public repos; private needs Code Security + workflow
+           ${c.bold("actions: read")}). Reporting needs GETADVANTAGE_API_KEY.
            Idempotent; ${c.bold("--force")} to replace a differing existing file. ${c.dim("(also: init --github-action)")}
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
@@ -179,6 +201,10 @@ ${c.bold("Flags")}
   --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
+  --sarif <path>          (${c.cyan("check")}) Write a dependency-free SARIF 2.1.0 file for GitHub code scanning.
+                          Does not replace human output or --json; does not turn NO-GO into success.
+                          Invalid path / write failure exits non-zero with a next action. Messages
+                          are redacted (fingerprints + auth ids only — never full secrets).
   --ci                    (${c.cyan("check")} + ${c.cyan("fan-in")}) Non-interactive CI mode: never prompts, tolerates a
                           detached HEAD (CI checks out a sha), and defaults the base comparison to
                           origin/main (or GITHUB_BASE_REF). Exit codes stay CI-honest: 0 = GO.
@@ -233,7 +259,8 @@ ${c.bold("Examples")}
   ${bin} architecture --json --top 5   machine-readable, top 5 only
   ${bin} login                  store your adv_live_ key for --report (once per machine)
   ${bin} check --ci --report    CI gate + post the verdict to your account (what the Action runs)
-  ${bin} github-action          write the GitHub Actions workflow for the line above
+  ${bin} check --sarif out.sarif   also write SARIF 2.1 for GitHub code scanning
+  ${bin} github-action          write the GitHub Actions workflow (gate + SARIF upload)
   ${bin} deploy --expect-prefix myproject-
 `);
 }
@@ -373,7 +400,7 @@ async function main() {
   if (cmd === "check") {
     const GATE_FLAGS = new Set([
       "build", "base-ref", "no-overview", "no-brief-check", "json", "ci",
-      "report", "report-required", "help", "version",
+      "report", "report-required", "sarif", "help", "version",
     ]);
     const unknown = Object.keys(flags).filter((k) => !GATE_FLAGS.has(k));
     if (unknown.length > 0) {
@@ -483,6 +510,9 @@ async function main() {
         label: r.label,
         detail: r.detail,
         extra: r.extra || [],
+        // Optional structured findings (secret scan, tracked .env, …) for
+        // tooling. Human lines stay in extra; raw matches are never present.
+        ...(Array.isArray(r.findings) && r.findings.length > 0 ? { findings: r.findings } : {}),
       })),
       generatedAt: new Date().toISOString(),
     };
@@ -490,6 +520,26 @@ async function main() {
     if (reportWanted) {
       const rep = await reportRun({ cwd, kind: "check", doc, required: reportRequired });
       if (!rep.ok && reportRequired) finalExit = finalExit || 1;
+    }
+    // --sarif <path>: write SARIF 2.1 after the gate. Does not suppress human
+    // or --json output. Gate NO-GO stays exit 1; write/serialize failure also
+    // forces non-zero (never silently drop findings or claim success).
+    if ("sarif" in flags) {
+      try {
+        const sarifDoc = buildSarif({ results, exitCode, cwd });
+        const abs = writeSarifFile({ doc: sarifDoc, outPath: flags.sarif });
+        console.log(c.gray(`  SARIF written: ${abs}`));
+      } catch (e) {
+        console.error(c.red(`  ✗ SARIF export failed: ${e.message || e}`));
+        finalExit = 1;
+      }
+    }
+    // --json must report the final CLI outcome. If SARIF write (or required
+    // report) fails after a clean gate, do not leave verdict:GO / exitCode:0
+    // while the process exits 1.
+    if (finalExit !== doc.exitCode) {
+      doc.exitCode = finalExit;
+      doc.verdict = finalExit === 0 ? "GO" : "NO-GO";
     }
     if (restore) emitJson(restore, doc);
     process.exit(finalExit);
