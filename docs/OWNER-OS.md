@@ -10,14 +10,13 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.8.2** (until gated publish of 0.8.3 succeeds) | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | Candidate **0.8.3** in this checkout | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.8.3** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | Dieselbe Version im Repo (**0.8.3**) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | **48/48** erwartet (0.8.3 candidate) | `npm test` |
+| Tests grün? | **48/48** erwartet | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **npm live: 0.8.2.** Local candidate **0.8.3** has independent **REVIEW_GO** (2026-07-20): policy safety repairs (index-blob auth only, display fingerprints non-authorizing, full-block + incomplete PEM handling, tracked config ship-risk). Do **not** call 0.8.3 LIVE until `npm view` + cold `npx getadvantage@0.8.3` verify.
-> 0.7.x / 0.8.0–0.8.1 history is closed; active work is this 0.8.3 policy-safety release.
+> **0.8.3 ist LIVE** (2026-07-20): policy-safety — index-blob-only authorization, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, tracked config ship-risk. Independent **REVIEW_GO**; gated Actions publish; cold `npx getadvantage@0.8.3` verified. Tag `v0.8.3`.
 
 ---
 

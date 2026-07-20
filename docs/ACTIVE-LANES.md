@@ -5,7 +5,7 @@ Empty board = nobody claims exclusive work — first writer updates this.
 
 | Lane | Owner (tool/person) | Path / concern | Status | Updated |
 |------|---------------------|----------------|--------|---------|
-| `0.8.3-policy-safety-repair` | Grok Build | `policy.mjs`, `util.mjs`, `checks.mjs` index-blob policy, PEM full-block + incomplete, dirty-tree config carve-out, tests, README, package, social pack | `REVIEW_GO` · **RELEASE_AUTHORIZED** · candidate **0.8.3** · independent re-review cleared all P1/P2 (48/48 tests · 8/8 evidence · incomplete PEM + index-blob policy hostile checks) · **npm still getadvantage@0.8.2** until gated publish + live verification succeed | 2026-07-20 |
+| `0.8.3-policy-safety-repair` | Grok Build | `policy.mjs`, `util.mjs`, `checks.mjs` index-blob policy, PEM full-block + incomplete, dirty-tree config carve-out, tests, README, package, social pack | **LIVE 0.8.3** · `done` · commit `4b8fc76` · Actions [29754507154](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/29754507154) success · `npm view` **0.8.3** · cold `npx getadvantage@0.8.3 --version` 0.8.3 · clean GO · secret NO-GO · tag `v0.8.3` · [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.8.3) | 2026-07-20 |
 
 ### Rules
 1. Before starting: add a row.  

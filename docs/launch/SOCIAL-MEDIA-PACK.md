@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.8.2 live** / **0.8.3 REVIEW_GO**
+# Social / advertising pack — getadvantage **0.8.3 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,14 +6,11 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Current release caveat:** npm still reports **getadvantage@0.8.2** until
-> gated publish + live verification succeed. Local candidate **0.8.3** has
-> independent **REVIEW_GO** (no open P1/P2): repairs untracked/display-fingerprint
-> false-GO, private-key full-block auth ids, index-blob-only policy authorization,
-> incomplete/truncated PEM stay NO-GO. Do **not** advertise 0.8.3 as live or lead
-> with the policy/allowlist surface until `npm view getadvantage version` is
-> `0.8.3` and cold `npx getadvantage@0.8.3` is verified. The eight mapped core
-> claims below remain the advertising scope.
+> **Live:** **getadvantage@0.8.3** (2026-07-20). Independent **REVIEW_GO**, gated
+> Actions publish, cold `npx getadvantage@0.8.3` verified (version + clean GO +
+> secret NO-GO). Policy-safety repairs shipped (index-blob auth, sha256 auth ids,
+> full-block + incomplete PEM). Prefer leading with the eight core GO/NO-GO claims
+> below; do not lead ads with the allowlist surface.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -23,12 +20,12 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.8.2` (not 0.8.3 until publish + live verify) |
-| **Local candidate** | `0.8.3` — independent **REVIEW_GO** · `RELEASE_AUTHORIZED` (tests 48/48, evidence 8/8, pack + cold path green) |
-| **Install** | `npx getadvantage` (no signup) — pin `@0.8.3` only after live verify |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli |
+| **npm (live)** | `getadvantage@0.8.3` |
+| **Checkout** | `0.8.3` matches live |
+| **Install** | `npx getadvantage` or `npx getadvantage@0.8.3` (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.8.3](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.8.3) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** (2026-07-20, candidate 0.8.3, REVIEW_GO) |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · tests **48/48** · cold path verified (2026-07-20) |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -85,7 +82,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 - “Conflict-free multi-agent coding” (fan-in is honest quarantine, not magic)  
 - `npx ship-safe` (different npm package)  
 - “Replaces gitleaks / every security scanner”
-- Policy/allowlist surface (0.8.3 has REVIEW_GO on repairs; still do not lead ads with allowlist until live 0.8.3 is verified)
+- Policy/allowlist surface (shipped safe in 0.8.3; still a secondary detail — lead with GO/NO-GO, not config)
 
 ---
 

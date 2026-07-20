@@ -29,7 +29,7 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.0** | Launch polish: demo-ready output (real plurals, prefix-aware fingerprints), truthful `switch`/fan-in wording, per-command fan help, architecture signal band, owner ops + test+evidence-gated publish CI | **Released** (npm, 2026-07-19) |
 | **0.8.1** | MCP parity for the read-only lenses: `map` + `architecture` as MCP tools (one shared `renderMap` implementation, live-protocol test) | **Released** (npm, 2026-07-20) |
 | **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Released** (npm, 2026-07-20; later independent review found false-GO risks) |
-| **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **REVIEW_GO** candidate (npm still 0.8.2 until live verify) |
+| **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **Released** (npm + tag v0.8.3, 2026-07-20) |
 | 0.8.x | Remaining table stakes: SARIF, GitHub Action product, client-bundle keys | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (founder-gated, SaaS-linked) | Backlog |
