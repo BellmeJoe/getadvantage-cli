@@ -34,7 +34,7 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.1** | MCP parity for the read-only lenses: `map` + `architecture` as MCP tools (one shared `renderMap` implementation, live-protocol test) | **Released** (npm, 2026-07-20) |
 | **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Released** (npm, 2026-07-20; later independent review found false-GO risks) |
 | **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **Released** (npm + tag v0.8.3, 2026-07-20) |
-| **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Candidate** — `RELEASE_READY_PENDING_INDEPENDENT_REVIEW` (local package.json; not published) |
+| **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
 | 0.8.x | Remaining table stakes: first-party Action product, client-bundle keys | Planned |
 | 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
@@ -167,8 +167,8 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
   code scanning, then fails the job on gate failure. Pins `checkout@v6` +
   `setup-node@v6`; permissions `contents: read`, `security-events: write`,
   `actions: read` (private workflows). Honest scope: public-repo code scanning;
-  private needs Code Security entitlement. **Done in 0.8.4 candidate** (tests +
-  pack cold path; pending independent review before publish).
+  private needs Code Security entitlement. **Done in 0.8.4** (shipped npm +
+  tag v0.8.4; independent REVIEW_GO; cold published path verified).
 - [ ] **Published GitHub Action + PR comment** — add #6. `check --json` already
   exists; ship `uses: getadvantage/…-action@v1` + a PR summary comment. **M**
 - [ ] **Client-bundle key exposure check** (built `dist/`, `.next/static`,
@@ -212,8 +212,9 @@ until a paying compliance use-case is in the pipeline.
   `ship-safe` package already has SLSA provenance; a trust product should too.
   Objective release-process change; no founder click required. **S**
 - [x] **GitHub source/tag sync** — `github-source-lag`. Every npm version has a
-  tag/release with matching source. Verified for 0.8.3: source commit, `v0.8.3`,
-  GitHub Release, npm package, and cold npx path agree. **Done 2026-07-20.**
+  tag/release with matching source. Verified for 0.8.4: source commit `cd2a34d`,
+  `v0.8.4`, GitHub Release, npm package, and cold published path agree.
+  **Done 2026-07-20** (also verified for 0.8.3 earlier same day).
 - [ ] **Gate-run proof record** (in-toto-shaped statement per check: commit SHA,
   tool + policy version, checks + verdicts, hashes) + `--report` to the run
   ledger — add #8. The bridge from free CLI to Ship-Gate SaaS. Start UNSIGNED

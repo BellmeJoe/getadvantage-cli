@@ -10,18 +10,18 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.8.3** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | Kandidat **0.8.4** im Repo (noch nicht published) | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.8.4** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | Gleich wie live (**0.8.4**) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
 | Tests grün? | **57/57** erwartet (inkl. SARIF path-credential fix) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **0.8.3 ist LIVE** (2026-07-20). **0.8.4 Kandidat** (lokal): SARIF 2.1 export
-> (`check --sarif <path>`) + generated GitHub workflow upload path
-> (`github-action` → `upload-sarif@v4` mit `always()`, `checkout@v6` /
-> `setup-node@v6`, `actions: read` + Code Security note for private repos).
-> Status: `RELEASE_READY_PENDING_INDEPENDENT_REVIEW` nach integration + path-
-> credential P1 micro-repair. Nicht publishen bis Independent Review sauber ist.
+> **0.8.4 ist LIVE** (2026-07-20). SARIF 2.1 export (`check --sarif <path>`) +
+> generated GitHub workflow upload path (`github-action` → `upload-sarif@v4`
+> mit `always()`, `checkout@v6` / `setup-node@v6`, `actions: read` + Code
+> Security note for private repos). Independent **REVIEW_GO** (0 P1/P2);
+> gated Actions publish; cold published package verified; tag `v0.8.4` +
+> GitHub Release. Next NORTHSTAR P0 bet: first-party GitHub Action + PR summary.
 
 ---
 
