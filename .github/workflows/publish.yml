@@ -70,7 +70,7 @@ jobs:
       # Real runner proof of composite Action semantics (not YAML-regex-only).
       # Executes the checked-out candidate via uses: ./ before any publish/tag move.
       # Failure here blocks npm publication and Action tag movement.
-      - name: Gate — Action composite (uses: ./)
+      - name: "Gate — Action composite (uses: ./)"
         if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
         uses: ./
         with:
