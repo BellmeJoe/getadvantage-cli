@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.8.4 LIVE**
+# Social / advertising pack — getadvantage **0.9.0 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,16 +6,18 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Live:** **getadvantage@0.8.4** (2026-07-20). Independent **REVIEW_GO**, gated
-> Actions publish, cold published package verified (version + clean GO + secret
-> NO-GO + parseable SARIF + workflow pins). Prefer leading with the eight core
+> **Live:** **getadvantage@0.9.0** (2026-07-21). Independent **REVIEW_GO**, gated
+> Actions publish (Materialize + `uses: ./` fixture self-gate green before npm),
+> registry `gitHead` matches release commit, tags `v0.9.0` + floating `v1`,
+> GitHub Release, cold published package verified (version + clean GO + secret
+> NO-GO + parseable SARIF redaction). Prefer leading with the eight core
 > GO/NO-GO claims below; do not lead ads with the allowlist surface.
 >
-> **Also live in 0.8.4:** `check --sarif <path>` writes SARIF 2.1 for GitHub
-> code scanning; `github-action` generates a workflow that uploads via
-> `upload-sarif@v4` (public repos; private needs Code Security **and** the
-> workflow’s `actions: read`). Not a security guarantee — same gate as local
-> `check`, exported for the PR surface.
+> **Also live in 0.9.0:** first-party GitHub Action + PR summary
+> (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.9.0`); SARIF 2.1 via
+> `check --sarif` and the Action path; `github-action` generates a consumer
+> workflow. Not a security guarantee — same gate as local `check`, exported
+> for the PR surface. Rollback: **getadvantage@0.8.4** / tag `v0.8.4`.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -25,12 +27,12 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.8.4` |
-| **Checkout** | Live **0.8.4** (SARIF + generated code-scanning workflow) |
-| **Install** | `npx getadvantage` or `npx getadvantage@0.8.4` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.8.4](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.8.4) |
+| **npm (live)** | `getadvantage@0.9.0` |
+| **Checkout** | Live **0.9.0** (first-party Action + PR summary + SARIF) |
+| **Install** | `npx getadvantage` or `npx getadvantage@0.9.0` (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.9.0](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.9.0) · Action `@v1` / `@v0.9.0` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **57/57** tests @ 0.8.4 · cold published path verified (2026-07-20) |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **66/66** tests @ 0.9.0 · cold published path verified (2026-07-21) |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -79,7 +81,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
 | **CI** | Same gate on every PR. SARIF upload to code scanning on public repos (private needs Code Security + `actions: read`). Not a security seal. | `github-action` · `check --sarif` · publish pipeline runs tests + evidence |
-| **First-party Action + PR summary** (*candidate 0.9.0 — not live on npm*) | One-copy `uses: BellmeJoe/getadvantage-cli@v1`, update-in-place PR comment, job-summary fallback. Do not advertise as live until social pack LIVE flip after REVIEW_GO. | root `action.yml` · local `0.9.0` only |
+| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.9.0`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.9.0** · tags `v1`/`v0.9.0` |
 
 ### D. Do **not** lead with (true but wrong first sentence)
 
@@ -184,9 +186,9 @@ If evidence is red, **do not post**.
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1`) + SARIF upload path (*0.9.0 candidate; live npm 0.8.4 still emits the older inline template until publish*) |
+| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.9.0`) + SARIF upload path (**live 0.9.0**) |
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
-| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (*candidate 0.9.0*) |
+| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.9.0** · `@v1` / `@v0.9.0`) |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.
