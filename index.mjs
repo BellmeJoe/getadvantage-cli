@@ -184,11 +184,11 @@ ${c.bold("Commands")}
   ${c.cyan("login")}    Connect this machine to your getAdvantage account: store an ${c.bold("adv_live_")} API key
            in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
            GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
-  ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — run ${c.bold("check --ci --report --sarif")} on every
-           push + pull request, then upload findings to GitHub code scanning via
-           ${c.bold("upload-sarif@v4")} (public repos; private needs Code Security + workflow
-           ${c.bold("actions: read")}). Reporting needs GETADVANTAGE_API_KEY.
-           Idempotent; ${c.bold("--force")} to replace a differing existing file. ${c.dim("(also: init --github-action)")}
+  ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — one-copy first-party Action
+           (${c.bold("uses: BellmeJoe/getadvantage-cli@v1")}) on every push + pull request: GO/NO-GO,
+           SARIF → ${c.bold("upload-sarif@v4")}, update-in-place PR summary (job-summary fallback).
+           Public code scanning; private needs Code Security + ${c.bold("actions: read")}.
+           Idempotent; ${c.bold("--force")} to replace a differing / pre-0.9.0 workflow. ${c.dim("(also: init --github-action)")}
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
 

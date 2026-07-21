@@ -1,0 +1,149 @@
+# getAdvantage — first-party GitHub Action (Action API major v1).
+#
+# One-copy install in a consumer workflow:
+#   - uses: BellmeJoe/getadvantage-cli@v1
+#
+# Tag architecture (documented — not a founder choice):
+#   - Floating git tag `v1` = Action product major (moves on each shipped
+#     action-compatible release after independent REVIEW_GO).
+#   - Exact release tags `v0.9.0`, `v0.9.1`, … remain the npm/source pins.
+#   - npm installs use package versions / dist-tags, never the floating `v1`
+#     git tag. When the package reaches 1.x, `v1` continues to mean "latest
+#     1.x Action surface" (same pattern as actions/checkout@v4).
+#
+# Honest scope:
+#   - Same gate as local `getadvantage check` — not a security seal.
+#   - SARIF upload needs security-events: write (+ actions: read on private).
+#   - Private/internal code scanning needs GitHub Code Security entitlement.
+#   - Fork PRs: no pull_request_target; no secrets exposure; PR comments may
+#     lack write permission → job summary fallback; SARIF upload may skip
+#     (sarif-upload-eligible=false) — documented platform limit only.
+#   - Action/setup/SARIF/upload failures never report as GO.
+#   - GITHUB_TOKEN stays in the Action parent; project-controlled children
+#     (tsc/build) receive a credential-scrubbed environment.
+name: getAdvantage check
+description: >-
+  Pre-deploy GO/NO-GO gate with SARIF upload for code scanning and a concise
+  PR summary (update-in-place). Same checks as local getadvantage check —
+  not a security guarantee.
+author: getAdvantage
+branding:
+  icon: shield
+  color: yellow
+
+inputs:
+  working-directory:
+    description: Project directory to gate (relative to the workspace root).
+    required: false
+    default: "."
+  node-version:
+    description: Node.js version for actions/setup-node.
+    required: false
+    default: "20"
+  sarif-file:
+    description: SARIF output path relative to working-directory (no absolute paths, controls, or newlines).
+    required: false
+    default: "getadvantage.sarif"
+  comment:
+    description: >-
+      Attempt a PR comment with a stable marker and update-in-place. When the
+      token cannot write PR comments (fork PRs, missing permission), fall back
+      to the job summary. Set false to skip PR comments (job summary still written).
+    required: false
+    default: "true"
+  report:
+    description: >-
+      Pass --report after the gate when GETADVANTAGE_API_KEY is available.
+      Without the secret the gate still runs; reporting stays best-effort.
+    required: false
+    default: "true"
+  install-dependencies:
+    description: >-
+      Install package.json dependencies with --ignore-scripts before the gate
+      so the project's own TypeScript compiler is present when applicable.
+    required: false
+    default: "true"
+
+outputs:
+  verdict:
+    description: GO, NO-GO, or ERROR (setup/action failure — never treated as GO).
+    value: ${{ steps.gate.outputs.verdict }}
+  exit-code:
+    description: Numeric process exit (0 only for clean GO with successful SARIF write when requested).
+    value: ${{ steps.gate.outputs.exit-code }}
+  summary-mode:
+    description: pr-comment | job-summary | none
+    value: ${{ steps.gate.outputs.summary-mode }}
+  sarif-written:
+    description: "true when a SARIF file was written this run and is eligible for upload"
+    value: ${{ steps.gate.outputs.sarif-written }}
+  sarif-path:
+    description: Workspace-relative path to the SARIF file (empty when not written)
+    value: ${{ steps.gate.outputs.sarif-path }}
+  sarif-upload-eligible:
+    description: "true when upload should be attempted (false on fork skip or no current SARIF)"
+    value: ${{ steps.gate.outputs.sarif-upload-eligible }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    # Install behind a trusted Node scrubber so repo .npmrc cannot interpolate
+    # inherited GITHUB_TOKEN / OIDC / GETADVANTAGE_API_KEY / npm secrets even
+    # with --ignore-scripts. Non-mutating when no lockfile (--no-package-lock).
+    - name: Install project dependencies
+      if: inputs.install-dependencies == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GETADVANTAGE_ACTION_PATH: ${{ github.action_path }}
+      run: node "$GETADVANTAGE_ACTION_PATH/action/install.mjs"
+
+    # continue-on-error so a NO-GO still reaches the SARIF upload step.
+    # The enforce step below keeps NO-GO, setup, SARIF, and upload failures red.
+    - name: getAdvantage gate + PR summary
+      id: gate
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        GETADVANTAGE_API_KEY: ${{ env.GETADVANTAGE_API_KEY }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+        INPUT_REPORT: ${{ inputs.report }}
+        GETADVANTAGE_ACTION_PATH: ${{ github.action_path }}
+        GETADVANTAGE_WORKSPACE: ${{ github.workspace }}
+      run: node "$GETADVANTAGE_ACTION_PATH/action/main.mjs"
+
+    # Upload only when this run wrote SARIF and is eligible (not a fork skip).
+    # continue-on-error so enforce can read the outcome; attempted upload
+    # failure must still fail the required check (never a green GO).
+    - name: Upload getAdvantage SARIF to code scanning
+      id: sarif_upload
+      if: always() && steps.gate.outputs.sarif-written == 'true' && steps.gate.outputs.sarif-upload-eligible == 'true'
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.gate.outputs.sarif-path }}
+        category: getadvantage
+
+    # Deterministic required-check outcome via enforce.mjs (unit-testable):
+    #   green only when verdict=GO, gate success, and (if upload attempted) upload success.
+    #   NO-GO, setup ERROR, missing SARIF on GO path, and failed upload → red.
+    #   Fork/platform skip (sarif-upload-eligible=false) does not force upload.
+    - name: Fail job on NO-GO, action error, or SARIF upload failure
+      if: always()
+      shell: bash
+      env:
+        GETADVANTAGE_ACTION_PATH: ${{ github.action_path }}
+        GETADVANTAGE_VERDICT: ${{ steps.gate.outputs.verdict }}
+        GETADVANTAGE_GATE_OUTCOME: ${{ steps.gate.outcome }}
+        GETADVANTAGE_SARIF_WRITTEN: ${{ steps.gate.outputs.sarif-written }}
+        GETADVANTAGE_UPLOAD_SKIP: ${{ steps.gate.outputs.sarif-upload-eligible == 'false' && steps.gate.outputs.sarif-written == 'true' }}
+        GETADVANTAGE_UPLOAD_OUTCOME: ${{ steps.sarif_upload.outcome }}
+      run: node "$GETADVANTAGE_ACTION_PATH/action/enforce.mjs"

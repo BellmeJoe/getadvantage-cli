@@ -79,6 +79,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
 | **CI** | Same gate on every PR. SARIF upload to code scanning on public repos (private needs Code Security + `actions: read`). Not a security seal. | `github-action` · `check --sarif` · publish pipeline runs tests + evidence |
+| **First-party Action + PR summary** (*candidate 0.9.0 — not live on npm*) | One-copy `uses: BellmeJoe/getadvantage-cli@v1`, update-in-place PR comment, job-summary fallback. Do not advertise as live until social pack LIVE flip after REVIEW_GO. | root `action.yml` · local `0.9.0` only |
 
 ### D. Do **not** lead with (true but wrong first sentence)
 
@@ -183,8 +184,9 @@ If evidence is red, **do not post**.
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer (gate + SARIF → code scanning upload via `upload-sarif@v4`) |
+| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1`) + SARIF upload path (*0.9.0 candidate; live npm 0.8.4 still emits the older inline template until publish*) |
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
+| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (*candidate 0.9.0*) |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.

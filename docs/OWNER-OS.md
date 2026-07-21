@@ -11,17 +11,15 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
 | Was ist **live auf npm**? | **0.8.4** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | Gleich wie live (**0.8.4**) | `node index.mjs --version` |
+| Was kann ich lokal laufen lassen? | **0.9.0 candidate** (first-party Action) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | **57/57** erwartet (inkl. SARIF path-credential fix) | `npm test` |
+| Tests grün? | **65/65** erwartet (Action + PR summary + repair hostiles) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **0.8.4 ist LIVE** (2026-07-20). SARIF 2.1 export (`check --sarif <path>`) +
-> generated GitHub workflow upload path (`github-action` → `upload-sarif@v4`
-> mit `always()`, `checkout@v6` / `setup-node@v6`, `actions: read` + Code
-> Security note for private repos). Independent **REVIEW_GO** (0 P1/P2);
-> gated Actions publish; cold published package verified; tag `v0.8.4` +
-> GitHub Release. Next NORTHSTAR P0 bet: first-party GitHub Action + PR summary.
+> **Live npm remains 0.8.4.** Local candidate **0.9.0** = first-party GitHub
+> Action (`action.yml` + `uses: BellmeJoe/getadvantage-cli@v1`) + update-in-place
+> PR summary + job-summary fallback. State: **REVIEW_PENDING** — no publish/tag/
+> social LIVE flip until independent REVIEW_GO with 0 open P1/P2.
 
 ---
 

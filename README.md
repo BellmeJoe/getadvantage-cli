@@ -113,7 +113,7 @@ run getAdvantage.
 | `getadvantage demo` | Spin up a throwaway sample repo with 3 pre-made divergent lanes (one clean, one that breaks the build, one that conflicts) and run the **whole conductor** on it — the entire wow in one command, zero setup. |
 | `getadvantage architecture` | **The accretion scanner** — where is the code rotting by being built *over* instead of collapsed? Ranks the top collapse candidates by **size × churn × duplication**: oversized files (>600 / >1000 / >1800 lines), git-churn hotspots (last 100 commits), repeated ≥15-line blocks (exact/near-exact, appearing ≥3×), plus an explicitly approximate JS/TS complexity read. It **surfaces** the signal an AI coding agent is missing — it never refactors, and finding nothing means the heuristics found nothing, *not* that the architecture is clean. **Advisory only — always exits 0**; `--json` for the machine report, `--top <n>` to size the ranking. |
 | `getadvantage login` / `logout` | Store (or remove) your `adv_live_` API key in `~/.getadvantage/config.json` — per-user, owner-only file, never inside a repo. Used by `--report`; the `GETADVANTAGE_API_KEY` env var always wins over the stored key. The key is never printed back. |
-| `getadvantage github-action` | Write `.github/workflows/getadvantage.yml`: run `getadvantage check --ci --report --sarif getadvantage.sarif` on every push + pull request, upload the SARIF to GitHub code scanning (`github/codeql-action/upload-sarif@v4`, even on NO-GO via `always()`), then fail the job if the gate failed. Optional reporting uses the `GETADVANTAGE_API_KEY` repo secret. Idempotent — it never clobbers a differing existing file without `--force`. Alias: `init --github-action`. Permissions: `contents: read`, `security-events: write`, `actions: read` (the last is required for private-repository workflows). Code scanning alerts show on public repositories; private/internal repos also need GitHub Code Security entitlement. Not a security guarantee — same checks as local `check`. |
+| `getadvantage github-action` | Write `.github/workflows/getadvantage.yml` for a **one-copy** first-party Action install: `uses: BellmeJoe/getadvantage-cli@v1`. The Action runs the same gate as local `check`, writes SARIF, uploads via `github/codeql-action/upload-sarif@v4` (even on NO-GO), posts an **update-in-place** PR summary (stable `<!-- getadvantage:pr-summary -->` marker; job-summary fallback when PR write is unavailable, e.g. many fork PRs), then fails the job on NO-GO or action error. Optional `--report` uses the `GETADVANTAGE_API_KEY` repo secret. Idempotent — never clobbers a differing or pre-0.9.0 workflow without `--force`. Alias: `init --github-action`. Workflow permissions: `contents: read`, `security-events: write`, `actions: read`, `pull-requests: write`. Does **not** use `pull_request_target`. Public code scanning; private/internal also need GitHub Code Security. Not a security guarantee. |
 | `getadvantage deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
 
 ## The gate (what `check` actually does)
@@ -353,23 +353,38 @@ On success the CLI prints the run's report URL: `→ verdict posted: https://…
 
 ### In CI (GitHub Actions)
 
+**One-copy install** (generated workflow):
+
 ```bash
 npx getadvantage github-action     # writes .github/workflows/getadvantage.yml
 ```
 
-The workflow runs `npx getadvantage check --ci --report --sarif getadvantage.sarif`
-on every push and pull request, then uploads `getadvantage.sarif` with the
-official `github/codeql-action/upload-sarif@v4` action (`if: always()` so a
-NO-GO still reaches code scanning). First-party steps use `actions/checkout@v6`
-and `actions/setup-node@v6` (explicit Node 20; no package-manager cache). A final
-step fails the job when the gate failed — findings can appear on the PR without
-turning NO-GO into a green check. `--ci` never prompts, tolerates detached-HEAD
-checkouts, and defaults base comparisons to `origin/main` (or the PR's
-`GITHUB_BASE_REF`). Permissions: `contents: read`, `security-events: write`, and
-`actions: read` (required for private-repository workflows). Add
-`GETADVANTAGE_API_KEY` as a repo secret for optional `--report`; without it the
-gate still runs. Code scanning on private/internal repositories also requires
-GitHub Code Security — the workflow does not create that entitlement.
+Or paste the consumer step yourself after checkout:
+
+```yaml
+- uses: BellmeJoe/getadvantage-cli@v1
+```
+
+**Tag architecture:** floating git tag `v1` is the Action API major (moved on each
+shipped action-compatible release). Exact source/npm release tags remain
+`v0.9.0`, `v0.9.1`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.9.0` when you
+need bit-for-bit reproducibility. npm installs use package versions / dist-tags,
+not the floating `v1` git tag.
+
+The generated workflow checks out your repo, then runs the first-party composite
+Action (Node 20 via `actions/setup-node@v6` inside the Action, project deps with
+`--ignore-scripts`, gate + SARIF, update-in-place PR summary, then
+`upload-sarif@v4` under `always()` when SARIF was written, then fail on NO-GO).
+`--ci` never prompts, tolerates detached-HEAD checkouts, and defaults base
+comparisons to `origin/main` (or the PR's `GITHUB_BASE_REF`). Permissions:
+`contents: read`, `security-events: write`, `actions: read` (private workflows),
+and `pull-requests: write` (same-repo PR comments). Fork PRs often cannot write
+comments with `GITHUB_TOKEN` — the Action falls back to the job summary and never
+claims otherwise. The product does **not** use `pull_request_target` (unsafe for
+untrusted PR code). Add `GETADVANTAGE_API_KEY` as a repo secret for optional
+`--report`; without it the gate still runs. Code scanning on private/internal
+repositories also requires GitHub Code Security — the workflow does not create
+that entitlement. Not a security seal.
 
 ## What it is — and isn't
 

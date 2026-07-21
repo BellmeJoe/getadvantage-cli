@@ -35,8 +35,9 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Released** (npm, 2026-07-20; later independent review found false-GO risks) |
 | **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **Released** (npm + tag v0.8.3, 2026-07-20) |
 | **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
-| 0.8.x | Remaining table stakes: first-party Action product, client-bundle keys | Planned |
-| 0.9 | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
+| **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Candidate** — REVIEW_PENDING (local 0.9.0; live npm remains 0.8.4) |
+| 0.8.x / 0.9.x | Remaining table stakes: client-bundle keys | Planned |
+| 0.9+ | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
@@ -169,8 +170,14 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
   `actions: read` (private workflows). Honest scope: public-repo code scanning;
   private needs Code Security entitlement. **Done in 0.8.4** (shipped npm +
   tag v0.8.4; independent REVIEW_GO; cold published path verified).
-- [ ] **Published GitHub Action + PR comment** — add #6. `check --json` already
-  exists; ship `uses: getadvantage/…-action@v1` + a PR summary comment. **M**
+- [x] **Published GitHub Action + PR comment** — add #6. Root `action.yml`
+  composite Action consumable as `uses: BellmeJoe/getadvantage-cli@v1`; generated
+  workflow is one-copy; deterministic GO/NO-GO with SARIF upload on `always()`
+  when written; update-in-place PR summary (`<!-- getadvantage:pr-summary -->`)
+  with job-summary fallback; honest fork path (no `pull_request_target`, no
+  secret claims); minimal permissions; 0.8.4 redaction carried forward; cold
+  install vs `--force` migration for pre-0.9.0 workflows. **Done in 0.9.0
+  candidate** (not published until independent REVIEW_GO).
 - [ ] **Client-bundle key exposure check** (built `dist/`, `.next/static`,
   `VITE_`/`NEXT_PUBLIC_` misuse) — add #1. The most common real damage in
   AI-built apps (~1.5M keys exposed across documented 2025/26 incidents; 98% of

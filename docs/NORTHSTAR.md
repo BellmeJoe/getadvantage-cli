@@ -45,6 +45,9 @@ lane ships or is killed. Only one implementation lane may be open.
    replaces GitHub security products.
 2. **First-party GitHub Action and concise PR summary** — one copy/paste install,
    stable major tag, deterministic GO/NO-GO, no duplicate comments.
+   **Status (2026-07-20):** local candidate **0.9.0** at `REVIEW_PENDING`
+   (`uses: BellmeJoe/getadvantage-cli@v1`); live npm remains 0.8.4 until
+   independent REVIEW_GO + release cycle.
 3. **One-command CI bootstrap** — detect the repository, write or update the
    workflow safely, show the exact diff, and refuse destructive overwrite.
 

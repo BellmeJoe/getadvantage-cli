@@ -76,13 +76,37 @@
 //                                     workflow majors/permissions + idempotence/refusal
 //  38. packed-package SARIF cold path — tarball includes sarif.mjs; cold npx writes
 //                                     and parses SARIF outside the source tree
+//  39. first-party Action + PR summary (0.9.0) — action.yml + summary marker +
+//                                     update-in-place, fork/permission fallback, failed
+//                                     SARIF path, credential-shaped filenames, markdown
+//                                     injection, legacy migration, packed action files
+//  40. Action trust repairs (REVIEW_NO_GO) — credential-scrubbed tsc env, ghs_/Bearer/
+//                                     DB redaction, upload honesty, GITHUB_OUTPUT injection,
+//                                     comment pagination + spoofed marker, stale SARIF
+//  40. Action repair hostiles (0.9.0) — credential-scrubbed tsc env, ghs_/Bearer/DB
+//                                     redaction, GITHUB_OUTPUT injection, page-2
+//                                     bot marker + spoofed marker, stale SARIF proof,
+//                                     upload-failure fails required check (YAML)
+//  41. Action repair pass-2 hostiles — hard-refuse pull_request_target; SARIF
+//                                     SHA-256 content identity; GITHUB_ACTOR≠owner;
+//                                     pagination-cap no-POST; Action release contract;
+//                                     non-mutating install without package-lock
+//  42. Action repair pass-3 hostiles — eligible upload skipped=red; scrubbed install
+//                                     + hostile .npmrc; exact token ownership (not
+//                                     arbitrary [bot]); ref-style MD + encodeArtifactUri;
+//                                     SARIF run nonce; no api.github.com in tests;
+//                                     publish uses: ./ runner gate
+//  43. Action repair pass-4 release  — docs-only push no-op (npm gitHead ≠ HEAD);
+//                                     annotated exact tag peel; lightweight v1 peel;
+//                                     post-publish gitHead verify before tags;
+//                                     uses: ./ before npm publish; unproven source fails
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 
 /** Same as util.mjs secretAuthId — local so scenarios never import production modules. */
@@ -2977,7 +3001,7 @@ scenario("sarif: build stdout with credentials never reaches SARIF (no generic e
   }
 });
 
-scenario("github-action: generates workflow with SARIF upload; idempotent; refuses differing without --force", () => {
+scenario("github-action: generates first-party Action workflow; idempotent; refuses differing without --force", () => {
   const base = freshBase();
   try {
     const repo = scaffold(base);
@@ -2986,31 +3010,42 @@ scenario("github-action: generates workflow with SARIF upload; idempotent; refus
     assert.equal(r1.code, 0, r1.stderr + r1.stdout);
     assert.ok(existsSync(wf), "workflow must be written");
     const body1 = readFileSync(wf, "utf8");
-    // Hostile: current supported majors (would fail on old @v3/@v4 checkout candidate)
-    assert.ok(/upload-sarif@v4/.test(body1), "must pin github/codeql-action/upload-sarif@v4");
-    assert.ok(!/upload-sarif@v3/.test(body1), "must not pin stale upload-sarif@v3");
-    assert.ok(/actions\/checkout@v6/.test(body1), "must pin actions/checkout@v6");
-    assert.ok(/actions\/setup-node@v6/.test(body1), "must pin actions/setup-node@v6");
-    assert.ok(/node-version:\s*['"]?20['"]?/.test(body1), "Node runtime must be explicit");
+    // First-party Action one-copy install
     assert.ok(
-      !/cache:\s*['"]?npm['"]?/.test(body1),
-      "must not enable unnecessary package-manager caching on this security-sensitive gate",
+      /uses:\s*BellmeJoe\/getadvantage-cli@v1/.test(body1),
+      "must consume first-party Action @v1",
     );
+    assert.ok(!/npx --yes getadvantage@/.test(body1), "consumer workflow must not inline opaque npx pin steps");
+    assert.ok(/actions\/checkout@v6/.test(body1), "must pin actions/checkout@v6 (GitHub SARIF docs)");
     assert.ok(/security-events:\s*write/.test(body1), "needs security-events: write");
     assert.ok(/contents:\s*read/.test(body1), "needs contents: read");
     assert.ok(
       /actions:\s*read/.test(body1),
       "needs actions: read (required for private-repository workflows per GitHub docs)",
     );
-    assert.ok(/if:\s*always\(\)/.test(body1), "upload must use always()");
-    assert.ok(/continue-on-error:\s*true/.test(body1), "gate step continue-on-error for NO-GO upload");
-    assert.ok(/--sarif\s+getadvantage\.sarif/.test(body1), "gate must write getadvantage.sarif");
-    assert.ok(/Fail job on NO-GO/.test(body1), "final step retains verdict");
-    assert.ok(/codeql-action\/upload-sarif/.test(body1));
+    assert.ok(/pull-requests:\s*write/.test(body1), "needs pull-requests: write for same-repo PR comments");
     assert.ok(
-      /Code Security/i.test(body1),
-      "workflow comments must state private repos need Code Security",
+      !/^[^#\n]*pull_request_target/m.test(body1) && !/\bon:\s*[\s\S]*pull_request_target/.test(body1),
+      "must never wire pull_request_target as a workflow trigger",
     );
+    assert.ok(/Code Security/i.test(body1), "workflow comments must state private repos need Code Security");
+    assert.ok(/fetch-depth:\s*0/.test(body1), "full history for base comparison");
+
+    // Root action.yml carries upload-sarif + setup-node pins + upload honesty
+    const actionYml = readFileSync(path.join(__dirname, "..", "action.yml"), "utf8");
+    assert.ok(/upload-sarif@v4/.test(actionYml), "action.yml must pin upload-sarif@v4");
+    assert.ok(!/upload-sarif@v3/.test(actionYml), "must not pin stale upload-sarif@v3");
+    assert.ok(/actions\/setup-node@v6/.test(actionYml), "action.yml must pin setup-node@v6");
+    assert.ok(/node-version:.*20|default:\s*"20"/.test(actionYml), "Node 20 default");
+    assert.ok(/continue-on-error:\s*true/.test(actionYml), "gate continue-on-error for NO-GO upload path");
+    assert.ok(/if:\s*always\(\)/.test(actionYml), "upload/enforce use always()");
+    assert.ok(/Fail job on NO-GO|SARIF upload failure/i.test(actionYml), "final step retains verdict + upload honesty");
+    assert.ok(/id:\s*sarif_upload/.test(actionYml), "upload step must have id for outcome check");
+    assert.ok(/sarif-upload-eligible/.test(actionYml), "upload gated on eligibility (fork skip)");
+    assert.ok(/GETADVANTAGE_UPLOAD_OUTCOME|sarif_upload\.outcome/.test(actionYml), "enforce observes upload outcome");
+    assert.ok(/action\/enforce\.mjs/.test(actionYml), "enforce.mjs drives final required-check");
+    assert.ok(/action\/install\.mjs/.test(actionYml), "install via trusted scrubbed install.mjs");
+    assert.ok(/fork/i.test(actionYml), "documents honest fork skip");
 
     // Idempotent re-run
     const r2 = run(["github-action"], repo);
@@ -3029,6 +3064,30 @@ scenario("github-action: generates workflow with SARIF upload; idempotent; refus
     const r4 = run(["github-action", "--force"], repo);
     assert.equal(r4.code, 0, r4.stderr);
     assert.equal(readFileSync(wf, "utf8"), body1);
+
+    // Legacy 0.8.4-style inline workflow: refuse without --force; migrate with --force
+    const legacy = `# Generated by \`getadvantage github-action\`.
+name: getAdvantage check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: npx --yes getadvantage@0.8.4 check --ci --sarif getadvantage.sarif
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: getadvantage.sarif
+`;
+    writeFileSync(wf, legacy, "utf8");
+    const r5 = run(["github-action"], repo);
+    assert.equal(r5.code, 1, "legacy must not be silently clobbered");
+    assert.ok(/pre-0\.9\.0|migrate|--force/i.test(r5.stderr + r5.stdout), r5.stderr + r5.stdout);
+    assert.equal(readFileSync(wf, "utf8"), legacy, "legacy preserved without --force");
+    const r6 = run(["github-action", "--force"], repo);
+    assert.equal(r6.code, 0, r6.stderr);
+    assert.equal(readFileSync(wf, "utf8"), body1);
+    assert.ok(/Migrated|first-party/i.test(r6.stdout + r6.stderr));
   } finally {
     cleanup(base);
   }
@@ -3121,6 +3180,2145 @@ function readdirPack(dir) {
   assert.ok(names.length >= 1, `no .tgz in ${dir}`);
   return names[0];
 }
+
+// ---------------------------------------------------------------------------
+// 39–40. first-party GitHub Action + PR summary + repair hostiles (0.9.0)
+// ---------------------------------------------------------------------------
+scenario("action summary: marker, redaction, injection, credential-shaped paths", async () => {
+  const {
+    PR_SUMMARY_MARKER,
+    buildSummaryMarkdown,
+    sanitizeSummaryText,
+    isUnsafePathForSummary,
+    findMarkerComment,
+    isBotOwnedMarkerComment,
+    upsertPrComment,
+    writeJobSummary,
+    COMMENT_PAGE_SIZE,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "action", "summary.mjs")).href);
+  const { redactForSarif } = await import(pathToFileURL(path.join(__dirname, "..", "sarif.mjs")).href);
+
+  assert.ok(PR_SUMMARY_MARKER.includes("getadvantage:pr-summary"));
+
+  // Clean GO summary
+  const go = buildSummaryMarkdown({
+    verdict: "GO",
+    exitCode: 0,
+    checks: [{ status: "pass", label: "Secret scan", detail: "clean" }],
+    version: "0.9.0",
+    runUrl: "https://github.com/BellmeJoe/getadvantage-cli/actions/runs/1",
+  });
+  assert.ok(go.startsWith(PR_SUMMARY_MARKER));
+  assert.ok(/\*\*GO\*\*/.test(go));
+  assert.ok(!go.includes("sk_live_"));
+
+  // Secret NO-GO — full secret never in body
+  const secret = "sk_live_" + "HOSTILESUMMARYSECRET0000001";
+  const nogo = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: [
+      {
+        status: "fail",
+        label: "Secret scan",
+        detail: `found ${secret} in app.js`,
+        findings: [{ file: "app.js", fp: "sk_live_…0001 (40 chars)", patternId: "stripe-live" }],
+      },
+    ],
+    version: "0.9.0",
+  });
+  assert.ok(/\*\*NO-GO\*\*/.test(nogo));
+  assert.ok(!nogo.includes(secret), "summary must not contain full secret");
+  assert.ok(nogo.includes("app.js") || nogo.includes("Secret scan"));
+
+  // Injected markdown / control characters / images / HTML / mentions / unsafe URI
+  const injected = sanitizeSummaryText(
+    "ok\u0000\u0007 <!-- inject --> ![x](https://evil.test/p.png) <script>x</script> @victim " +
+      "javascript:alert(1) secret\nsk_live_ABCDEFGHIJKLMNOPQRSTUV",
+  );
+  assert.ok(!injected.includes("\u0000") && !injected.includes("\u0007"));
+  assert.ok(!injected.includes("<!--"), "must break HTML comment openers");
+  assert.ok(!injected.includes("-->"), "must break HTML comment terminators");
+  assert.ok(!/sk_live_ABCDEFGHIJKLMNOPQRSTUV/.test(injected), "credential redacted");
+  assert.ok(!/!\[/.test(injected), "markdown images neutralized");
+  assert.ok(!/<script/i.test(injected), "HTML tags stripped");
+  assert.ok(!/@victim\b/.test(injected), "mentions neutralized");
+  assert.ok(!/javascript:/i.test(injected), "unsafe URI neutralized");
+
+  // Reference-style images + definitions must be neutralized (not only inline).
+  const refStyle = sanitizeSummaryText(
+    "see ![badge][evilimg] and chart\n\n[evilimg]: https://evil.test/track.png\n[js]: javascript:alert(1)\n",
+  );
+  assert.ok(!/!\[/.test(refStyle), "reference-style images neutralized");
+  assert.ok(!/evil\.test/.test(refStyle), "reference definitions dropped");
+  assert.ok(!/javascript:/i.test(refStyle), "js reference definition dropped");
+
+  // Central redaction: ghs_ / Bearer / DB URL with password
+  const ghs = "ghs_" + "A".repeat(36);
+  const bearer = "Bearer " + "xyzSECRETTOKENVALUE99";
+  const dbUrl = "postgres://app:SuperSecretPass99@db.example.com:5432/prod";
+  const redBlob = redactForSarif(`tok=${ghs} hdr=${bearer} url=${dbUrl}`);
+  assert.ok(!redBlob.includes(ghs), "ghs_ token redacted");
+  assert.ok(!redBlob.includes("SuperSecretPass99"), "DB password redacted");
+  assert.ok(!redBlob.includes("xyzSECRETTOKENVALUE99"), "Bearer token redacted");
+  assert.ok(/ghs_…\[redacted\]|Bearer …\[redacted\]|…\[redacted\]@/.test(redBlob), redBlob);
+
+  // Credential-shaped filenames (ghs_ and sk_live_) omitted, not fake-redacted
+  const badName = "sk_live_FILENAMESECRET000000001.js";
+  const ghsName = "ghs_" + "B".repeat(36) + ".js";
+  assert.equal(isUnsafePathForSummary(badName), true);
+  assert.equal(isUnsafePathForSummary(ghsName), true);
+  const pathOmit = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: [
+      {
+        status: "fail",
+        label: "Secret scan",
+        detail: "leak",
+        findings: [{ file: badName, fp: "sk_live_…0001 (36 chars)" }],
+      },
+    ],
+  });
+  assert.ok(!pathOmit.includes(badName), "credential-shaped filename must not appear");
+  assert.ok(/path omitted|credential-shaped/i.test(pathOmit));
+
+  // Update-in-place: second upsert PATCHes existing bot marker (no duplicate POST)
+  const bot = { login: "github-actions[bot]", type: "Bot" };
+  const store = { comments: [], posts: 0, patches: 0, listCalls: 0 };
+  const fetchImpl = async (url, init = {}) => {
+    const method = (init.method || "GET").toUpperCase();
+    if (method === "GET" && /\/user$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ login: bot.login }) };
+    }
+    if (method === "GET" && /\/comments\?/.test(url)) {
+      store.listCalls += 1;
+      const u = new URL(url, "https://api.github.com");
+      const page = Number(u.searchParams.get("page") || "1");
+      const per = Number(u.searchParams.get("per_page") || String(COMMENT_PAGE_SIZE));
+      const start = (page - 1) * per;
+      const slice = store.comments.slice(start, start + per);
+      return { ok: true, status: 200, json: async () => slice };
+    }
+    if (method === "POST" && /\/comments$/.test(url)) {
+      store.posts += 1;
+      const body = JSON.parse(init.body).body;
+      const id = 100 + store.posts;
+      store.comments.push({ id, body, user: bot });
+      return { ok: true, status: 201, json: async () => ({ id, body, user: bot }) };
+    }
+    if (method === "PATCH" && /\/comments\/(\d+)$/.test(url)) {
+      store.patches += 1;
+      const id = Number(url.match(/\/comments\/(\d+)$/)[1]);
+      const body = JSON.parse(init.body).body;
+      const idx = store.comments.findIndex((c) => c.id === id);
+      if (idx >= 0) store.comments[idx] = { ...store.comments[idx], id, body };
+      return { ok: true, status: 200, json: async () => ({ id, body }) };
+    }
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+
+  const body1 = buildSummaryMarkdown({ verdict: "GO", exitCode: 0, checks: [], version: "0.9.0" });
+  const u1 = await upsertPrComment({
+    token: "ghs_" + "C".repeat(36),
+    owner: "o",
+    repo: "r",
+    issueNumber: 7,
+    body: body1,
+    actorLogin: bot.login,
+    fetchImpl,
+  });
+  assert.equal(u1.ok, true);
+  assert.equal(u1.action, "created");
+  assert.equal(store.posts, 1);
+  assert.equal(store.patches, 0);
+
+  const body2 = buildSummaryMarkdown({ verdict: "NO-GO", exitCode: 1, checks: [], version: "0.9.0" });
+  const u2 = await upsertPrComment({
+    token: "ghs_" + "C".repeat(36),
+    owner: "o",
+    repo: "r",
+    issueNumber: 7,
+    body: body2,
+    actorLogin: bot.login,
+    fetchImpl,
+  });
+  assert.equal(u2.ok, true);
+  assert.equal(u2.action, "updated");
+  assert.equal(store.posts, 1, "rerun must not create a second comment");
+  assert.equal(store.patches, 1);
+  assert.equal(store.comments.length, 1);
+  assert.ok(store.comments[0].body.includes("NO-GO"));
+  assert.ok(findMarkerComment(store.comments, bot.login));
+
+  // --- page-2 bot marker must update (pagination) ---
+  const store2 = { comments: [], posts: 0, patches: 0 };
+  // Fill page 1 with non-marker noise, put bot marker on page 2
+  for (let i = 0; i < COMMENT_PAGE_SIZE; i++) {
+    store2.comments.push({ id: 1000 + i, body: `noise ${i}`, user: { login: "human", type: "User" } });
+  }
+  const page2Id = 9999;
+  store2.comments.push({
+    id: page2Id,
+    body: PR_SUMMARY_MARKER + "\n### getAdvantage check\n\n**GO**\n",
+    user: bot,
+  });
+  const fetchPage2 = async (url, init = {}) => {
+    const method = (init.method || "GET").toUpperCase();
+    if (method === "GET" && /\/user$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ login: bot.login }) };
+    }
+    if (method === "GET" && /\/comments\?/.test(url)) {
+      const u = new URL(url, "https://api.github.com");
+      const page = Number(u.searchParams.get("page") || "1");
+      const per = Number(u.searchParams.get("per_page") || String(COMMENT_PAGE_SIZE));
+      const start = (page - 1) * per;
+      return { ok: true, status: 200, json: async () => store2.comments.slice(start, start + per) };
+    }
+    if (method === "PATCH" && /\/comments\/(\d+)$/.test(url)) {
+      store2.patches += 1;
+      const id = Number(url.match(/\/comments\/(\d+)$/)[1]);
+      assert.equal(id, page2Id, "must PATCH the page-2 bot marker, not invent a new id");
+      const body = JSON.parse(init.body).body;
+      const idx = store2.comments.findIndex((c) => c.id === id);
+      store2.comments[idx] = { ...store2.comments[idx], body };
+      return { ok: true, status: 200, json: async () => ({ id, body }) };
+    }
+    if (method === "POST") {
+      store2.posts += 1;
+      return { ok: true, status: 201, json: async () => ({ id: 1 }) };
+    }
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+  const uPage2 = await upsertPrComment({
+    token: "ghs_" + "D".repeat(36),
+    owner: "o",
+    repo: "r",
+    issueNumber: 11,
+    body: body2,
+    actorLogin: bot.login,
+    fetchImpl: fetchPage2,
+  });
+  assert.equal(uPage2.ok, true);
+  assert.equal(uPage2.action, "updated");
+  assert.equal(uPage2.id, page2Id);
+  assert.equal(store2.posts, 0, "page-2 marker must not POST a duplicate");
+  assert.equal(store2.patches, 1);
+
+  // --- spoofed user marker must NOT be patched; POST a new bot comment instead ---
+  const store3 = { comments: [], posts: 0, patches: 0, patchedIds: [] };
+  store3.comments.push({
+    id: 42,
+    body: PR_SUMMARY_MARKER + "\nspoofed by human",
+    user: { login: "evil-user", type: "User" },
+  });
+  const fetchSpoof = async (url, init = {}) => {
+    const method = (init.method || "GET").toUpperCase();
+    if (method === "GET" && /\/user$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ login: bot.login }) };
+    }
+    if (method === "GET" && /\/comments\?/.test(url)) {
+      return { ok: true, status: 200, json: async () => store3.comments.slice() };
+    }
+    if (method === "PATCH") {
+      store3.patches += 1;
+      store3.patchedIds.push(Number(url.match(/\/comments\/(\d+)/)[1]));
+      // Spoofed would 403 if we tried — simulate that failure mode
+      return { ok: false, status: 403, json: async () => ({ message: "Resource not accessible by integration" }) };
+    }
+    if (method === "POST" && /\/comments$/.test(url)) {
+      store3.posts += 1;
+      const body = JSON.parse(init.body).body;
+      const id = 77;
+      store3.comments.push({ id, body, user: bot });
+      return { ok: true, status: 201, json: async () => ({ id, body, user: bot }) };
+    }
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+  assert.equal(isBotOwnedMarkerComment(store3.comments[0], bot.login), false);
+  const uSpoof = await upsertPrComment({
+    token: "ghs_" + "E".repeat(36),
+    owner: "o",
+    repo: "r",
+    issueNumber: 12,
+    body: body1,
+    actorLogin: bot.login,
+    fetchImpl: fetchSpoof,
+  });
+  assert.equal(uSpoof.ok, true);
+  assert.equal(uSpoof.action, "created");
+  assert.equal(store3.patches, 0, "must never PATCH a spoofed user marker");
+  assert.equal(store3.posts, 1);
+  assert.equal(uSpoof.id, 77);
+
+  // Missing PR write permission → not ok (caller falls back to job summary)
+  const denied = await upsertPrComment({
+    token: "ghs_" + "F".repeat(36),
+    owner: "o",
+    repo: "r",
+    issueNumber: 9,
+    body: body1,
+    actorLogin: bot.login,
+    fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({ message: "Resource not accessible" }) }),
+  });
+  assert.equal(denied.ok, false);
+  assert.ok(/permission:403/.test(denied.reason));
+
+  // Job summary fallback write
+  const sumBase = freshBase();
+  try {
+    const sumPath = path.join(sumBase, "summary.md");
+    writeFileSync(sumPath, "", "utf8");
+    const wr = writeJobSummary(sumPath, body1);
+    assert.equal(wr.ok, true);
+    assert.ok(readFileSync(sumPath, "utf8").includes(PR_SUMMARY_MARKER));
+  } finally {
+    cleanup(sumBase);
+  }
+});
+
+scenario("action runner: clean GO, secret NO-GO, failed SARIF path, fork-safe summary", async () => {
+  const { runAction } = await import(pathToFileURL(path.join(__dirname, "..", "action", "main.mjs")).href);
+  const actionPath = path.join(__dirname, "..");
+
+  // --- clean GO ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "clean");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-clean","version":"1.0.0"}\n');
+      write(repo, "app.js", "console.log('ok');\n");
+      commitAll(repo, "chore: clean");
+      const outFile = path.join(base, "out-go.txt");
+      const sumFile = path.join(base, "sum-go.md");
+      writeFileSync(outFile, "", "utf8");
+      writeFileSync(sumFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: actionPath,
+            INPUT_SARIF_FILE: "getadvantage.sarif",
+            INPUT_COMMENT: "true",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_STEP_SUMMARY: sumFile,
+            GITHUB_EVENT_NAME: "push",
+            GITHUB_REPOSITORY: "BellmeJoe/getadvantage-cli",
+            GITHUB_RUN_ID: "1",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 0, "clean GO must exit 0");
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=GO/.test(outs), outs);
+        assert.ok(/sarif-written=true/.test(outs), outs);
+        assert.ok(/sarif-upload-eligible=true/.test(outs), outs);
+        assert.ok(/summary-mode=job-summary/.test(outs), outs);
+        assert.ok(existsSync(path.join(repo, "getadvantage.sarif")));
+        assert.ok(readFileSync(sumFile, "utf8").includes("GO"));
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- secret NO-GO (injected local fetch — never contacts api.github.com) ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "nogo");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-nogo","version":"1.0.0"}\n');
+      const secret = "sk_live_" + "ACTIONRUNNERSECRET00000001";
+      write(repo, "leak.js", `export const k="${secret}";\n`);
+      commitAll(repo, "chore: secret");
+      const outFile = path.join(base, "out-nogo.txt");
+      const sumFile = path.join(base, "sum-nogo.md");
+      writeFileSync(outFile, "", "utf8");
+      writeFileSync(sumFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      const fetchHits = [];
+      const localFetch = async (url) => {
+        fetchHits.push(String(url));
+        // Deny PR write → job-summary fallback; never hits the network.
+        return { ok: false, status: 403, json: async () => ({ message: "Resource not accessible" }) };
+      };
+      try {
+        const code = await runAction(
+          {
+            ...buildEnv({
+              GETADVANTAGE_ACTION_PATH: actionPath,
+              INPUT_SARIF_FILE: "getadvantage.sarif",
+              INPUT_COMMENT: "true",
+              INPUT_REPORT: "false",
+              GITHUB_OUTPUT: outFile,
+              GITHUB_STEP_SUMMARY: sumFile,
+              GITHUB_EVENT_NAME: "pull_request",
+              GITHUB_REPOSITORY: "BellmeJoe/getadvantage-cli",
+              GITHUB_REF: "refs/pull/42/merge",
+              GITHUB_RUN_ID: "2",
+              GITHUB_TOKEN: "ghs_" + "notarealtokenfortests0001",
+              GETADVANTAGE_WORKSPACE: repo,
+            }),
+          },
+          { fetchImpl: localFetch },
+        );
+        assert.equal(code, 1, "secret NO-GO must exit 1");
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=NO-GO/.test(outs), outs);
+        assert.ok(!/verdict=GO/.test(outs));
+        assert.ok(/summary-mode=job-summary/.test(outs), outs);
+        const sum = readFileSync(sumFile, "utf8");
+        assert.ok(!sum.includes(secret), "job summary must not contain fixture secret");
+        assert.ok(existsSync(path.join(repo, "getadvantage.sarif")));
+        const sarifRaw = readFileSync(path.join(repo, "getadvantage.sarif"), "utf8");
+        assert.ok(!sarifRaw.includes(secret));
+        // Attribution nonce must be bound into this run's SARIF.
+        assert.ok(/getadvantage\/runNonce/.test(sarifRaw), "trusted CLI must bind run nonce");
+        // All comment fetches go through the injected mock (no production network).
+        assert.ok(fetchHits.length >= 1, "PR path must use injected fetchImpl");
+        assert.ok(fetchHits.every((u) => typeof u === "string"));
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- failed SARIF write path (directory as file) → ERROR / non-zero, not GO ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "badsarif");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-bad","version":"1.0.0"}\n');
+      write(repo, "app.js", "console.log(1);\n");
+      commitAll(repo, "chore: clean");
+      const badDir = path.join(repo, "not-a-file-dir");
+      mkdirSync(badDir, { recursive: true });
+      const outFile = path.join(base, "out-bad.txt");
+      writeFileSync(outFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: actionPath,
+            INPUT_SARIF_FILE: "not-a-file-dir",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_EVENT_NAME: "push",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 1, "failed SARIF write must not be GO");
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=(NO-GO|ERROR)/.test(outs), outs);
+        assert.ok(!/verdict=GO\n/.test(outs) && !/verdict=GO$/.test(outs.trim()), outs);
+        assert.ok(/sarif-written=false/.test(outs), outs);
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- fork-safe: no token + pull_request → job summary, never pretends PR write ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "fork");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-fork","version":"1.0.0"}\n');
+      write(repo, "app.js", "console.log(1);\n");
+      commitAll(repo, "chore: clean");
+      const outFile = path.join(base, "out-fork.txt");
+      const sumFile = path.join(base, "sum-fork.md");
+      writeFileSync(outFile, "", "utf8");
+      writeFileSync(sumFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: actionPath,
+            INPUT_SARIF_FILE: "getadvantage.sarif",
+            INPUT_COMMENT: "true",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_STEP_SUMMARY: sumFile,
+            GITHUB_EVENT_NAME: "pull_request",
+            GITHUB_REPOSITORY: "upstream/proj",
+            GITHUB_REF: "refs/pull/3/merge",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 0);
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/summary-mode=job-summary/.test(outs), outs);
+        assert.ok(!/summary-mode=pr-comment/.test(outs));
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+});
+
+scenario("action repair: credential scrub, output injection, stale SARIF, hostile tsc", async () => {
+  const {
+    runAction,
+    validateSarifInputPath,
+    buildCliChildEnv,
+    setOutput,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "action", "main.mjs")).href);
+  const { decideJobOutcome } = await import(
+    pathToFileURL(path.join(__dirname, "..", "action", "enforce.mjs")).href
+  );
+  const { scrubCredentialEnv, isCredentialEnvKey } = await import(
+    pathToFileURL(path.join(__dirname, "..", "util.mjs")).href
+  );
+  const actionPath = path.join(__dirname, "..");
+
+  // --- P2 exact state: gate=GO/success + upload=failure → required check fails ---
+  {
+    const goUploadFail = decideJobOutcome({
+      verdict: "GO",
+      gateOutcome: "success",
+      sarifWritten: true,
+      uploadSkip: false,
+      uploadEligible: true,
+      uploadOutcome: "failure",
+    });
+    assert.equal(goUploadFail.exitCode, 1, "GO + upload failure must not be green");
+    assert.equal(goUploadFail.reason, "sarif-upload-failed");
+
+    const goUploadOk = decideJobOutcome({
+      verdict: "GO",
+      gateOutcome: "success",
+      sarifWritten: true,
+      uploadSkip: false,
+      uploadEligible: true,
+      uploadOutcome: "success",
+    });
+    assert.equal(goUploadOk.exitCode, 0);
+
+    const goForkSkip = decideJobOutcome({
+      verdict: "GO",
+      gateOutcome: "success",
+      sarifWritten: true,
+      uploadSkip: true,
+      uploadEligible: false,
+      uploadOutcome: "skipped",
+    });
+    assert.equal(goForkSkip.exitCode, 0, "explicit fork skip may stay green on GO");
+
+    // P1: eligible upload with outcome=skipped must be red (not a fork skip).
+    const eligibleSkipped = decideJobOutcome({
+      verdict: "GO",
+      gateOutcome: "success",
+      sarifWritten: true,
+      uploadSkip: false,
+      uploadEligible: true,
+      uploadOutcome: "skipped",
+    });
+    assert.equal(eligibleSkipped.exitCode, 1, "eligible+skipped must not be green");
+    assert.equal(eligibleSkipped.reason, "sarif-upload-skipped-eligible");
+
+    const nogoUploadOk = decideJobOutcome({
+      verdict: "NO-GO",
+      gateOutcome: "failure",
+      sarifWritten: true,
+      uploadSkip: false,
+      uploadEligible: true,
+      uploadOutcome: "success",
+    });
+    assert.equal(nogoUploadOk.exitCode, 1, "NO-GO stays red even if upload succeeded");
+  }
+
+  // --- unit: scrub removes GitHub / OIDC / npm / getAdvantage credentials ---
+  const dirty = {
+    PATH: process.env.PATH || "",
+    GITHUB_TOKEN: "ghs_" + "SCRUBME".repeat(6),
+    GH_TOKEN: "ghp_" + "SCRUBME".repeat(5),
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc-secret-token-value-xx",
+    ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+    ACTIONS_RUNTIME_TOKEN: "runtime-token-value-xx",
+    GETADVANTAGE_API_KEY: "adv_live_" + "scrubme00000001",
+    GETADVANTAGE_REPORT: "1",
+    NPM_TOKEN: "npm_" + "scrubtoken00000001",
+    NODE_AUTH_TOKEN: "npm_" + "scrubtoken00000002",
+    MY_CUSTOM_SECRET: "should-go",
+    SAFE_FLAG: "keep-me",
+  };
+  const scrubbed = scrubCredentialEnv(dirty);
+  assert.equal(scrubbed.SAFE_FLAG, "keep-me");
+  assert.ok(scrubbed.PATH);
+  for (const k of [
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "ACTIONS_RUNTIME_TOKEN",
+    "GETADVANTAGE_API_KEY",
+    "GETADVANTAGE_REPORT",
+    "NPM_TOKEN",
+    "NODE_AUTH_TOKEN",
+    "MY_CUSTOM_SECRET",
+  ]) {
+    assert.equal(scrubbed[k], undefined, `scrub must drop ${k}`);
+    assert.equal(isCredentialEnvKey(k) || k === "MY_CUSTOM_SECRET", true);
+  }
+  const cliEnv = buildCliChildEnv(
+    { ...dirty, GETADVANTAGE_API_KEY: dirty.GETADVANTAGE_API_KEY },
+    { wantReport: false },
+  );
+  assert.equal(cliEnv.GITHUB_TOKEN, undefined);
+  assert.equal(cliEnv.GETADVANTAGE_API_KEY, undefined);
+  const cliReport = buildCliChildEnv(dirty, { wantReport: true });
+  assert.equal(cliReport.GITHUB_TOKEN, undefined);
+  assert.equal(cliReport.GETADVANTAGE_API_KEY, dirty.GETADVANTAGE_API_KEY);
+  assert.equal(cliReport.ACTIONS_ID_TOKEN_REQUEST_TOKEN, undefined);
+
+  // --- unit: SARIF path validation + GITHUB_OUTPUT injection rejection ---
+  const ws = path.join(freshBase(), "ws");
+  mkdirSync(ws, { recursive: true });
+  try {
+    assert.equal(validateSarifInputPath("getadvantage.sarif", ws, ws).ok, true);
+    assert.equal(validateSarifInputPath("out/dir/x.sarif", ws, ws).ok, true);
+    assert.equal(validateSarifInputPath("evil\ninjected=1", ws, ws).ok, false);
+    assert.equal(validateSarifInputPath("evil\rinjected=1", ws, ws).ok, false);
+    assert.equal(validateSarifInputPath("a\u0000b.sarif", ws, ws).ok, false);
+    assert.equal(validateSarifInputPath("../outside.sarif", ws, ws).ok, false);
+    assert.equal(validateSarifInputPath("/tmp/abs.sarif", ws, ws).ok, false);
+    assert.equal(validateSarifInputPath("C:\\abs\\x.sarif", ws, ws).ok, false);
+
+    const outFile = path.join(ws, "github-output.txt");
+    writeFileSync(outFile, "", "utf8");
+    const envOut = { GITHUB_OUTPUT: outFile };
+    setOutput("verdict", "GO", envOut);
+    setOutput("sarif-path", "getadvantage.sarif", envOut);
+    // Hostile: newline would create a second key if not rejected
+    setOutput("sarif-path", "evil.sarif\ninjected-key=pwned", envOut);
+    const rawOut = readFileSync(outFile, "utf8");
+    assert.ok(/verdict=GO/.test(rawOut));
+    assert.ok(!/injected-key=pwned/.test(rawOut), `must not allow output-key injection:\n${rawOut}`);
+    assert.ok(!/^injected-key=/m.test(rawOut));
+  } finally {
+    cleanup(path.dirname(ws));
+  }
+
+  // --- hostile compiler: local tsc must not see credentials ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "hostile-tsc");
+      initRepo(repo);
+      write(
+        repo,
+        "package.json",
+        JSON.stringify(
+          {
+            name: "hostile-tsc",
+            version: "1.0.0",
+            devDependencies: { typescript: "5.0.0" },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      write(repo, "tsconfig.json", '{"compilerOptions":{"strict":true},"include":["*.ts"]}\n');
+      write(repo, "index.ts", "export const x: number = 1;\n");
+      // Synthetic local typescript bin that attempts to exfiltrate credentials
+      const tscDir = path.join(repo, "node_modules", "typescript", "bin");
+      mkdirSync(tscDir, { recursive: true });
+      const canaries = {
+        GITHUB_TOKEN: "ghs_" + "HOSTILETSCTOKEN00000000001",
+        GETADVANTAGE_API_KEY: "adv_live_" + "hostiletsc000001",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc_hostile_tsc_token_xx",
+        NPM_TOKEN: "npm_" + "hostiletsc00000000001",
+        NODE_AUTH_TOKEN: "npm_" + "hostiletsc00000000002",
+      };
+      write(
+        repo,
+        path.join("node_modules", "typescript", "bin", "tsc"),
+        `#!/usr/bin/env node
+const keys = ${JSON.stringify(Object.keys(canaries))};
+const found = [];
+for (const k of keys) {
+  if (process.env[k]) found.push(k + "=" + process.env[k]);
+}
+if (found.length) {
+  console.error("HOSTILE_TSC_LEAK:" + found.join("|"));
+  process.exit(2);
+}
+console.log("hostile-tsc: clean env");
+process.exit(0);
+`,
+      );
+      commitAll(repo, "chore: hostile tsc fixture");
+
+      // Direct gate under a credential-laden parent env (simulates Action shell)
+      const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo, {
+        GITHUB_TOKEN: canaries.GITHUB_TOKEN,
+        GETADVANTAGE_API_KEY: canaries.GETADVANTAGE_API_KEY,
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: canaries.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+        NPM_TOKEN: canaries.NPM_TOKEN,
+        NODE_AUTH_TOKEN: canaries.NODE_AUTH_TOKEN,
+        INPUT_REPORT: "false",
+      });
+      const blob = r.stdout + r.stderr;
+      assert.ok(!blob.includes("HOSTILE_TSC_LEAK"), `tsc must not see credentials:\n${blob.slice(0, 800)}`);
+      for (const v of Object.values(canaries)) {
+        assert.ok(!blob.includes(v), `credential value must not appear in gate output: ${v.slice(0, 12)}…`);
+      }
+      // Typecheck should pass (our synthetic tsc exits 0 with clean env)
+      const doc = JSON.parse(r.stdout.trim().includes("{") ? r.stdout.trim().slice(r.stdout.indexOf("{")) : "{}");
+      // Parse JSON doc if present
+      let parsed = null;
+      try {
+        parsed = JSON.parse(r.stdout.trim());
+      } catch {
+        const s = r.stdout.indexOf("{");
+        const e = r.stdout.lastIndexOf("}");
+        if (s >= 0 && e > s) parsed = JSON.parse(r.stdout.slice(s, e + 1));
+      }
+      assert.ok(parsed, "expected JSON gate document");
+      const tc = (parsed.checks || []).find((c) => /typecheck/i.test(c.label || ""));
+      assert.ok(tc, "typecheck check should run");
+      assert.equal(tc.status, "pass", `typecheck should pass with scrubbed env: ${JSON.stringify(tc)}`);
+
+      // Action path: parent has tokens; child CLI + tsc must not leak them
+      const outFile = path.join(base, "out-tsc.txt");
+      const sumFile = path.join(base, "sum-tsc.md");
+      writeFileSync(outFile, "", "utf8");
+      writeFileSync(sumFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: actionPath,
+            INPUT_SARIF_FILE: "getadvantage.sarif",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_STEP_SUMMARY: sumFile,
+            GITHUB_EVENT_NAME: "push",
+            GITHUB_TOKEN: canaries.GITHUB_TOKEN,
+            GETADVANTAGE_API_KEY: canaries.GETADVANTAGE_API_KEY,
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN: canaries.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+            NPM_TOKEN: canaries.NPM_TOKEN,
+            NODE_AUTH_TOKEN: canaries.NODE_AUTH_TOKEN,
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        const outs = readFileSync(outFile, "utf8");
+        const sum = readFileSync(sumFile, "utf8");
+        const all = outs + sum + String(code);
+        assert.ok(!all.includes("HOSTILE_TSC_LEAK"));
+        for (const v of Object.values(canaries)) {
+          assert.ok(!outs.includes(v), "GITHUB_OUTPUT must not contain credential");
+          assert.ok(!sum.includes(v), "summary must not contain credential");
+        }
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- newline / control SARIF path rejected by Action (not GO, no injection) ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "inject");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-inject","version":"1.0.0"}\n');
+      write(repo, "app.js", "console.log(1);\n");
+      commitAll(repo, "chore: clean");
+      const outFile = path.join(base, "out-inject.txt");
+      writeFileSync(outFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: actionPath,
+            INPUT_SARIF_FILE: "evil.sarif\ninjected=pwned",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_EVENT_NAME: "push",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 1);
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=ERROR/.test(outs), outs);
+        assert.ok(!/injected=pwned/.test(outs), outs);
+        assert.ok(/sarif-written=false/.test(outs), outs);
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- stale pre-existing SARIF + fatal gate must not set sarif-written=true ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "stale");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-stale","version":"1.0.0"}\n');
+      // Directory-as-path is invalid; instead: pre-write SARIF, then make gate fail
+      // before rewrite by using a path that cannot be written (parent is a file).
+      // Simpler: pre-write SARIF, then point INPUT at a name whose write fails by
+      // using a secret so gate is NO-GO — but CLI still rewrites SARIF on NO-GO.
+      // True stale path: pre-existing file + INPUT path that resolves to a directory
+      // is already covered. For unchanged file: use a SARIF path that the CLI cannot
+      // overwrite because we make the path a directory after... no.
+      // Approach: pre-write getadvantage.sarif, then run with INPUT_SARIF_FILE that
+      // is valid but we monkey-patch by making the parent of a nested path a file.
+      // Cleanest proof: call runAction after placing a SARIF file and forcing CLI
+      // to fail before write by using an invalid nested path under a file node.
+      write(repo, "blocker", "not-a-dir");
+      write(repo, "getadvantage.sarif", '{"version":"2.1.0","runs":[],"stale":true}\n');
+      // Also commit a secret so even if write worked we'd be NO-GO — but write to
+      // blocker/nested.sarif fails because blocker is a file.
+      write(repo, "leak.js", 'export const k="sk_live_STALESARIFSECRET00000001";\n');
+      commitAll(repo, "chore: stale fixture");
+      // Force mtime stability: re-stat after a tiny delay is flaky; instead compare
+      // that when CLI cannot write to the requested path, pre-existing sibling is
+      // not claimed. Use INPUT path = getadvantage.sarif but delete write by making
+      // the path a directory after snapshot... actually main snapshots then runs CLI
+      // which overwrites. To keep file unchanged: make path a directory so write fails.
+      rmSync(path.join(repo, "getadvantage.sarif"));
+      mkdirSync(path.join(repo, "getadvantage.sarif"), { recursive: true });
+      // Wait — directory means isRegularFile false, so sarif-written=false always.
+      // Real case from review: pre-existing *file* unchanged. CLI write must no-op.
+      // Simulate: snapshot pre file; spawn a CLI that does not write by using
+      // --sarif path the CLI rejects... empty is invalid. Use directory path again.
+      //
+      // Better approach: write stale file, run Action with INPUT_SARIF_FILE that
+      // validates but CLI writes elsewhere? No.
+      // Use util: after failed write, file unchanged → isCurrentSarifWrite false.
+      // Implement by pointing at a read-only location — on Windows chmod is weak.
+      //
+      // Practical non-circular test: import is not enough — run with pre-existing
+      // file and a broken CLI entry? Too heavy.
+      //
+      // Use nested path where parent does not exist and we replace writeFile with
+      // failure by targeting a path containing a file component:
+      //   stale.sarif exists as file content; we request "stale.sarif" but the gate
+      //   process is the real CLI which WILL rewrite it.
+      //
+      // Force real CLI not to write: only happens on path error. So:
+      rmSync(path.join(repo, "getadvantage.sarif"), { recursive: true, force: true });
+      write(repo, "stale.sarif", '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"stale"}}}],"x":"STALE_MARKER"}\n');
+      // Freeze mtime by writing then using INPUT that fails validation... no.
+      // Direct unit of isCurrentSarifWrite via public runAction behavior:
+      // spawn with GETADVANTAGE_ACTION_PATH pointing to a fake CLI that exits NO-GO
+      // without writing SARIF.
+      const fakeActionRoot = path.join(base, "fake-action");
+      mkdirSync(fakeActionRoot, { recursive: true });
+      writeFileSync(
+        path.join(fakeActionRoot, "index.mjs"),
+        `#!/usr/bin/env node
+// Fake CLI: print NO-GO JSON, do not write SARIF.
+console.log(JSON.stringify({
+  verdict: "NO-GO",
+  exitCode: 1,
+  checks: [{ status: "fail", label: "Fatal gate", detail: "boom" }],
+}));
+process.exit(1);
+`,
+        "utf8",
+      );
+      // Copy util dependency for cliVersion — runAction imports from parent util via
+      // action/main which uses GETADVANTAGE_ACTION_PATH only for index.mjs.
+      const outFile = path.join(base, "out-stale.txt");
+      writeFileSync(outFile, "", "utf8");
+      // Place stale SARIF in the real repo; Action uses fake CLI that never rewrites it
+      write(repo, "stale.sarif", '{"version":"2.1.0","runs":[],"STALE_MARKER":true}\n');
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: fakeActionRoot,
+            INPUT_SARIF_FILE: "stale.sarif",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_EVENT_NAME: "push",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 1);
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=NO-GO/.test(outs), outs);
+        assert.ok(/sarif-written=false/.test(outs), `stale file must not count as written:\n${outs}`);
+        assert.ok(/sarif-upload-eligible=false/.test(outs), outs);
+        assert.ok(/sarif-path=$/m.test(outs) || /sarif-path=\s*$/m.test(outs), outs);
+        assert.ok(readFileSync(path.join(repo, "stale.sarif"), "utf8").includes("STALE_MARKER"));
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+});
+
+scenario("action enforce: GO+upload failure fails; NO-GO+upload success fails; fork skip allows GO", async () => {
+  const { decideJobOutcome, shouldSkipSarifUploadForFork, runEnforceFromEnv } = await import(
+    pathToFileURL(path.join(__dirname, "..", "action", "enforce.mjs")).href
+  );
+
+  // gate GO + upload failure → never green
+  const goUploadFail = decideJobOutcome({
+    verdict: "GO",
+    gateOutcome: "success",
+    sarifWritten: "true",
+    uploadSkip: "false",
+    uploadOutcome: "failure",
+  });
+  assert.equal(goUploadFail.exitCode, 1);
+  assert.equal(goUploadFail.reason, "sarif-upload-failed");
+
+  // gate NO-GO + upload success → still fail required check
+  const nogoUploadOk = decideJobOutcome({
+    verdict: "NO-GO",
+    gateOutcome: "failure",
+    sarifWritten: "true",
+    uploadSkip: "false",
+    uploadOutcome: "success",
+  });
+  assert.equal(nogoUploadOk.exitCode, 1);
+  assert.ok(nogoUploadOk.reason === "NO-GO" || nogoUploadOk.exitCode === 1);
+
+  // fork skip + GO + gate success → green (honest non-attempt)
+  const forkGo = decideJobOutcome({
+    verdict: "GO",
+    gateOutcome: "success",
+    sarifWritten: "true",
+    uploadSkip: "true",
+    uploadOutcome: "skipped",
+  });
+  assert.equal(forkGo.exitCode, 0);
+  assert.equal(forkGo.reason, "go-upload-skipped-fork");
+
+  // GO + upload success → green
+  const goOk = decideJobOutcome({
+    verdict: "GO",
+    gateOutcome: "success",
+    sarifWritten: "true",
+    uploadSkip: "false",
+    uploadOutcome: "success",
+  });
+  assert.equal(goOk.exitCode, 0);
+
+  // Behavioral: eligible + skipped → red (only success is acceptable when eligible)
+  const eligibleSkipped = decideJobOutcome({
+    verdict: "GO",
+    gateOutcome: "success",
+    sarifWritten: "true",
+    uploadSkip: "false",
+    uploadOutcome: "skipped",
+  });
+  assert.equal(eligibleSkipped.exitCode, 1);
+  assert.equal(eligibleSkipped.reason, "sarif-upload-skipped-eligible");
+  const envSkipped = runEnforceFromEnv({
+    GETADVANTAGE_VERDICT: "GO",
+    GETADVANTAGE_GATE_OUTCOME: "success",
+    GETADVANTAGE_SARIF_WRITTEN: "true",
+    GETADVANTAGE_UPLOAD_SKIP: "false",
+    GETADVANTAGE_UPLOAD_OUTCOME: "skipped",
+  });
+  assert.equal(envSkipped, 1, "CLI enforce: eligible+skipped must exit 1");
+
+  // Fork detection
+  assert.equal(
+    shouldSkipSarifUploadForFork({
+      eventName: "pull_request",
+      isFork: "true",
+      headRepo: "forker/proj",
+      baseRepo: "upstream/proj",
+    }).skip,
+    true,
+  );
+  assert.equal(
+    shouldSkipSarifUploadForFork({
+      eventName: "pull_request",
+      isFork: "false",
+      headRepo: "upstream/proj",
+      baseRepo: "upstream/proj",
+    }).skip,
+    false,
+  );
+  assert.equal(
+    shouldSkipSarifUploadForFork({
+      eventName: "push",
+      isFork: "true",
+      headRepo: "a/b",
+      baseRepo: "c/d",
+    }).skip,
+    false,
+  );
+
+  // Cold enforce CLI: upload-decide writes skip + job summary note
+  const base = freshBase();
+  try {
+    const outFile = path.join(base, "out.txt");
+    const sumFile = path.join(base, "sum.md");
+    writeFileSync(outFile, "", "utf8");
+    writeFileSync(sumFile, "", "utf8");
+    const code = runEnforceFromEnv({
+      GETADVANTAGE_ENFORCE_MODE: "upload-decide",
+      GITHUB_EVENT_NAME: "pull_request",
+      GETADVANTAGE_PR_IS_FORK: "true",
+      GETADVANTAGE_PR_HEAD_REPO: "forker/x",
+      GITHUB_REPOSITORY: "upstream/x",
+      GITHUB_OUTPUT: outFile,
+      GITHUB_STEP_SUMMARY: sumFile,
+    });
+    assert.equal(code, 0);
+    const outs = readFileSync(outFile, "utf8");
+    assert.ok(/skip=true/.test(outs), outs);
+    assert.ok(/reason=fork-pr/.test(outs), outs);
+    const sum = readFileSync(sumFile, "utf8");
+    assert.ok(/Skipped: fork/i.test(sum), sum);
+    assert.ok(!/upload succeeded/i.test(sum));
+
+    // Cold: GO + upload failure via env CLI
+    const failCode = runEnforceFromEnv({
+      GETADVANTAGE_VERDICT: "GO",
+      GETADVANTAGE_GATE_OUTCOME: "success",
+      GETADVANTAGE_SARIF_WRITTEN: "true",
+      GETADVANTAGE_UPLOAD_SKIP: "false",
+      GETADVANTAGE_UPLOAD_OUTCOME: "failure",
+    });
+    assert.equal(failCode, 1);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("action repair pass-2: pull_request_target refuse, SARIF digest, actor ownership, page cap, release contract", async () => {
+  const {
+    runAction,
+    fileSnapshot,
+    isCurrentSarifWrite,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "action", "main.mjs")).href);
+  const {
+    PR_SUMMARY_MARKER,
+    buildSummaryMarkdown,
+    isBotOwnedMarkerComment,
+    isVerifiedBotLogin,
+    upsertPrComment,
+    COMMENT_PAGE_SIZE,
+    COMMENT_PAGE_CAP,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "action", "summary.mjs")).href);
+  const {
+    planActionRelease,
+    parsePackageVersion,
+    exactTagName,
+    actionMajorTagForVersion,
+    validatePublishWorkflowContract,
+    ACTION_MAJOR_TAG,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "ops", "action-release.mjs")).href);
+  const actionPath = path.join(__dirname, "..");
+
+  // --- 1. Hard-refuse pull_request_target: no child CLI, no SARIF claim, exit 1 ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "prt");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"act-prt","version":"1.0.0"}\n');
+      write(repo, "app.js", "console.log(1);\n");
+      commitAll(repo, "chore: clean");
+      // Pre-existing SARIF must not be claimed as written this run.
+      write(
+        repo,
+        "getadvantage.sarif",
+        JSON.stringify({ version: "2.1.0", runs: [{ tool: { driver: { name: "stale" } } }] }) + "\n",
+      );
+      const fakeActionRoot = path.join(base, "fake-cli-must-not-run");
+      mkdirSync(fakeActionRoot, { recursive: true });
+      const ranFlag = path.join(base, "child-ran.txt");
+      writeFileSync(
+        path.join(fakeActionRoot, "index.mjs"),
+        `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(ranFlag)}, "RAN", "utf8");
+console.log(JSON.stringify({ verdict: "GO", exitCode: 0, checks: [] }));
+process.exit(0);
+`,
+        "utf8",
+      );
+      const outFile = path.join(base, "out-prt.txt");
+      const sumFile = path.join(base, "sum-prt.md");
+      writeFileSync(outFile, "", "utf8");
+      writeFileSync(sumFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: fakeActionRoot,
+            INPUT_SARIF_FILE: "getadvantage.sarif",
+            INPUT_COMMENT: "true",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_STEP_SUMMARY: sumFile,
+            GITHUB_EVENT_NAME: "pull_request_target",
+            GITHUB_REPOSITORY: "BellmeJoe/getadvantage-cli",
+            GITHUB_REF: "refs/pull/99/merge",
+            GITHUB_TOKEN: "ghs_" + "MUSTNOTUSE000000000000001",
+            GITHUB_ACTOR: "attacker",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 1, "pull_request_target must exit 1");
+        assert.ok(!existsSync(ranFlag), "must not spawn the CLI child on pull_request_target");
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/verdict=ERROR/.test(outs), outs);
+        assert.ok(/exit-code=1/.test(outs), outs);
+        assert.ok(/sarif-written=false/.test(outs), outs);
+        assert.ok(/sarif-upload-eligible=false/.test(outs), outs);
+        assert.ok(/summary-mode=none/.test(outs), outs);
+        assert.ok(/sarif-path=$/m.test(outs) || /sarif-path=\s*$/m.test(outs), outs);
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- 2. SARIF content identity: same-size rewrite + preserved mtime ---
+  {
+    const base = freshBase();
+    try {
+      const p = path.join(base, "same-size.sarif");
+      // Two valid SARIF docs, identical byte length, different content.
+      const a =
+        '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"AAAA"}}}]}\n';
+      const b =
+        '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"BBBB"}}}]}\n';
+      assert.equal(a.length, b.length, "fixture must be same size");
+      writeFileSync(p, a, "utf8");
+      const before = fileSnapshot(p);
+      assert.ok(before && before.sha256);
+      // Preserve mtime after rewrite (simulates mtime collision / touch -r).
+      // Platforms may truncate sub-ms precision; digest must still prove the change.
+      writeFileSync(p, b, "utf8");
+      const past = new Date(Math.floor(before.mtimeMs));
+      utimesSync(p, past, past);
+      const afterSnap = fileSnapshot(p);
+      assert.equal(afterSnap.size, before.size, "same-size rewrite fixture");
+      // mtime intentionally restored to (approx) the pre value — size alone cannot distinguish.
+      assert.ok(
+        Math.abs(afterSnap.mtimeMs - before.mtimeMs) < 2000,
+        `mtime should be restored near pre value (got ${afterSnap.mtimeMs} vs ${before.mtimeMs})`,
+      );
+      assert.notEqual(afterSnap.sha256, before.sha256, "content digest must change");
+      assert.equal(isCurrentSarifWrite(p, before), true, "digest change must count as current write");
+
+      // Unchanged content → not a current write (stale must never upload).
+      writeFileSync(p, a, "utf8");
+      const staleBefore = fileSnapshot(p);
+      // "Rewrite" identical bytes (size+mtime may look current; digest is identical).
+      writeFileSync(p, a, "utf8");
+      utimesSync(p, new Date(Math.floor(staleBefore.mtimeMs)), new Date(Math.floor(staleBefore.mtimeMs)));
+      assert.equal(isCurrentSarifWrite(p, staleBefore), false, "identical content must not be claimed as written");
+
+      // Invalid SARIF (wrong version) never counts even if new.
+      const bad = path.join(base, "bad.sarif");
+      writeFileSync(bad, '{"version":"1.0.0","runs":[]}\n', "utf8");
+      assert.equal(isCurrentSarifWrite(bad, null), false);
+      // Missing runs array
+      writeFileSync(bad, '{"version":"2.1.0"}\n', "utf8");
+      assert.equal(isCurrentSarifWrite(bad, null), false);
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // Stale via runAction + fake CLI that rewrites same-size different content vs unchanged
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "digest-stale");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"digest-stale","version":"1.0.0"}\n');
+      // Pre-existing valid SARIF — fake CLI never rewrites it.
+      const staleBody =
+        '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"STALE"}}}]}\n';
+      write(repo, "out.sarif", staleBody);
+      const fakeRoot = path.join(base, "fake-no-write");
+      mkdirSync(fakeRoot, { recursive: true });
+      writeFileSync(
+        path.join(fakeRoot, "index.mjs"),
+        `console.log(JSON.stringify({verdict:"NO-GO",exitCode:1,checks:[]})); process.exit(1);\n`,
+        "utf8",
+      );
+      const outFile = path.join(base, "out-digest.txt");
+      writeFileSync(outFile, "", "utf8");
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const code = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: fakeRoot,
+            INPUT_SARIF_FILE: "out.sarif",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: outFile,
+            GITHUB_EVENT_NAME: "push",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        assert.equal(code, 1);
+        const outs = readFileSync(outFile, "utf8");
+        assert.ok(/sarif-written=false/.test(outs), outs);
+        assert.ok(/sarif-upload-eligible=false/.test(outs), outs);
+      } finally {
+        process.chdir(prev);
+      }
+
+      // Same-size content replace by fake CLI → must set sarif-written=true
+      // when the trusted nonce is bound (Action parent passes GETADVANTAGE_SARIF_RUN_NONCE).
+      const sameA =
+        '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"OLDX"}},"properties":{"getadvantage/runNonce":"stale"}}]}\n';
+      write(repo, "swap.sarif", sameA);
+      const fakeWrite = path.join(base, "fake-write");
+      mkdirSync(fakeWrite, { recursive: true });
+      writeFileSync(
+        path.join(fakeWrite, "index.mjs"),
+        `import { writeFileSync } from "node:fs";
+const nonce = process.env.GETADVANTAGE_SARIF_RUN_NONCE || "";
+const body =
+  JSON.stringify({
+    version: "2.1.0",
+    runs: [{
+      tool: { driver: { name: "NEWY" } },
+      properties: { "getadvantage/runNonce": nonce },
+    }],
+  }) + "\\n";
+// Content digest + nonce prove this run; mtime may collide.
+writeFileSync("swap.sarif", body);
+console.log(JSON.stringify({verdict:"GO",exitCode:0,checks:[]}));
+process.exit(0);
+`,
+        "utf8",
+      );
+      const out2 = path.join(base, "out-swap.txt");
+      writeFileSync(out2, "", "utf8");
+      process.chdir(repo);
+      try {
+        // Freeze mtime of pre-file so only digest proves the change after write.
+        const prePath = path.join(repo, "swap.sarif");
+        const frozen = new Date("2020-01-01T00:00:00Z");
+        utimesSync(prePath, frozen, frozen);
+        const code2 = await runAction({
+          ...buildEnv({
+            GETADVANTAGE_ACTION_PATH: fakeWrite,
+            INPUT_SARIF_FILE: "swap.sarif",
+            INPUT_COMMENT: "false",
+            INPUT_REPORT: "false",
+            GITHUB_OUTPUT: out2,
+            GITHUB_EVENT_NAME: "push",
+            GETADVANTAGE_WORKSPACE: repo,
+          }),
+        });
+        // After write, restore mtime to frozen so size+mtime would match pre if
+        // content were ignored — but content changed so digest must win.
+        utimesSync(prePath, frozen, frozen);
+        // Unit path: digest change without nonce still counts when expectedNonce omitted.
+        const unitA =
+          '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"AAAA"}}}]}\n';
+        const unitB =
+          '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"BBBB"}}}]}\n';
+        assert.equal(unitA.length, unitB.length);
+        writeFileSync(prePath, unitA, "utf8");
+        utimesSync(prePath, frozen, frozen);
+        const snapA = fileSnapshot(prePath);
+        writeFileSync(prePath, unitB, "utf8");
+        utimesSync(prePath, frozen, frozen);
+        assert.equal(isCurrentSarifWrite(prePath, snapA), true);
+        // With expectedNonce, missing/wrong nonce must not count even if content changed.
+        assert.equal(isCurrentSarifWrite(prePath, snapA, { expectedNonce: "need-me" }), false);
+        writeFileSync(
+          prePath,
+          JSON.stringify({
+            version: "2.1.0",
+            runs: [{ tool: { driver: { name: "BBBB" } }, properties: { "getadvantage/runNonce": "need-me" } }],
+          }) + "\n",
+          "utf8",
+        );
+        assert.equal(isCurrentSarifWrite(prePath, snapA, { expectedNonce: "need-me" }), true);
+        const outs2 = readFileSync(out2, "utf8");
+        // The runAction path saw a real content change with bound nonce.
+        assert.ok(/sarif-written=true/.test(outs2), outs2);
+        assert.equal(code2, 0);
+      } finally {
+        process.chdir(prev);
+      }
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- 3. Human actor + unrelated bot markers must never be PATCHed; authenticated bot on page 2 is ---
+  {
+    assert.equal(isVerifiedBotLogin("attacker"), false);
+    assert.equal(isVerifiedBotLogin("github-actions[bot]"), true);
+    assert.equal(isVerifiedBotLogin("my-app[bot]"), false, "arbitrary [bot] is not a verified Actions login");
+    assert.equal(
+      isBotOwnedMarkerComment(
+        { id: 1, body: PR_SUMMARY_MARKER + "\nhijack", user: { login: "attacker", type: "User" } },
+        "attacker",
+      ),
+      false,
+      "human GITHUB_ACTOR match must never authorize ownership",
+    );
+    assert.equal(
+      isBotOwnedMarkerComment(
+        { id: 2, body: PR_SUMMARY_MARKER + "\nother", user: { login: "dependabot[bot]", type: "Bot" } },
+        "github-actions[bot]",
+      ),
+      false,
+      "unrelated bot marker must never authorize ownership",
+    );
+
+    const bot = { login: "github-actions[bot]", type: "Bot" };
+    const attacker = { login: "attacker", type: "User" };
+    const unrelatedBot = { login: "dependabot[bot]", type: "Bot" };
+    const store = { comments: [], posts: 0, patches: 0, patchedIds: [], userCalls: 0 };
+    // Page 1: human spoof + unrelated bot spoof. Page 2: genuine authenticated bot marker.
+    store.comments.push({
+      id: 1,
+      body: PR_SUMMARY_MARKER + "\n### getAdvantage check\n\n**GO** · attacker hijack\n",
+      user: attacker,
+    });
+    store.comments.push({
+      id: 2,
+      body: PR_SUMMARY_MARKER + "\n### getAdvantage check\n\n**GO** · dependabot spoof\n",
+      user: unrelatedBot,
+    });
+    // Fill rest of page 1 so bot marker is on page 2
+    for (let i = 0; i < COMMENT_PAGE_SIZE - 2; i++) {
+      store.comments.push({ id: 10 + i, body: `noise ${i}`, user: { login: "human", type: "User" } });
+    }
+    const botMarkerId = 7777;
+    store.comments.push({
+      id: botMarkerId,
+      body: PR_SUMMARY_MARKER + "\n### getAdvantage check\n\n**GO**\n",
+      user: bot,
+    });
+
+    const fetchImpl = async (url, init = {}) => {
+      const method = (init.method || "GET").toUpperCase();
+      if (method === "GET" && /\/user$/.test(url)) {
+        store.userCalls += 1;
+        // Authenticated token is the Actions bot — not GITHUB_ACTOR=attacker.
+        return { ok: true, status: 200, json: async () => ({ login: bot.login, type: "Bot" }) };
+      }
+      if (method === "GET" && /\/comments\?/.test(url)) {
+        const u = new URL(url, "https://api.github.com");
+        const page = Number(u.searchParams.get("page") || "1");
+        const per = Number(u.searchParams.get("per_page") || String(COMMENT_PAGE_SIZE));
+        const start = (page - 1) * per;
+        return { ok: true, status: 200, json: async () => store.comments.slice(start, start + per) };
+      }
+      if (method === "PATCH" && /\/comments\/(\d+)$/.test(url)) {
+        store.patches += 1;
+        const id = Number(url.match(/\/comments\/(\d+)$/)[1]);
+        store.patchedIds.push(id);
+        const body = JSON.parse(init.body).body;
+        const idx = store.comments.findIndex((c) => c.id === id);
+        if (idx >= 0) store.comments[idx] = { ...store.comments[idx], body };
+        return { ok: true, status: 200, json: async () => ({ id, body }) };
+      }
+      if (method === "POST") {
+        store.posts += 1;
+        return { ok: true, status: 201, json: async () => ({ id: 999 }) };
+      }
+      return { ok: false, status: 500, json: async () => ({}) };
+    };
+
+    const body = buildSummaryMarkdown({ verdict: "NO-GO", exitCode: 1, checks: [], version: "0.9.0" });
+    // Hostile: pass actorLogin=attacker as a confused caller might (GITHUB_ACTOR).
+    // Implementation must still resolve /user and only PATCH the bot marker.
+    const up = await upsertPrComment({
+      token: "ghs_" + "G".repeat(36),
+      owner: "o",
+      repo: "r",
+      issueNumber: 55,
+      body,
+      actorLogin: "attacker", // must be ignored (not a verified bot login)
+      fetchImpl,
+    });
+    assert.equal(up.ok, true);
+    assert.equal(up.action, "updated");
+    assert.equal(up.id, botMarkerId, "must update genuine authenticated bot marker on later page");
+    assert.equal(store.patches, 1);
+    assert.deepEqual(store.patchedIds, [botMarkerId]);
+    assert.equal(store.posts, 0, "must not POST when bot marker exists");
+    assert.ok(store.userCalls >= 1, "must resolve token identity via /user");
+    assert.ok(store.comments.find((c) => c.id === 1).body.includes("attacker hijack"), "attacker comment untouched");
+    assert.ok(
+      store.comments.find((c) => c.id === 2).body.includes("dependabot spoof"),
+      "unrelated bot comment untouched",
+    );
+  }
+
+  // --- 4. Pagination cap: every page full → truncated, no POST ---
+  {
+    const store = { comments: [], posts: 0, patches: 0, listPages: [] };
+    // Exactly COMMENT_PAGE_CAP full pages of non-marker noise (no bot marker).
+    const total = COMMENT_PAGE_SIZE * COMMENT_PAGE_CAP;
+    for (let i = 0; i < total; i++) {
+      store.comments.push({
+        id: 5000 + i,
+        body: i === 0 ? "human " + PR_SUMMARY_MARKER + " spoof" : `noise ${i}`,
+        user: { login: "human", type: "User" },
+      });
+    }
+    const fetchCap = async (url, init = {}) => {
+      const method = (init.method || "GET").toUpperCase();
+      if (method === "GET" && /\/user$/.test(url)) {
+        return { ok: true, status: 200, json: async () => ({ login: "github-actions[bot]", type: "Bot" }) };
+      }
+      if (method === "GET" && /\/comments\?/.test(url)) {
+        const u = new URL(url, "https://api.github.com");
+        const page = Number(u.searchParams.get("page") || "1");
+        store.listPages.push(page);
+        const per = Number(u.searchParams.get("per_page") || String(COMMENT_PAGE_SIZE));
+        const start = (page - 1) * per;
+        return { ok: true, status: 200, json: async () => store.comments.slice(start, start + per) };
+      }
+      if (method === "POST") {
+        store.posts += 1;
+        return { ok: true, status: 201, json: async () => ({ id: 1 }) };
+      }
+      if (method === "PATCH") {
+        store.patches += 1;
+        return { ok: true, status: 200, json: async () => ({ id: 1 }) };
+      }
+      return { ok: false, status: 500, json: async () => ({}) };
+    };
+    const body = buildSummaryMarkdown({ verdict: "GO", exitCode: 0, checks: [] });
+    const up = await upsertPrComment({
+      token: "ghs_" + "H".repeat(36),
+      owner: "o",
+      repo: "r",
+      issueNumber: 88,
+      body,
+      fetchImpl: fetchCap,
+    });
+    assert.equal(up.ok, false, "truncated lookup must not create a comment");
+    assert.ok(/list-truncated/.test(up.reason), up.reason);
+    assert.equal(store.posts, 0, "must not POST after pagination cap with full pages");
+    assert.equal(store.patches, 0);
+    assert.equal(store.listPages.length, COMMENT_PAGE_CAP);
+  }
+
+  // --- 5. Action release contract (static + pure plan unit tests; no network) ---
+  {
+    assert.equal(parsePackageVersion("0.9.0").ok, true);
+    assert.equal(exactTagName("0.9.0"), "v0.9.0");
+    assert.equal(actionMajorTagForVersion("0.9.0"), "v1");
+    assert.equal(ACTION_MAJOR_TAG, "v1");
+
+    const head = "a".repeat(40);
+    const other = "b".repeat(40);
+
+    // Fresh release: create exact tag, move v1, create release
+    const fresh = planActionRelease({
+      version: "0.9.0",
+      headSha: head,
+      existingTags: [],
+      releaseExists: false,
+    });
+    assert.equal(fresh.ok, true);
+    assert.equal(fresh.idempotent, false);
+    assert.ok(fresh.ops.some((o) => o.op === "create-tag" && o.tag === "v0.9.0"));
+    assert.ok(fresh.ops.some((o) => o.op === "move-tag" && o.tag === "v1" && o.sha === head));
+    assert.ok(fresh.ops.some((o) => o.op === "create-release" && o.tag === "v0.9.0"));
+
+    // Idempotent rerun: everything already correct
+    const idemp = planActionRelease({
+      version: "0.9.0",
+      headSha: head,
+      existingTags: [
+        { name: "v0.9.0", sha: head },
+        { name: "v1", sha: head },
+      ],
+      releaseExists: true,
+    });
+    assert.equal(idemp.ok, true);
+    assert.equal(idemp.idempotent, true);
+    assert.ok(idemp.ops.every((o) => o.op === "keep-tag" || o.op === "keep-release"));
+
+    // Source/tag mismatch: exact tag points elsewhere → hard fail
+    const mismatch = planActionRelease({
+      version: "0.9.0",
+      headSha: head,
+      existingTags: [{ name: "v0.9.0", sha: other }],
+      releaseExists: false,
+    });
+    assert.equal(mismatch.ok, false);
+    assert.equal(mismatch.reason, "source-tag-mismatch");
+
+    // v1 on old commit → move-tag
+    const moveV1 = planActionRelease({
+      version: "0.9.1",
+      headSha: head,
+      existingTags: [
+        { name: "v0.9.1", sha: head },
+        { name: "v1", sha: other },
+      ],
+      releaseExists: true,
+    });
+    assert.equal(moveV1.ok, true);
+    assert.ok(moveV1.ops.some((o) => o.op === "move-tag" && o.tag === "v1"));
+
+    // publish.yml contract
+    const ymlPath = path.join(__dirname, "..", ".github", "workflows", "publish.yml");
+    assert.ok(existsSync(ymlPath), "publish.yml must exist");
+    const yml = readFileSync(ymlPath, "utf8");
+    const contract = validatePublishWorkflowContract(yml);
+    assert.equal(contract.ok, true, contract.failures.join("; "));
+    assert.ok(/ops\/action-release\.mjs/.test(yml), "workflow must invoke action-release.mjs");
+    assert.ok(/contents:\s*write/.test(yml));
+    assert.ok(!/permissions:\s*write-all/i.test(yml));
+    assert.ok(/npm test/.test(yml));
+    assert.ok(/npm run evidence/.test(yml));
+    // Behavioral: plan + workflow share the same exact/major tag names
+    assert.ok(yml.includes("v1") || yml.includes("floating"));
+  }
+
+  // --- 6. Install is behind trusted scrubbed Node boundary (not raw shell npm) ---
+  {
+    const yml = readFileSync(path.join(__dirname, "..", "action.yml"), "utf8");
+    assert.ok(/action\/install\.mjs/.test(yml), "install must run via trusted install.mjs");
+    assert.ok(!/if \[ -f package-lock\.json \]; then npm ci/.test(yml), "must not shell-out npm with inherited env");
+    const {
+      planProjectInstall,
+      runProjectInstall,
+    } = await import(pathToFileURL(path.join(__dirname, "..", "action", "install.mjs")).href);
+    const base = freshBase();
+    try {
+      const withLock = path.join(base, "with-lock");
+      mkdirSync(withLock, { recursive: true });
+      writeFileSync(path.join(withLock, "package.json"), '{"name":"x","version":"1.0.0"}\n');
+      writeFileSync(path.join(withLock, "package-lock.json"), '{"lockfileVersion":3,"packages":{}}\n');
+      assert.equal(planProjectInstall(withLock).mode, "ci");
+      assert.deepEqual(planProjectInstall(withLock).args, ["ci", "--ignore-scripts"]);
+      const noLock = path.join(base, "no-lock");
+      mkdirSync(noLock, { recursive: true });
+      writeFileSync(path.join(noLock, "package.json"), '{"name":"y","version":"1.0.0"}\n');
+      assert.equal(planProjectInstall(noLock).mode, "install-no-lock");
+      assert.ok(planProjectInstall(noLock).args.includes("--no-package-lock"));
+      assert.ok(planProjectInstall(noLock).args.includes("--ignore-scripts"));
+      const empty = path.join(base, "empty");
+      mkdirSync(empty, { recursive: true });
+      assert.equal(planProjectInstall(empty).skip, true);
+
+      // Hostile .npmrc + env: installer child must not see secrets.
+      const hostile = path.join(base, "hostile-npm");
+      mkdirSync(hostile, { recursive: true });
+      writeFileSync(
+        path.join(hostile, "package.json"),
+        '{"name":"hostile-npm","version":"1.0.0"}\n',
+      );
+      // .npmrc that would interpolate env if present in the child.
+      writeFileSync(
+        path.join(hostile, ".npmrc"),
+        "//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}\n",
+      );
+      const seenEnvPath = path.join(base, "installer-env.json");
+      const captured = { args: null, env: null };
+      const fakeSpawn = (cmd, args, opts) => {
+        captured.args = args;
+        captured.env = opts.env || {};
+        writeFileSync(seenEnvPath, JSON.stringify(opts.env || {}), "utf8");
+        return { status: 0, stdout: "ok\n", stderr: "", error: null };
+      };
+      const dirtyEnv = {
+        PATH: process.env.PATH || "",
+        GITHUB_TOKEN: "ghs_" + "INSTALLLEAK".repeat(4),
+        GH_TOKEN: "ghp_" + "INSTALLLEAK".repeat(4),
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc-install-secret-xx",
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
+        ACTIONS_RUNTIME_TOKEN: "runtime-install-secret-xx",
+        GETADVANTAGE_API_KEY: "adv_live_" + "installleak000001",
+        NPM_TOKEN: "npm_" + "installleak00000001",
+        NODE_AUTH_TOKEN: "npm_" + "installleak00000002",
+        AWS_SECRET_ACCESS_KEY: "awsinstallsecret0001",
+        SAFE_FLAG: "keep-me",
+      };
+      const r = runProjectInstall({ cwd: hostile, env: dirtyEnv, spawnSyncImpl: fakeSpawn });
+      assert.equal(r.ok, true);
+      assert.equal(r.mode, "install-no-lock");
+      assert.ok(captured.args.includes("--ignore-scripts"));
+      assert.ok(captured.args.includes("--no-package-lock"));
+      const childEnv = captured.env;
+      assert.equal(childEnv.SAFE_FLAG, "keep-me");
+      for (const k of [
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "ACTIONS_RUNTIME_TOKEN",
+        "GETADVANTAGE_API_KEY",
+        "NPM_TOKEN",
+        "NODE_AUTH_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+      ]) {
+        assert.equal(childEnv[k], undefined, `installer must not see ${k}`);
+      }
+      // Also prove the env blob written for the child has no secret material.
+      const envBlob = readFileSync(seenEnvPath, "utf8");
+      assert.ok(!envBlob.includes("INSTALLLEAK"), "scrubbed env must not contain fixture secrets");
+      assert.ok(!envBlob.includes("installleak"), "scrubbed env must not contain fixture secrets");
+      assert.ok(!envBlob.includes("oidc-install-secret"), envBlob);
+      assert.ok(!existsSync(path.join(hostile, "package-lock.json")), "must not create lockfile when none existed");
+    } finally {
+      cleanup(base);
+    }
+  }
+});
+
+scenario("action repair pass-3: encodeArtifactUri hostiles, nonce scrub, install packing", async () => {
+  const { encodeArtifactUri, buildSarif } = await import(
+    pathToFileURL(path.join(__dirname, "..", "sarif.mjs")).href
+  );
+  const { scrubCredentialEnv, isCredentialEnvKey } = await import(
+    pathToFileURL(path.join(__dirname, "..", "util.mjs")).href
+  );
+  const { buildCliChildEnv, isCurrentSarifWrite, fileSnapshot } = await import(
+    pathToFileURL(path.join(__dirname, "..", "action", "main.mjs")).href
+  );
+
+  // encodeArtifactUri: omit controls, absolutes, URL-like, . / .. escapes
+  assert.equal(encodeArtifactUri("src/app.js"), "src/app.js");
+  assert.equal(encodeArtifactUri("src/my file.js"), "src/my%20file.js");
+  assert.equal(encodeArtifactUri("a\u0000b.js"), "");
+  assert.equal(encodeArtifactUri("evil\nname.js"), "");
+  assert.equal(encodeArtifactUri("/etc/passwd"), "");
+  assert.equal(encodeArtifactUri("C:\\Windows\\system32\\x.js"), "");
+  assert.equal(encodeArtifactUri("\\\\server\\share\\x.js"), "");
+  assert.equal(encodeArtifactUri("https://evil.test/x.js"), "");
+  assert.equal(encodeArtifactUri("file:///tmp/x"), "");
+  assert.equal(encodeArtifactUri("javascript:alert(1)"), "");
+  assert.equal(encodeArtifactUri("../outside.js"), "");
+  assert.equal(encodeArtifactUri("foo/../bar.js"), "");
+  assert.equal(encodeArtifactUri("./sneaky.js"), "");
+  assert.equal(encodeArtifactUri("foo/./bar.js"), "");
+  assert.equal(encodeArtifactUri("sk_live_" + "URISECRET0000000000001.js"), "");
+
+  // Nonce: trusted CLI keeps it; scrub drops it from project-controlled env
+  assert.equal(isCredentialEnvKey("GETADVANTAGE_SARIF_RUN_NONCE"), true);
+  const nonce = "a".repeat(32);
+  const cliEnv = buildCliChildEnv(
+    {
+      PATH: process.env.PATH || "",
+      GITHUB_TOKEN: "ghs_" + "X".repeat(36),
+      GETADVANTAGE_SARIF_RUN_NONCE: "should-be-replaced",
+    },
+    { wantReport: false, sarifNonce: nonce },
+  );
+  assert.equal(cliEnv.GETADVANTAGE_SARIF_RUN_NONCE, nonce);
+  assert.equal(cliEnv.GITHUB_TOKEN, undefined);
+  const projectEnv = scrubCredentialEnv({
+    PATH: process.env.PATH || "",
+    GETADVANTAGE_SARIF_RUN_NONCE: nonce,
+    GITHUB_TOKEN: "ghs_" + "Y".repeat(36),
+    SAFE: "1",
+  });
+  assert.equal(projectEnv.GETADVANTAGE_SARIF_RUN_NONCE, undefined);
+  assert.equal(projectEnv.GITHUB_TOKEN, undefined);
+  assert.equal(projectEnv.SAFE, "1");
+
+  // buildSarif binds nonce from env when Action spawns CLI
+  const prevNonce = process.env.GETADVANTAGE_SARIF_RUN_NONCE;
+  try {
+    process.env.GETADVANTAGE_SARIF_RUN_NONCE = "bound-nonce-fixture-001";
+    const doc = buildSarif({ results: [], exitCode: 0 });
+    assert.equal(doc.runs[0].properties["getadvantage/runNonce"], "bound-nonce-fixture-001");
+  } finally {
+    if (prevNonce === undefined) delete process.env.GETADVANTAGE_SARIF_RUN_NONCE;
+    else process.env.GETADVANTAGE_SARIF_RUN_NONCE = prevNonce;
+  }
+
+  // Stale file replaced by repo child without nonce never counts as this run's SARIF
+  const base = freshBase();
+  try {
+    const p = path.join(base, "stale-nonce.sarif");
+    const beforeBody = JSON.stringify({
+      version: "2.1.0",
+      runs: [{ tool: { driver: { name: "STALE" } }, properties: { "getadvantage/runNonce": "old" } }],
+    });
+    writeFileSync(p, beforeBody, "utf8");
+    const before = fileSnapshot(p);
+    // Hostile child rewrites with valid SARIF but wrong/missing nonce
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: "2.1.0",
+        runs: [{ tool: { driver: { name: "HOSTILE" } } }],
+      }),
+      "utf8",
+    );
+    assert.equal(isCurrentSarifWrite(p, before, { expectedNonce: "this-run-only" }), false);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: "2.1.0",
+        runs: [{ tool: { driver: { name: "HOSTILE" } }, properties: { "getadvantage/runNonce": "wrong" } }],
+      }),
+      "utf8",
+    );
+    assert.equal(isCurrentSarifWrite(p, before, { expectedNonce: "this-run-only" }), false);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: "2.1.0",
+        runs: [
+          { tool: { driver: { name: "TRUSTED" } }, properties: { "getadvantage/runNonce": "this-run-only" } },
+        ],
+      }),
+      "utf8",
+    );
+    assert.equal(isCurrentSarifWrite(p, before, { expectedNonce: "this-run-only" }), true);
+  } finally {
+    cleanup(base);
+  }
+
+  // publish.yml runner gate contract already validated in pass-2; re-check uses: ./
+  const yml = readFileSync(path.join(__dirname, "..", ".github", "workflows", "publish.yml"), "utf8");
+  assert.ok(/^\s*uses:\s*\.\/\s*$/m.test(yml), "publish must execute uses: ./");
+  assert.ok(/comment:\s*false/.test(yml));
+  assert.ok(/report:\s*false/.test(yml));
+  const usesIdx = yml.search(/^\s*uses:\s*\.\/\s*$/m);
+  const pubIdx = yml.search(/^\s*npm publish\b/m);
+  assert.ok(usesIdx >= 0 && pubIdx > usesIdx, "uses: ./ must precede npm publish");
+});
+
+scenario("action repair pass-4: published source identity, annotated peel, pre-tag gitHead verify", async () => {
+  const {
+    planActionRelease,
+    planPublishGate,
+    resolveReleasedSourceSha,
+    verifyPublishedNpmSource,
+    peelTagToCommit,
+    waitForNpmGitHead,
+    validatePublishWorkflowContract,
+    shasEqual,
+    normalizeSha,
+    exactTagName,
+    ACTION_MAJOR_TAG,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "ops", "action-release.mjs")).href);
+
+  const releaseSha = "a".repeat(40);
+  const docsSha = "b".repeat(40);
+  const otherSha = "c".repeat(40);
+
+  // --- 1. Docs-only push: HEAD ≠ published source; tags already correct → no-op ---
+  {
+    const gate = planPublishGate({
+      localVersion: "0.9.0",
+      publishedVersion: "0.9.0",
+      candidateHeadSha: docsSha,
+      npmGitHead: releaseSha,
+      exactTagCommitSha: releaseSha,
+      majorTagCommitSha: releaseSha,
+      releaseExists: true,
+    });
+    assert.equal(gate.ok, true, gate.reason);
+    assert.equal(gate.newPublish, false);
+    assert.equal(gate.tagsMissing, false, "docs-only must not claim tags missing when distribution matches published source");
+    assert.equal(gate.idempotentNoOp, true);
+    assert.equal(gate.sourceSha, releaseSha);
+    assert.equal(gate.sourceOrigin, "npm-gitHead");
+    assert.ok(!shasEqual(gate.sourceSha, docsSha), "source must not be docs HEAD");
+  }
+
+  // --- 2. Docs-only + v1 drifted to docs HEAD → repair to released source, not docs ---
+  {
+    const gate = planPublishGate({
+      localVersion: "0.9.0",
+      publishedVersion: "0.9.0",
+      candidateHeadSha: docsSha,
+      npmGitHead: releaseSha,
+      exactTagCommitSha: releaseSha,
+      majorTagCommitSha: docsSha, // wrongly moved to docs-only commit
+      releaseExists: true,
+    });
+    assert.equal(gate.ok, true);
+    assert.equal(gate.tagsMissing, true);
+    assert.equal(gate.sourceSha, releaseSha, "repair identity is npm gitHead");
+    const plan = planActionRelease({
+      version: "0.9.0",
+      headSha: gate.sourceSha,
+      existingTags: [
+        { name: "v0.9.0", sha: releaseSha },
+        { name: "v1", sha: docsSha },
+      ],
+      releaseExists: true,
+    });
+    assert.equal(plan.ok, true);
+    const move = plan.ops.find((o) => o.op === "move-tag" && o.tag === "v1");
+    assert.ok(move, "must move floating major");
+    assert.equal(move.sha, releaseSha, "must never retag v1 to docs-only SHA");
+    assert.ok(plan.ops.every((o) => o.sha == null || o.sha === releaseSha || o.op.startsWith("keep")));
+  }
+
+  // --- 3. Unproven published source → fail safely (no blind HEAD) ---
+  {
+    const unproven = resolveReleasedSourceSha({
+      alreadyPublished: true,
+      candidateHeadSha: docsSha,
+      npmGitHead: null,
+      exactTagCommitSha: null,
+    });
+    assert.equal(unproven.ok, false);
+    assert.equal(unproven.reason, "published-source-unproven");
+
+    const gate = planPublishGate({
+      localVersion: "0.9.0",
+      publishedVersion: "0.9.0",
+      candidateHeadSha: docsSha,
+      npmGitHead: null,
+      exactTagCommitSha: null,
+      majorTagCommitSha: null,
+      releaseExists: false,
+    });
+    assert.equal(gate.ok, false);
+    assert.equal(gate.reason, "published-source-unproven");
+  }
+
+  // --- 4. npm gitHead vs exact tag conflict → fail ---
+  {
+    const conflict = resolveReleasedSourceSha({
+      alreadyPublished: true,
+      npmGitHead: releaseSha,
+      exactTagCommitSha: otherSha,
+    });
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.reason, "published-source-conflict");
+  }
+
+  // --- 5. New publish uses candidate HEAD; post-publish gitHead must match ---
+  {
+    const resolved = resolveReleasedSourceSha({
+      alreadyPublished: false,
+      candidateHeadSha: releaseSha,
+    });
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.origin, "candidate-head");
+    assert.equal(resolved.sourceSha, releaseSha);
+
+    const ok = verifyPublishedNpmSource({
+      candidateHeadSha: releaseSha,
+      npmGitHead: releaseSha,
+    });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.sourceSha, releaseSha);
+
+    const mismatch = verifyPublishedNpmSource({
+      candidateHeadSha: releaseSha,
+      npmGitHead: docsSha,
+    });
+    assert.equal(mismatch.ok, false);
+    assert.equal(mismatch.reason, "npm-gitHead-mismatch");
+
+    const missing = verifyPublishedNpmSource({
+      candidateHeadSha: releaseSha,
+      npmGitHead: null,
+    });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.reason, "npm-gitHead-unobserved");
+
+    // Bounded retry: first empty, then match — tags would only run after ok.
+    let calls = 0;
+    const waited = waitForNpmGitHead(
+      { name: "getadvantage", version: "0.9.0", candidateHeadSha: releaseSha, attempts: 3, delayMs: 0 },
+      {
+        npmView: () => {
+          calls += 1;
+          return calls < 2 ? "" : releaseSha;
+        },
+        sleep: () => {},
+      },
+    );
+    assert.equal(waited.ok, true);
+    assert.equal(waited.attempts, 2);
+    assert.equal(calls, 2);
+
+    const exhausted = waitForNpmGitHead(
+      { name: "getadvantage", version: "0.9.0", candidateHeadSha: releaseSha, attempts: 2, delayMs: 0 },
+      { npmView: () => docsSha, sleep: () => {} },
+    );
+    assert.equal(exhausted.ok, false);
+    assert.equal(exhausted.reason, "npm-gitHead-mismatch");
+  }
+
+  // --- 6. Behavioral: annotated exact tag peels to commit; lightweight v1 peels ---
+  {
+    const base = freshBase();
+    try {
+      const repo = path.join(base, "peel-tags");
+      initRepo(repo);
+      write(repo, "package.json", '{"name":"peel","version":"0.9.0"}\n');
+      write(repo, "README.md", "# peel\n");
+      commitAll(repo, "release: 0.9.0");
+      const release = g(["rev-parse", "HEAD"], repo);
+
+      // Annotated exact tag (what apply creates with `git tag -a`).
+      g(["tag", "-a", "v0.9.0", "-m", "release: getadvantage 0.9.0", release], repo);
+      // Lightweight floating major (Action convention).
+      g(["tag", "v1", release], repo);
+
+      // Tag object id for annotated tags differs from the commit.
+      const tagObject = g(["rev-parse", "refs/tags/v0.9.0"], repo);
+      const tagPeeled = g(["rev-parse", "refs/tags/v0.9.0^{}"], repo);
+      assert.equal(tagPeeled, release);
+      assert.notEqual(tagObject, release, "annotated tag object must differ from commit");
+
+      // Production helper must peel (^{}), never compare tag object to commit.
+      const peeledExact = peelTagToCommit("v0.9.0", {
+        revParse: (ref) => {
+          try {
+            return g(["rev-parse", "--verify", ref], repo);
+          } catch {
+            return null;
+          }
+        },
+      });
+      assert.equal(peeledExact, release.toLowerCase());
+
+      const peeledV1 = peelTagToCommit("v1", {
+        revParse: (ref) => {
+          try {
+            return g(["rev-parse", "--verify", ref], repo);
+          } catch {
+            return null;
+          }
+        },
+      });
+      assert.equal(peeledV1, release.toLowerCase());
+
+      // Race/idempotence recheck shape: plan with peeled SHAs is keep/keep when correct.
+      const idemp = planActionRelease({
+        version: "0.9.0",
+        headSha: release,
+        existingTags: [
+          { name: exactTagName("0.9.0"), sha: peeledExact },
+          { name: ACTION_MAJOR_TAG, sha: peeledV1 },
+        ],
+        releaseExists: true,
+      });
+      assert.equal(idemp.ok, true);
+      assert.equal(idemp.idempotent, true);
+
+      // If someone mistakenly fed the annotated tag *object* id as head, mismatch.
+      // (Demonstrates why apply must peel before compare.)
+      const bad = planActionRelease({
+        version: "0.9.0",
+        headSha: release,
+        existingTags: [{ name: "v0.9.0", sha: tagObject }],
+        releaseExists: false,
+      });
+      assert.equal(bad.ok, false, "tag object id must not compare equal to commit without peel");
+      assert.equal(bad.reason, "source-tag-mismatch");
+
+      // Docs commit after release: gate using peeled tags + npm gitHead is no-op.
+      write(repo, "docs/note.md", "docs only\n");
+      commitAll(repo, "docs: post-release note");
+      const docsHead = g(["rev-parse", "HEAD"], repo);
+      assert.notEqual(docsHead, release);
+      const docsGate = planPublishGate({
+        localVersion: "0.9.0",
+        publishedVersion: "0.9.0",
+        candidateHeadSha: docsHead,
+        npmGitHead: release,
+        exactTagCommitSha: peelTagToCommit("v0.9.0", {
+          revParse: (ref) => g(["rev-parse", "--verify", ref], repo),
+        }),
+        majorTagCommitSha: peelTagToCommit("v1", {
+          revParse: (ref) => g(["rev-parse", "--verify", ref], repo),
+        }),
+        releaseExists: true,
+      });
+      assert.equal(docsGate.ok, true);
+      assert.equal(docsGate.idempotentNoOp, true);
+      assert.ok(shasEqual(docsGate.sourceSha, release));
+      assert.ok(!shasEqual(docsGate.sourceSha, docsHead));
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // --- 7. publish.yml: real uses: ./ gate before npm publish; gitHead verify before apply ---
+  {
+    const ymlPath = path.join(__dirname, "..", ".github", "workflows", "publish.yml");
+    const yml = readFileSync(ymlPath, "utf8");
+    const contract = validatePublishWorkflowContract(yml);
+    assert.equal(contract.ok, true, contract.failures.join("; "));
+
+    // Structural order: uses: ./ → npm publish → verify-npm-source → --apply
+    const usesIdx = yml.search(/^\s*uses:\s*\.\/\s*$/m);
+    const pubIdx = yml.search(/^\s*npm publish\b/m);
+    const verifyIdx = yml.search(/--verify-npm-source/);
+    const applyIdx = yml.search(/action-release\.mjs\s+--apply/);
+    assert.ok(usesIdx >= 0, "must have uses: ./");
+    assert.ok(pubIdx > usesIdx, "uses: ./ must precede npm publish");
+    assert.ok(verifyIdx > pubIdx, "verify-npm-source must run after npm publish");
+    assert.ok(applyIdx > verifyIdx, "tag apply must run after gitHead verification");
+    assert.ok(/comment:\s*false/.test(yml));
+    assert.ok(/report:\s*false/.test(yml));
+    assert.ok(/gitHead/i.test(yml));
+    assert.ok(/\^\{\}/.test(yml), "workflow must peel tags with ^{}");
+    assert.ok(/source_sha/.test(yml), "workflow must pass proven source_sha to apply");
+    // Gate step must not use blind HEAD for already-published identity.
+    assert.ok(/action-release\.mjs\s+--gate/.test(yml));
+  }
+
+  // --- 8. Prefix SHA equality (npm sometimes shortens) ---
+  {
+    assert.equal(normalizeSha("ABCDEF0"), "abcdef0");
+    assert.equal(shasEqual(releaseSha, releaseSha.slice(0, 12)), true);
+    assert.equal(shasEqual(releaseSha, docsSha.slice(0, 12)), false);
+  }
+});
+
+scenario("packed package: includes action.yml + action/ files; cold workflow + action path", () => {
+  const base = freshBase();
+  try {
+    const pkgRoot = path.join(__dirname, "..");
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgz = path.join(packDir, readdirPack(packDir));
+    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    const norm = listing.replace(/\\/g, "/");
+    const must = [
+      "package/action.yml",
+      "package/action/main.mjs",
+      "package/action/summary.mjs",
+      "package/action/enforce.mjs",
+      "package/action/install.mjs",
+      "package/action.mjs",
+      "package/sarif.mjs",
+      "package/util.mjs",
+      "package/checks.mjs",
+      "package/index.mjs",
+      "package/package.json",
+    ];
+    for (const m of must) {
+      assert.ok(norm.includes(m), `tarball missing ${m}:\n${listing.slice(0, 800)}`);
+    }
+    // Cold install from packed tarball — required Action files present
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--ignore-scripts", tgz], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const installed = path.join(cold, "node_modules", "getadvantage");
+    assert.ok(existsSync(path.join(installed, "action.yml")));
+    assert.ok(existsSync(path.join(installed, "action", "main.mjs")));
+    assert.ok(existsSync(path.join(installed, "action", "summary.mjs")));
+    assert.ok(existsSync(path.join(installed, "action", "enforce.mjs")));
+    assert.ok(existsSync(path.join(installed, "action", "install.mjs")));
+    const pkg = JSON.parse(readFileSync(path.join(installed, "package.json"), "utf8"));
+    assert.equal(pkg.version, "0.9.0");
+
+    // Packed cold path: scrub helpers + summary marker + action gate entry load
+    const utilCold = readFileSync(path.join(installed, "util.mjs"), "utf8");
+    assert.ok(/scrubCredentialEnv/.test(utilCold), "packed util must export credential scrub");
+    assert.ok(/SARIF_RUN_NONCE/.test(utilCold), "scrub must cover SARIF attribution nonce");
+    const mainCold = readFileSync(path.join(installed, "action", "main.mjs"), "utf8");
+    assert.ok(/scrubCredentialEnv|buildCliChildEnv/.test(mainCold), "packed action must scrub child env");
+    assert.ok(/validateSarifInputPath|isCurrentSarifWrite|fileSnapshot/.test(mainCold));
+    assert.ok(/sha256|createHash|randomBytes|expectedNonce|sarifNonce/.test(mainCold), "packed action must use digest+nonce for SARIF");
+    assert.ok(/pull_request_target/.test(mainCold) && /setErrorOutputs|return 1/.test(mainCold));
+    const sumCold = readFileSync(path.join(installed, "action", "summary.mjs"), "utf8");
+    assert.ok(/isBotOwnedMarkerComment|COMMENT_PAGE_CAP/.test(sumCold));
+    assert.ok(/list-truncated|isVerifiedBotLogin|ACTIONS_BOT_LOGIN/.test(sumCold));
+    const ymlCold = readFileSync(path.join(installed, "action.yml"), "utf8");
+    assert.ok(/id:\s*sarif_upload/.test(ymlCold), "upload step id for outcome");
+    assert.ok(/sarif-upload-eligible/.test(ymlCold), "eligibility gates upload (fork skip)");
+    assert.ok(/action\/enforce\.mjs/.test(ymlCold), "enforce.mjs final required-check");
+    assert.ok(/action\/install\.mjs/.test(ymlCold), "install.mjs credential-scrubbed boundary");
+    assert.ok(/GETADVANTAGE_UPLOAD_OUTCOME|sarif_upload\.outcome/.test(ymlCold));
+    assert.ok(/fork/i.test(ymlCold), "honest fork skip documented");
+    const installCold = readFileSync(path.join(installed, "action", "install.mjs"), "utf8");
+    assert.ok(/scrubCredentialEnv/.test(installCold));
+    assert.ok(/--no-package-lock/.test(installCold), "non-mutating install without lockfile");
+    assert.ok(/--ignore-scripts/.test(installCold));
+    const enfCold = readFileSync(path.join(installed, "action", "enforce.mjs"), "utf8");
+    assert.ok(/decideJobOutcome|sarif-upload-failed|sarif-upload-skipped-eligible/.test(enfCold));
+    const sarifCold = readFileSync(path.join(installed, "sarif.mjs"), "utf8");
+    assert.ok(/getadvantage\/runNonce/.test(sarifCold));
+
+    // Cold: generate workflow in a fresh temp repo
+    const sample = path.join(base, "sample");
+    initRepo(sample);
+    write(sample, "package.json", '{"name":"cold-action","version":"1.0.0"}\n');
+    write(sample, "app.js", "console.log('ok');\n");
+    commitAll(sample, "chore: cold");
+    const bin = path.join(installed, "index.mjs");
+    const r = spawnSync(process.execPath, [bin, "github-action"], {
+      cwd: sample,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 60_000,
+    });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const wf = readFileSync(path.join(sample, ".github", "workflows", "getadvantage.yml"), "utf8");
+    assert.ok(/BellmeJoe\/getadvantage-cli@v1/.test(wf));
+
+    // YAML-ish parse checks (no third-party YAML lib — structural assertions)
+    assert.ok(/^name:\s/m.test(wf));
+    assert.ok(/^on:/m.test(wf));
+    assert.ok(/^permissions:/m.test(wf));
+    assert.ok(/^jobs:/m.test(wf));
+    const actionYml = readFileSync(path.join(installed, "action.yml"), "utf8");
+    assert.ok(/^name:\s/m.test(actionYml));
+    assert.ok(/^runs:/m.test(actionYml));
+    assert.ok(/using:\s*composite/.test(actionYml));
+    assert.ok(/action\/main\.mjs/.test(actionYml));
+  } finally {
+    cleanup(base);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // runner

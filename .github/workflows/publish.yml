@@ -1,11 +1,21 @@
-name: Publish to npm
+name: Publish to npm + Action tags
 
 # Auto-publishes the getadvantage CLI whenever package.json's version bumps on
-# main. It skips when the version is already on npm, so a push that doesn't bump
-# the version is a safe no-op. Manual runs are available via the Actions tab.
+# main. It skips when the version is already on npm *and* Action tags/release
+# already match the *published* source (npm gitHead / exact tag), so a
+# docs-only push after a release is a safe idempotent no-op.
+# Manual runs are available via the Actions tab.
 #
-# A publish only happens after the full test suite and the evidence suite
-# (npm run evidence, 8/8 GREEN) pass — a red gate blocks the release.
+# A publish only happens after the full test suite, the evidence suite
+# (npm run evidence, 8/8 GREEN), and a real composite Action self-test
+# (uses: ./ with comment/report disabled) pass — a red gate blocks the release.
+#
+# After a successful npm publish:
+#   - registry gitHead is verified (bounded retry) to match candidate HEAD
+#   - only then: exact source tag v<package-version>, floating v1, GitHub Release
+# When npm is already current but Action distribution is incomplete, repair
+# targets the proven published source SHA — never a later docs-only HEAD.
+# If the published source cannot be proven, the job fails safely (no retag).
 #
 # ONE-TIME SETUP: add an npm token with publish rights as the repo secret
 # `NPM_TOKEN` (Settings -> Secrets and variables -> Actions). A granular token
@@ -16,38 +26,111 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+# Least privilege: contents: write for tags/releases; security-events for the
+# real-runner Action self-test (uses: ./) SARIF upload; npm publish uses
+# NODE_AUTH_TOKEN (secret), not elevated contents beyond tags.
+permissions:
+  contents: write
+  security-events: write
+  actions: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history/tags for idempotent exact-tag + v1 peels.
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - name: Check whether the version is new
+
+      - name: Check whether npm version is new / Action tags need repair
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          NAME=$(node -p "require('./package.json').name")
-          LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view "$NAME" version 2>/dev/null || echo "none")
-          echo "name=$NAME local=$LOCAL published=$PUBLISHED"
-          if [ "$LOCAL" = "$PUBLISHED" ]; then
-            echo "new=false" >> "$GITHUB_OUTPUT"
-            echo "Version $LOCAL is already on npm — nothing to publish."
-          else
-            echo "new=true" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          # Resolve published source via npm gitHead + peeled tags (^{}), never
+          # blindly treat current HEAD as the release identity on docs-only pushes.
+          git fetch origin --tags --force 2>/dev/null || true
+          node ops/action-release.mjs --gate
+
       - name: Gate — test suite
-        if: steps.version.outputs.new == 'true'
+        if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
         run: npm test
+
       - name: Gate — evidence suite (must be 8/8 GREEN)
-        if: steps.version.outputs.new == 'true'
+        if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
         run: npm run evidence
-      - name: Publish
+
+      # Real runner proof of composite Action semantics (not YAML-regex-only).
+      # Executes the checked-out candidate via uses: ./ before any publish/tag move.
+      # Failure here blocks npm publication and Action tag movement.
+      - name: Gate — Action composite (uses: ./)
+        if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
+        uses: ./
+        with:
+          comment: false
+          report: false
+
+      - name: Publish to npm
         if: steps.version.outputs.new == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -euo pipefail
           npm publish --access public
           echo "Published $(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+
+      # New version only: require registry gitHead == candidate HEAD before tags.
+      # Bounded retry for registry propagation. Mismatch/unobserved → fail, tags untouched.
+      - name: Verify published npm source identity (gitHead)
+        id: npm_source
+        if: steps.version.outputs.new == 'true'
+        run: |
+          set -euo pipefail
+          node ops/action-release.mjs --verify-npm-source \
+            --version="${{ steps.version.outputs.version }}" \
+            --sha="${{ steps.version.outputs.sha }}"
+
+      - name: Action distribution — exact tag, floating v1, GitHub Release
+        if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Fail honestly on source-tag-mismatch (exact tag → other commit).
+        run: |
+          set -euo pipefail
+          # Ensure remote tags are visible for mismatch detection (peel with ^{}).
+          git fetch origin --tags --force 2>/dev/null || true
+
+          # Released source SHA:
+          # - new publish: verified npm gitHead / candidate (from verify step or gate)
+          # - already published repair: gate source_sha (npm gitHead / exact tag), never docs HEAD
+          SOURCE_SHA="${{ steps.npm_source.outputs.source_sha }}"
+          if [ -z "$SOURCE_SHA" ]; then
+            SOURCE_SHA="${{ steps.version.outputs.source_sha }}"
+          fi
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "FAIL: released source SHA unproven — refusing tag/release mutation"
+            exit 1
+          fi
+
+          # Annotated-tag safety: never compare tag object id to commit id.
+          EXACT="${{ steps.version.outputs.exact_tag }}"
+          if git rev-parse --verify "refs/tags/${EXACT}" >/dev/null 2>&1; then
+            TAG_COMMIT=$(git rev-parse "refs/tags/${EXACT}^{}")
+            echo "exact tag ${EXACT} peels to ${TAG_COMMIT}"
+          fi
+          if git rev-parse --verify "refs/tags/v1" >/dev/null 2>&1; then
+            V1_COMMIT=$(git rev-parse "refs/tags/v1^{}")
+            echo "floating v1 peels to ${V1_COMMIT}"
+          fi
+
+          node ops/action-release.mjs --apply \
+            --version="${{ steps.version.outputs.version }}" \
+            --sha="$SOURCE_SHA"
+          echo "Action distribution ready: exact ${EXACT} + floating v1 @ ${SOURCE_SHA}"

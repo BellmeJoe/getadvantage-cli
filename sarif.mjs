@@ -83,6 +83,11 @@ export function redactForSarif(text) {
   s = s.replace(/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "sk-ant-…[redacted]");
   s = s.replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "sk-…[redacted]");
   s = s.replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "ghp_…[redacted]");
+  // GitHub Actions / app installation / user-to-server / refresh token prefixes.
+  s = s.replace(/\bghs_[A-Za-z0-9]{20,}\b/g, "ghs_…[redacted]");
+  s = s.replace(/\bgho_[A-Za-z0-9]{20,}\b/g, "gho_…[redacted]");
+  s = s.replace(/\bghu_[A-Za-z0-9]{20,}\b/g, "ghu_…[redacted]");
+  s = s.replace(/\bghr_[A-Za-z0-9]{20,}\b/g, "ghr_…[redacted]");
   s = s.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "github_pat_…[redacted]");
   s = s.replace(/\bAKIA[0-9A-Z]{16}\b/g, "AKIA…[redacted]");
   s = s.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "xox…[redacted]");
@@ -93,6 +98,19 @@ export function redactForSarif(text) {
   s = s.replace(/\bGOCSPX-[A-Za-z0-9_-]{16,}\b/g, "GOCSPX-…[redacted]");
   s = s.replace(/\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, "SG.…[redacted]");
   s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "eyJ…[redacted-jwt]");
+  // Authorization: Bearer <token> (header form or bare "Bearer …").
+  s = s.replace(/\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi, "Bearer …[redacted]");
+  // Database / broker URLs with embedded user:password@ (postgres, mysql, mongo, redis, amqp, …).
+  // Also empty-user forms: redis://:password@host
+  s = s.replace(
+    /\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss|amqp|amqps):\/\/[^:@\s/'"]*):([^@\s/'"]+)@/gi,
+    "$1:…[redacted]@",
+  );
+  // Generic scheme://user:pass@host when password segment is non-trivial (user may be empty).
+  s = s.replace(/\b([a-z][a-z0-9+.-]*:\/\/[^:@\s/'"]*):([^@\s/'"]{4,})@/gi, (full, userPart, pass) => {
+    if (/\[redacted\]/i.test(pass) || pass === "…") return full;
+    return `${userPart}:…[redacted]@`;
+  });
   // Env-style KEY=value assignments with long values.
   s = s.replace(/\b([A-Z][A-Z0-9_]{2,})=\S{12,}/g, "$1=[redacted]");
   return s;
@@ -112,6 +130,11 @@ export function buildSarif(o) {
   const results = Array.isArray(o.results) ? o.results : [];
   const exitCode = typeof o.exitCode === "number" ? o.exitCode : 0;
   const version = cliVersion();
+  // Per-run attribution nonce from the trusted Action parent (optional for local CLI).
+  const runNonce =
+    (typeof o.runNonce === "string" && o.runNonce) ||
+    (typeof process.env.GETADVANTAGE_SARIF_RUN_NONCE === "string" && process.env.GETADVANTAGE_SARIF_RUN_NONCE) ||
+    "";
   const rulesById = new Map();
   const sarifResults = [];
 
@@ -252,6 +275,15 @@ export function buildSarif(o) {
         automationDetails: {
           id: "getadvantage/check",
         },
+        // Trusted Action parent binds a per-run nonce here; the Action requires
+        // it on return so a stale/replaced file cannot count as this run's SARIF.
+        ...(runNonce
+          ? {
+              properties: {
+                "getadvantage/runNonce": String(runNonce).slice(0, 128),
+              },
+            }
+          : {}),
       },
     ],
   };
@@ -269,10 +301,18 @@ export function buildSarif(o) {
  */
 export function encodeArtifactUri(filePath) {
   if (filePath == null || filePath === "") return "";
-  const normalized = String(filePath).replace(/\\/g, "/");
-  // Reject absolute URLs (scheme://…) — never lift credential-bearing tool
-  // stdout into artifactLocation.uri. Real repo paths are relative.
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(normalized)) {
+  const raw = String(filePath);
+  // Omit controls (including newlines) — never emit unsafe artifact URIs.
+  if (/[\u0000-\u001F\u007F]/.test(raw)) return "";
+  const normalized = raw.replace(/\\/g, "/");
+  // Absolute POSIX, Windows drive, or UNC paths — repo artifact URIs must be relative.
+  if (normalized.startsWith("/") || normalized.startsWith("//")) return "";
+  if (/^[a-zA-Z]:\//.test(normalized)) return "";
+  // URL-like / scheme-bearing values (https:, file:, javascript:, data:, …).
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) return "";
+  const segs = normalized.split("/");
+  // Empty segment (//), `.`, or `..` — escape / non-repo-relative forms.
+  if (segs.length === 0 || segs.some((seg) => seg === "" || seg === "." || seg === "..")) {
     return "";
   }
   // Path itself is credential-shaped → omit (do not encode a leaky URI).
@@ -280,10 +320,7 @@ export function encodeArtifactUri(filePath) {
     return "";
   }
   // Percent-encode each segment so spaces, #, %, &, =, Unicode, etc. are valid URI refs.
-  return normalized
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
+  return segs.map((seg) => encodeURIComponent(seg)).join("/");
 }
 
 /** Short non-crypto hash for partialFingerprints (stable, not security-sensitive). */

@@ -178,6 +178,122 @@ export function pl(n) {
   return n === 1 ? "" : "s";
 }
 
+/**
+ * Exact env keys that must never reach project-controlled child processes
+ * (local TypeScript, npm build scripts, or any untrusted repo binary).
+ * GitHub tokens stay in the trusted Action parent only.
+ */
+export const CREDENTIAL_ENV_KEYS = Object.freeze([
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+  "ACTIONS_ID_TOKEN_REQUEST_URL",
+  "ACTIONS_RUNTIME_TOKEN",
+  "ACTIONS_RUNTIME_URL",
+  "ACTIONS_RESULTS_URL",
+  "ACTIONS_CACHE_URL",
+  "GETADVANTAGE_API_KEY",
+  "NPM_TOKEN",
+  "NODE_AUTH_TOKEN",
+  "NPM_AUTH_TOKEN",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SESSION_TOKEN",
+  "AWS_SECURITY_TOKEN",
+  "AZURE_CLIENT_SECRET",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "DATABASE_URL",
+  "MYSQL_URL",
+  "POSTGRES_URL",
+  "POSTGRESQL_URL",
+  "MONGODB_URI",
+  "MONGO_URL",
+  "REDIS_URL",
+  "REDIS_PASSWORD",
+  "CONNECTION_STRING",
+  "PGPASSWORD",
+  "MYSQL_PWD",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "STRIPE_SECRET_KEY",
+  "STRIPE_API_KEY",
+]);
+
+/**
+ * True when an env key name is credential-shaped (token / secret / password /
+ * API key / OIDC / DB / cookie / session material). Never matches PATH or
+ * normal tool-resolution keys.
+ */
+export function isCredentialEnvKey(name) {
+  const k = String(name || "");
+  if (!k) return false;
+  // Tool resolution — never scrub.
+  if (/^PATH$/i.test(k) || /^PATHEXT$/i.test(k)) return false;
+  if (/^(SystemRoot|SYSTEMROOT|COMSPEC|ComSpec|WINDIR|windir)$/i.test(k)) return false;
+  if (/^(HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|TMP|TEMP|TMPDIR|PWD|OLDPWD|SHELL|USER|USERNAME|LOGNAME)$/i.test(k)) {
+    return false;
+  }
+  if (/^(LANG|LC_|TERM|COLORTERM|NO_COLOR|FORCE_COLOR|CI|NODE_ENV|NODE_PATH|TZ)/i.test(k)) return false;
+  if (k === "INIT_CWD" || k === "npm_node_execpath" || k === "npm_execpath") return false;
+  if (/^npm_package_/i.test(k) || /^npm_lifecycle_/i.test(k)) return false;
+  if (/^npm_config_/i.test(k)) {
+    return /auth|token|password|secret|_otp|email|_key/i.test(k);
+  }
+  if (CREDENTIAL_ENV_KEYS.includes(k)) return true;
+  // GitHub Actions OIDC / runtime surfaces
+  if (/^ACTIONS_(ID_TOKEN|RUNTIME|RESULTS|CACHE)/i.test(k)) return true;
+  if (/^ACTIONS_/i.test(k) && /TOKEN|SECRET|PASSWORD|OIDC|AUTHORIZATION/i.test(k)) return true;
+  // GitHub context: keep non-secret GITHUB_* (SHA, REF, WORKSPACE…); drop tokens.
+  if (/^GITHUB_/i.test(k)) {
+    return /TOKEN|SECRET|PASSWORD|AUTHORIZATION|JWT|OIDC|APP_TOKEN|PAT|PRIVATE/i.test(k);
+  }
+  // getAdvantage reporting + API + Action-only SARIF attribution nonce
+  // (none of these belong in project tsc/build / npm install children).
+  if (/^GETADVANTAGE_(API_KEY|TOKEN|SECRET|REPORT|SARIF_RUN_NONCE)/i.test(k)) return true;
+  if (/^INPUT_GETADVANTAGE_/i.test(k)) return true;
+  // npm / registry auth
+  if (/^NPM_/i.test(k) && /TOKEN|AUTH|PASSWORD|SECRET/i.test(k)) return true;
+  // DB / cloud connection strings by prefix
+  if (/^(DATABASE|MYSQL|POSTGRES|MONGO|REDIS|DB)_/i.test(k) && /URL|URI|PASSWORD|PASS|AUTH|SECRET/i.test(k)) {
+    return true;
+  }
+  // Generic high-risk names (token/secret/password/private-key/cookie/session/…)
+  if (
+    /(_|^)(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|API_?KEY|APIKEY|ACCESS_?KEY|AUTH_?TOKEN|CREDENTIALS?|SESSION_?SECRET|COOKIE|JWT|BEARER)S?$/i.test(
+      k,
+    )
+  ) {
+    if (/^GITHUB_ACTIONS$/i.test(k)) return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Copy `env` with all credential-shaped keys removed.
+ * Use for every project-controlled subprocess (tsc, npm run build, …).
+ * The trusted Action parent retains GITHUB_TOKEN for PR comments only.
+ *
+ * @param {NodeJS.ProcessEnv|Record<string,string|undefined>} [env]
+ * @param {{ keep?: string[] }} [opts] exact keys to retain (e.g. report key in trusted CLI only)
+ * @returns {Record<string,string>}
+ */
+export function scrubCredentialEnv(env = process.env, opts = {}) {
+  const keep = new Set((opts.keep || []).map(String));
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) {
+    if (v == null) continue;
+    if (keep.has(k)) {
+      out[k] = String(v);
+      continue;
+    }
+    if (isCredentialEnvKey(k)) continue;
+    out[k] = String(v);
+  }
+  return out;
+}
+
 /** Section header. */
 export function section(title) {
   console.log("\n" + c.bold(c.cyan(title)));

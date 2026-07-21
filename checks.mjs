@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
-import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl } from "./util.mjs";
+import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl, scrubCredentialEnv } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
 import { loadPolicy, secretAllowDecision } from "./policy.mjs";
 
@@ -686,6 +686,10 @@ export function checkManifest(cwd, project = null) {
 const DEFAULT_CHECK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 function runCapture(cmd, args, cwd, opts = {}) {
+  // Project-controlled compilers/build scripts inherit a credential-scrubbed
+  // environment only — never GITHUB_TOKEN, OIDC tokens, getAdvantage API keys,
+  // npm/cloud/DB secrets, or generic TOKEN/SECRET/PASSWORD material.
+  const childEnv = scrubCredentialEnv(opts.env || process.env);
   try {
     const out = execFileSync(cmd, args, {
       cwd,
@@ -698,6 +702,7 @@ function runCapture(cmd, args, cwd, opts = {}) {
       shell: opts.shell ?? process.platform === "win32",
       timeout: opts.timeout ?? DEFAULT_CHECK_TIMEOUT_MS,
       killSignal: "SIGTERM",
+      env: childEnv,
     });
     return { ok: true, out };
   } catch (e) {
