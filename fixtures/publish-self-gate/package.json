@@ -1,0 +1,6 @@
+{
+  "name": "getadvantage-publish-self-gate-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Clean fixture for the release workflow Action self-test only. No secrets."
+}

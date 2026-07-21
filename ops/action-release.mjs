@@ -348,6 +348,16 @@ export function validatePublishWorkflowContract(yml) {
     { re: /uses:\s*\.\/\s*$/m, msg: "must run composite Action via uses: ./ before publish" },
     { re: /comment:\s*false/i, msg: "Action self-test must set comment: false" },
     { re: /report:\s*false/i, msg: "Action self-test must set report: false" },
+    // Self-gate must dogfood a clean versioned fixture — never the product root
+    // (product tests/ intentionally hold secret-shaped hostile strings).
+    {
+      re: /working-directory:\s*fixtures\/publish-self-gate/i,
+      msg: "Action self-test must use working-directory: fixtures/publish-self-gate",
+    },
+    {
+      re: /Materialize clean publish self-gate fixture|publish-self-gate/i,
+      msg: "must materialize clean publish self-gate fixture before uses: ./",
+    },
     // Published source identity: npm gitHead + peeled tags, not blind HEAD.
     { re: /gitHead/i, msg: "must resolve published source via npm gitHead" },
     { re: /\^\{\}/, msg: "must peel tags with ^{} for annotated-tag safety" },
@@ -361,6 +371,11 @@ export function validatePublishWorkflowContract(yml) {
   const npmPub = text.search(/^\s*npm publish\b/m);
   if (usesExact < 0 || npmPub < 0 || usesExact > npmPub) {
     failures.push("uses: ./ Action gate must appear before npm publish");
+  }
+  // Fixture materialization must precede the composite self-test.
+  const materializeIdx = text.search(/Materialize clean publish self-gate fixture/i);
+  if (materializeIdx < 0 || (usesExact >= 0 && materializeIdx > usesExact)) {
+    failures.push("clean publish self-gate fixture must be materialized before uses: ./");
   }
   // Tag/release apply must not run before publish for new versions: the
   // verify-npm-source / action-release step must appear after npm publish.

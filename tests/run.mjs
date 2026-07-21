@@ -100,6 +100,10 @@
 //                                     annotated exact tag peel; lightweight v1 peel;
 //                                     post-publish gitHead verify before tags;
 //                                     uses: ./ before npm publish; unproven source fails
+//  44. Publish self-gate fixture     — versioned clean fixtures/publish-self-gate;
+//                                     workflow working-directory + materialize;
+//                                     nested-git clean GO; product-root still NO-GO
+//                                     on intentional tests/run.mjs hostiles
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -4918,6 +4922,7 @@ scenario("action repair pass-3: encodeArtifactUri hostiles, nonce scrub, install
   assert.ok(/^\s*uses:\s*\.\/\s*$/m.test(yml), "publish must execute uses: ./");
   assert.ok(/comment:\s*false/.test(yml));
   assert.ok(/report:\s*false/.test(yml));
+  assert.ok(/working-directory:\s*fixtures\/publish-self-gate/.test(yml), "self-gate must target clean fixture");
   const usesIdx = yml.search(/^\s*uses:\s*\.\/\s*$/m);
   const pubIdx = yml.search(/^\s*npm publish\b/m);
   assert.ok(usesIdx >= 0 && pubIdx > usesIdx, "uses: ./ must precede npm publish");
@@ -5196,6 +5201,10 @@ scenario("action repair pass-4: published source identity, annotated peel, pre-t
     assert.ok(applyIdx > verifyIdx, "tag apply must run after gitHead verification");
     assert.ok(/comment:\s*false/.test(yml));
     assert.ok(/report:\s*false/.test(yml));
+    assert.ok(/working-directory:\s*fixtures\/publish-self-gate/.test(yml), "self-gate targets clean fixture");
+    assert.ok(/Materialize clean publish self-gate fixture/.test(yml), "must materialize fixture before uses: ./");
+    const matIdx = yml.search(/Materialize clean publish self-gate fixture/);
+    assert.ok(matIdx >= 0 && matIdx < usesIdx, "fixture materialize must precede uses: ./");
     assert.ok(/gitHead/i.test(yml));
     assert.ok(/\^\{\}/.test(yml), "workflow must peel tags with ^{}");
     assert.ok(/source_sha/.test(yml), "workflow must pass proven source_sha to apply");
@@ -5209,6 +5218,115 @@ scenario("action repair pass-4: published source identity, annotated peel, pre-t
     assert.equal(shasEqual(releaseSha, releaseSha.slice(0, 12)), true);
     assert.equal(shasEqual(releaseSha, docsSha.slice(0, 12)), false);
   }
+});
+
+scenario("publish self-gate fixture: clean nested-git GO; product root still NO-GO; no secret-shaped fixture", () => {
+  const pkgRoot = path.join(__dirname, "..");
+  const fixture = path.join(pkgRoot, "fixtures", "publish-self-gate");
+  const ymlPath = path.join(pkgRoot, ".github", "workflows", "publish.yml");
+  const yml = readFileSync(ymlPath, "utf8");
+
+  // Versioned fixture must exist and stay secret-free.
+  assert.ok(existsSync(path.join(fixture, "package.json")), "fixture package.json required");
+  assert.ok(existsSync(path.join(fixture, "src", "app.js")), "fixture src/app.js required");
+  assert.ok(existsSync(path.join(fixture, "README.md")), "fixture README required");
+  const secretShape =
+    /sk_live_|sk_test_|gh[pousr]_|-----BEGIN (?:[A-Z0-9 ]+)?PRIVATE KEY-----|postgres(?:ql)?:\/\/[^\s:]+:[^\s@]+@/i;
+  function walkTexts(dir, acc = []) {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      if (name.name === "node_modules" || name.name === ".git") continue;
+      const abs = path.join(dir, name.name);
+      if (name.isDirectory()) walkTexts(abs, acc);
+      else acc.push(readFileSync(abs, "utf8"));
+    }
+    return acc;
+  }
+  for (const text of walkTexts(fixture)) {
+    assert.ok(!secretShape.test(text), "publish self-gate fixture must not contain secret-shaped content");
+  }
+
+  // Workflow contract: clean fixture working-directory, never product-root default alone.
+  assert.ok(/working-directory:\s*fixtures\/publish-self-gate/.test(yml));
+  assert.ok(/Materialize clean publish self-gate fixture/.test(yml));
+  assert.ok(/install-dependencies:\s*false/.test(yml), "fixture has no deps; install skipped");
+  // Must not silence the scanner for product tests/ or allowlist test fixtures.
+  assert.ok(!/secrets:\s*\{[^}]*tests\//.test(yml));
+  assert.ok(!/ignore:[\s\S]*tests\/run\.mjs/.test(yml));
+
+  // Materialize nested git the same way the workflow does, then expect GO.
+  const nested = path.join(freshBase(), "publish-self-gate");
+  try {
+    mkdirSync(nested, { recursive: true });
+    // Copy versioned fixture sources into an isolated nested repo (hermetic).
+    for (const rel of ["package.json", "README.md", ".gitignore", path.join("src", "app.js")]) {
+      const src = path.join(fixture, rel);
+      const dest = path.join(nested, rel);
+      mkdirSync(path.dirname(dest), { recursive: true });
+      writeFileSync(dest, readFileSync(src));
+    }
+    initRepo(nested);
+    commitAll(nested, "publish self-gate clean fixture");
+    const go = spawnSync(process.execPath, [path.join(pkgRoot, "index.mjs"), "check", "--ci", "--json", "--no-overview", "--no-brief-check"], {
+      cwd: nested,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(go.status, 0, `clean fixture must GO:\n${go.stdout}\n${go.stderr}`);
+    const goDoc = JSON.parse((go.stdout || "").trim() || "{}");
+    assert.equal(goDoc.verdict, "GO");
+
+    // Committed-secret fixture still NO-GO; SARIF must not contain the full secret.
+    const hostile = path.join(path.dirname(nested), "hostile-secret");
+    mkdirSync(hostile, { recursive: true });
+    writeFileSync(path.join(hostile, "package.json"), '{"name":"hostile","version":"1.0.0","private":true}\n');
+    const secret = "sk_live_" + "z9y8x7w6v5u4t3s2r1q0p9o8n7";
+    writeFileSync(path.join(hostile, "leak.js"), `export const k = "${secret}";\n`);
+    initRepo(hostile);
+    commitAll(hostile, "chore: committed secret");
+    const sarifPath = path.join(hostile, "out.sarif");
+    const noGo = spawnSync(
+      process.execPath,
+      [path.join(pkgRoot, "index.mjs"), "check", "--ci", "--json", "--no-overview", "--no-brief-check", "--sarif", "out.sarif"],
+      { cwd: hostile, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(noGo.status, 1, "committed secret must NO-GO");
+    const noGoDoc = JSON.parse((noGo.stdout || "").trim() || "{}");
+    assert.equal(noGoDoc.verdict, "NO-GO");
+    assert.ok(existsSync(sarifPath), "SARIF written on secret NO-GO");
+    const sarifRaw = readFileSync(sarifPath, "utf8");
+    assert.ok(!sarifRaw.includes(secret), "SARIF must not contain full secret");
+    // Fragment safety: long unique middle of the key must not appear either.
+    assert.ok(!sarifRaw.includes(secret.slice(8, 24)), "SARIF must not contain secret fragment");
+  } finally {
+    cleanup(path.dirname(nested));
+  }
+
+  // Product source tree still honestly NO-GO for intentional hostiles in tests/run.mjs.
+  // (Proves the remedy did not suppress the scanner on the real product tree.)
+  const product = spawnSync(
+    process.execPath,
+    [path.join(pkgRoot, "index.mjs"), "check", "--ci", "--json", "--no-overview", "--no-brief-check"],
+    { cwd: pkgRoot, encoding: "utf8", env: buildEnv(), timeout: 180_000 },
+  );
+  assert.equal(product.status, 1, "product tree must still NO-GO on intentional test fixture secrets");
+  let productDoc = null;
+  try {
+    productDoc = JSON.parse((product.stdout || "").trim());
+  } catch {
+    const s = (product.stdout || "").indexOf("{");
+    const e = (product.stdout || "").lastIndexOf("}");
+    if (s >= 0 && e > s) productDoc = JSON.parse(product.stdout.slice(s, e + 1));
+  }
+  assert.ok(productDoc && productDoc.verdict === "NO-GO", "product verdict must be NO-GO");
+  const secretCheck = (productDoc.checks || []).find((c) => /Secret scan/i.test(c.label));
+  assert.ok(secretCheck && secretCheck.status === "fail", "product secret scan must still fail (tests/ hostiles)");
+  assert.ok(
+    /tests\/run\.mjs/i.test(JSON.stringify(secretCheck)),
+    "product NO-GO must still cite tests/run.mjs hostiles",
+  );
+  const testsBlob = readFileSync(path.join(pkgRoot, "tests", "run.mjs"), "utf8");
+  assert.ok(/sk_live_/.test(testsBlob), "tests/run.mjs still holds intentional hostile fixtures");
 });
 
 scenario("packed package: includes action.yml + action/ files; cold workflow + action path", () => {

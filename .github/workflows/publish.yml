@@ -68,14 +68,46 @@ jobs:
         run: npm run evidence
 
       # Real runner proof of composite Action semantics (not YAML-regex-only).
-      # Executes the checked-out candidate via uses: ./ before any publish/tag move.
-      # Failure here blocks npm publication and Action tag movement.
+      # Dogfood uses: ./ against the versioned clean fixture under
+      # fixtures/publish-self-gate — NOT the product root. The product tree
+      # intentionally holds secret-shaped hostile strings in tests/ (unit/contract
+      # fixtures); gating the root would always NO-GO and block every release.
+      # We never suppress tests/, dilute the secret scan, or allowlist those
+      # fixtures. Nested git is materialized here so the Action only scans this
+      # clean tree. Failure still blocks npm publication and Action tag movement.
+      - name: Materialize clean publish self-gate fixture repo
+        if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
+        run: |
+          set -euo pipefail
+          FIXTURE="fixtures/publish-self-gate"
+          test -f "$FIXTURE/package.json"
+          test -f "$FIXTURE/src/app.js"
+          test -f "$FIXTURE/README.md"
+          # Refuse materializing if the versioned fixture gained secret-shaped content.
+          if grep -RInE 'sk_live_|sk_test_|gh[pousr]_|-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|postgres(ql)?://[^[:space:]]+:[^[:space:]]+@' \
+            --exclude-dir=node_modules --exclude-dir=.git "$FIXTURE"; then
+            echo "FAIL: publish self-gate fixture contains secret-shaped content"
+            exit 1
+          fi
+          rm -rf "$FIXTURE/.git"
+          git -C "$FIXTURE" init -q -b main
+          git -C "$FIXTURE" config user.email "publish-self-gate@getadvantage.app"
+          git -C "$FIXTURE" config user.name "publish-self-gate"
+          git -C "$FIXTURE" config commit.gpgsign false
+          git -C "$FIXTURE" add -A
+          git -C "$FIXTURE" commit -q -m "publish self-gate clean fixture"
+          echo "Materialized nested git fixture at $FIXTURE ($(git -C "$FIXTURE" rev-parse --short HEAD))"
+
       - name: "Gate — Action composite (uses: ./)"
         if: steps.version.outputs.new == 'true' || steps.version.outputs.tags_missing == 'true'
         uses: ./
         with:
+          # Clean committed fixture only — never the product root (tests/ hostiles).
+          working-directory: fixtures/publish-self-gate
           comment: false
           report: false
+          # Fixture has no dependencies; skip install to avoid network on the gate.
+          install-dependencies: false
 
       - name: Publish to npm
         if: steps.version.outputs.new == 'true'
