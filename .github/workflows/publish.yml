@@ -139,8 +139,9 @@ jobs:
           # Ensure remote tags are visible for mismatch detection (peel with ^{}).
           git fetch origin --tags --force 2>/dev/null || true
           # Annotated exact tags need a committer identity on hosted runners.
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Repository-local only (never --global); name then email for contract order.
           git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # Released source SHA:
           # - new publish: verified npm gitHead / candidate (from verify step or gate)

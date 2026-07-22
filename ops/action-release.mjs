@@ -441,6 +441,18 @@ export function validatePublishWorkflowContract(yml) {
   if (/permissions:\s*write-all/i.test(text)) {
     failures.push("must not use write-all; use least contents: write");
   }
+  // Annotated-tag apply needs repository-local tagger identity (never --global).
+  // Contract order matches the pass-4 structural check: user.name then user.email.
+  const taggerIdentityIdx = text.search(/git config user\.name[\s\S]*git config user\.email/);
+  const applyOnlyIdx = text.search(/action-release\.mjs\s+--apply/);
+  if (taggerIdentityIdx < 0) {
+    failures.push("must configure repository-local tagger identity (user.name then user.email)");
+  } else if (applyOnlyIdx >= 0 && taggerIdentityIdx > applyOnlyIdx) {
+    failures.push("tagger identity must be configured before annotated-tag apply");
+  }
+  if (/git config --global user\.(?:name|email)/.test(text)) {
+    failures.push("must not mutate global git identity");
+  }
   return { ok: failures.length === 0, failures };
 }
 
