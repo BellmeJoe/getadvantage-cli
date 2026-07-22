@@ -37,7 +37,6 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
 | **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
-| 0.9+ | ICP stack-fit residual: Vite+React+Supabase map / RLS | Planned |
 | 0.9+ | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
