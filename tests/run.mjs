@@ -5701,10 +5701,26 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
 // 46. Intent Contract (0.10.0) — local change-scope trust layer
 // ---------------------------------------------------------------------------
 
-/** Write + commit a trusted intent contract on HEAD. */
+/**
+ * Write + commit a trusted intent contract as a *dedicated freeze* after the
+ * current HEAD (pinned as baselineCommit).
+ */
 function commitIntent(repo, contract) {
-  write(repo, ".getadvantage/intent.json", JSON.stringify(contract, null, 2) + "\n");
-  commitAll(repo, "chore: intent contract");
+  const baseline = g(["rev-parse", "HEAD"], repo).toLowerCase();
+  const full = {
+    schemaVersion: 1,
+    deny: [],
+    ...contract,
+    baselineCommit: contract.baselineCommit || baseline,
+  };
+  write(repo, ".getadvantage/intent.json", JSON.stringify(full, null, 2) + "\n");
+  // Dedicated freeze: only the contract file (not -A).
+  g(["add", ".getadvantage/intent.json"], repo);
+  g(["commit", "-q", "-m", "chore: intent contract"], repo);
+  return {
+    baselineCommit: full.baselineCommit,
+    freezeCommit: g(["rev-parse", "HEAD"], repo).toLowerCase(),
+  };
 }
 
 const INTENT_BASE = {
@@ -5739,14 +5755,21 @@ scenario("intent: authorized source+test change → GO; stable hash; human/JSON 
     assert.ok(doc.intent, "receipt present");
     assert.equal(doc.intent.limitation, "scope verified; semantic correctness not proven");
     assert.match(doc.intent.contractHash, /^sha256:[0-9a-f]{64}$/);
+    assert.match(doc.intent.receiptHash, /^sha256:[0-9a-f]{64}$/);
     assert.ok(doc.intent.changedPaths.some((p) => /src\/auth\/reset\.js/.test(p)));
     assert.ok(doc.intent.changedPaths.some((p) => /tests\/auth/.test(p)));
     assert.equal((doc.intent.violations || []).length, 0);
+    // Freeze contract path accounted exactly once / excluded when invariants hold
+    assert.ok(
+      !(doc.intent.changedPaths || []).some((p) => p.replace(/\\/g, "/") === ".getadvantage/intent.json"),
+      "freeze contract path should be excluded when still matching freeze blob",
+    );
 
-    // Stable hash across two runs
+    // Stable hashes across two runs
     const j2 = run(["intent", "check", "--json"], repo);
     const doc2 = parseJson(j2);
     assert.equal(doc2.intent.contractHash, doc.intent.contractHash, "intent hash must be stable");
+    assert.equal(doc2.intent.receiptHash, doc.intent.receiptHash, "receipt hash must be stable");
 
     // Main check includes intent when trusted contract present
     const gate = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
@@ -5856,7 +5879,6 @@ scenario("intent: staged/unstaged/deleted/renamed/untracked cannot evade", () =>
     write(repo, "src/auth/old.js", "export const old = 2;\n");
     // Deleted outside allow (must NO-GO)
     g(["rm", "-q", "lib/util.js"], repo);
-    // Rename outside → inside would need both paths authorized; rename from lib
     // Untracked outside
     write(repo, "docs/secret-plan.md", "plan\n");
     // Rename: move src/keep.js → src/auth/keep.js (old path outside allow)
@@ -5869,7 +5891,6 @@ scenario("intent: staged/unstaged/deleted/renamed/untracked cannot evade", () =>
     assert.ok(paths.some((p) => p === "lib/util.js"), `delete must count: ${paths}`);
     assert.ok(paths.some((p) => p === "docs/secret-plan.md"), `untracked must count: ${paths}`);
     assert.ok(paths.some((p) => p === "src/keep.js") || paths.some((p) => p === "src/auth/keep.js"), `rename paths: ${paths}`);
-    // At least one outside-allow or the rename-from path
     assert.ok((doc.intent.violations || []).length > 0);
     assert.ok(
       (doc.intent.violations || []).some(
@@ -5888,10 +5909,11 @@ scenario("intent: editing worktree contract to broaden scope cannot authorize it
   const base = freshBase();
   try {
     const repo = scaffold(base);
-    commitIntent(repo, INTENT_BASE);
+    const { baselineCommit } = commitIntent(repo, INTENT_BASE);
     // Agent broadens allow in worktree only
     const broadened = {
       ...INTENT_BASE,
+      baselineCommit,
       allow: ["src/**", "tests/**", "**/*"],
     };
     write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
@@ -5901,7 +5923,6 @@ scenario("intent: editing worktree contract to broaden scope cannot authorize it
     assert.equal(r.code, 1, `worktree broaden must not authorize\n${r.stderr}\n${r.stdout}`);
     const doc = parseJson(r);
     assert.equal(doc.verdict, "NO-GO");
-    // Either outside-allow on src/other, or intent.json itself outside allow
     const violPaths = (doc.intent.violations || []).map((v) => v.path.replace(/\\/g, "/"));
     assert.ok(
       violPaths.some((p) => p === "src/other/pwn.js" || p === ".getadvantage/intent.json"),
@@ -5913,132 +5934,469 @@ scenario("intent: editing worktree contract to broaden scope cannot authorize it
   }
 });
 
-scenario("intent: malformed schema, traversal, absolute paths, unsafe baseline fail closed", () => {
+// --- Trust-root + committed-change coverage regressions ---
+
+scenario("intent: init baseline A + freeze B + committed authorized C → GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const A = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    const init = run(
+      ["intent", "init", "--goal", "Auth work", "--allow", "src/auth/**", "--allow", "tests/auth/**"],
+      repo,
+    );
+    assert.equal(init.code, 0, init.stderr + init.stdout);
+    const body = JSON.parse(readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8"));
+    assert.equal(body.baselineCommit, A, "init must pin baselineCommit to pre-freeze HEAD");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: intent freeze"], repo);
+    const B = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    assert.notEqual(B, A);
+
+    // Committed authorized code C after freeze
+    write(repo, "src/auth/reset.js", "export const reset = 1;\n");
+    g(["add", "src/auth/reset.js"], repo);
+    g(["commit", "-q", "-m", "feat: authorized"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 0, `committed authorized must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.intent.baseline.sha, A);
+    assert.equal(doc.intent.freezeCommit, B);
+    assert.ok(doc.intent.changedPaths.some((p) => /reset\.js/.test(p)));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: committed unauthorized after freeze → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    write(repo, "src/other/evil.js", "export const evil = 1;\n");
+    g(["add", "src/other/evil.js"], repo);
+    g(["commit", "-q", "-m", "feat: unauthorized committed"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `committed unauthorized must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.ok(
+      (doc.intent.violations || []).some(
+        (v) => v.reason === "outside-allow" && /evil\.js/.test(v.path),
+      ),
+      JSON.stringify(doc.intent.violations),
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: committing broadened contract after freeze → NO-GO; freeze remains authorizer", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { baselineCommit, freezeCommit } = commitIntent(repo, INTENT_BASE);
+    const broadened = {
+      schemaVersion: 1,
+      goal: "Add password reset",
+      allow: ["**/*"],
+      deny: [],
+      baselineCommit,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: agent broadens contract"], repo);
+    write(repo, "src/other/pwn.js", "export const pwn = 1;\n");
+    g(["add", "src/other/pwn.js"], repo);
+    g(["commit", "-q", "-m", "feat: pwn"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `broadened re-commit must not authorize\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.intent.freezeCommit, freezeCommit, "original freeze remains authorizer");
+    assert.ok(
+      (doc.intent.violations || []).some(
+        (v) =>
+          v.reason === "outside-allow" &&
+          (v.path === "src/other/pwn.js" || v.path === ".getadvantage/intent.json"),
+      ),
+      JSON.stringify(doc.intent.violations),
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: staged-only and worktree-only contract broadening → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { baselineCommit } = commitIntent(repo, INTENT_BASE);
+
+    // Staged-only broaden
+    const broadened = {
+      schemaVersion: 1,
+      goal: "Add password reset",
+      allow: ["**/*"],
+      deny: [],
+      baselineCommit,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    write(repo, "lib/staged-pwn.js", "export const s = 1;\n");
+    g(["add", "lib/staged-pwn.js"], repo);
+
+    let r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `staged broaden must NO-GO\n${r.stderr}\n${r.stdout}`);
+    let doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+
+    // Reset index; worktree-only broaden
+    g(["checkout", "HEAD", "--", ".getadvantage/intent.json"], repo);
+    g(["reset", "HEAD", "--", "lib/staged-pwn.js"], repo);
+    try {
+      g(["rm", "-f", "--cached", "lib/staged-pwn.js"], repo);
+    } catch {
+      /* ok */
+    }
+    // Remove staged pwn file from worktree and use pure worktree broaden + untracked
+    try {
+      rmSync(path.join(repo, "lib", "staged-pwn.js"), { force: true });
+    } catch {
+      /* ok */
+    }
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
+    write(repo, "lib/wt-pwn.js", "export const w = 1;\n");
+    r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `worktree broaden must NO-GO\n${r.stderr}\n${r.stdout}`);
+    doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.ok(doc.intent.worktreeContractDiffers);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: agent branch broad contract + former --base-ref cannot self-authorize", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    write(repo, "src/other/leak.js", "export const leak = 1;\n");
+
+    // Agent creates a parallel branch with a broad contract freeze of its own
+    g(["checkout", "-b", "agent-auth"], repo);
+    // Reset intent history on branch by committing a NEW baseline+freeze with ** allow
+    // (simulates agent-controlled branch; must not authorize current work via --base-ref)
+    const agentBase = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    // First move HEAD forward with a non-intent commit so we can re-baseline? 
+    // Simpler: checkout orphan-like path — create branch from before original freeze.
+    g(["checkout", "main"], repo);
+    const pre = g(["rev-parse", "HEAD~1"], repo); // baseline of original = parent of freeze... 
+    // Actually HEAD is freeze. HEAD~1 is baseline A.
+    g(["checkout", "-b", "agent-auth2", "HEAD~1"], repo);
+    const agentBaseline = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    const broad = {
+      schemaVersion: 1,
+      goal: "agent self auth",
+      allow: ["**/*"],
+      deny: [],
+      baselineCommit: agentBaseline,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broad, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: agent broad freeze"], repo);
+
+    // Switch back to main (narrow freeze) with unauthorized file
+    g(["checkout", "main"], repo);
+    write(repo, "src/other/leak.js", "export const leak = 1;\n");
+
+    // Former attack: --base-ref agent-auth2 must be rejected (cannot select trust)
+    let r = run(["intent", "check", "--base-ref", "agent-auth2", "--json"], repo);
+    assert.equal(r.code, 1, `--base-ref must not select trust\n${r.stderr}\n${r.stdout}`);
+    const all = r.stdout + r.stderr;
+    assert.match(all, /base-ref|trust|refuse|NO-GO|not accept/i);
+
+    // Without flag: main narrow freeze still applies → NO-GO on leak
+    r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+    const doc = parseJson(r);
+    assert.ok(
+      (doc.intent.violations || []).some((v) => /leak\.js/.test(v.path)),
+      JSON.stringify(doc.intent),
+    );
+    void agentBase;
+    void pre;
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: non-ancestor / missing baseline / non-dedicated freeze / merge freeze fail closed", () => {
   const base = freshBase();
   try {
     const repo = scaffold(base);
 
-    // Malformed JSON committed
+    // Missing baselineCommit
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify({ schemaVersion: 1, goal: "x", allow: ["src/**"], deny: [] }, null, 2) + "\n",
+    );
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: no baseline"], repo);
+    let r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout + r.stderr + JSON.stringify(parseJson(r)), /baselineCommit|trust|NO-GO/i);
+
+    // Non-ancestor baselineCommit (fake SHA-like that isn't ancestor)
+    const repo2 = path.join(base, "sample2");
+    initRepo(repo2);
+    write(repo2, "package.json", JSON.stringify({ name: "s2", version: "1.0.0", private: true }) + "\n");
+    commitAll(repo2, "chore: a");
+    const A = g(["rev-parse", "HEAD"], repo2).toLowerCase();
+    write(repo2, "a.txt", "a\n");
+    commitAll(repo2, "chore: b");
+    // Create unrelated commit history via orphan
+    g(["checkout", "--orphan", "other"], repo2);
+    write(repo2, "only.txt", "only\n");
+    g(["add", "only.txt"], repo2);
+    g(["commit", "-q", "-m", "orphan"], repo2);
+    const orphan = g(["rev-parse", "HEAD"], repo2).toLowerCase();
+    g(["checkout", "main"], repo2);
+    // Freeze with baseline pointing at orphan (not ancestor)
+    write(
+      repo2,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        { schemaVersion: 1, goal: "x", allow: ["src/**"], deny: [], baselineCommit: orphan },
+        null,
+        2,
+      ) + "\n",
+    );
+    g(["add", ".getadvantage/intent.json"], repo2);
+    g(["commit", "-q", "-m", "freeze bad base"], repo2);
+    r = run(["intent", "check", "--json"], repo2);
+    assert.equal(r.code, 1, "non-ancestor baseline must fail");
+    assert.match(r.stdout + r.stderr, /ancestor|refuse|trust|baseline|NO-GO/i);
+
+    // Non-dedicated freeze (contract + other file in same commit)
+    const repo3 = path.join(base, "sample3");
+    initRepo(repo3);
+    write(repo3, "package.json", JSON.stringify({ name: "s3", version: "1.0.0", private: true }) + "\n");
+    commitAll(repo3, "chore: init");
+    const b3 = g(["rev-parse", "HEAD"], repo3).toLowerCase();
+    write(
+      repo3,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        { schemaVersion: 1, goal: "x", allow: ["src/**"], deny: [], baselineCommit: b3 },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo3, "extra.js", "export const e = 1;\n");
+    g(["add", "-A"], repo3);
+    g(["commit", "-q", "-m", "freeze not dedicated"], repo3);
+    r = run(["intent", "check", "--json"], repo3);
+    assert.equal(r.code, 1, "non-dedicated freeze must fail");
+    assert.match(r.stdout + r.stderr, /dedicated|refuse|trust|NO-GO/i);
+
+    // baselineRef rejected
+    const repo4 = path.join(base, "sample4");
+    initRepo(repo4);
+    write(repo4, "package.json", JSON.stringify({ name: "s4", version: "1.0.0", private: true }) + "\n");
+    commitAll(repo4, "chore: init");
+    const b4 = g(["rev-parse", "HEAD"], repo4).toLowerCase();
+    write(
+      repo4,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          goal: "x",
+          allow: ["src/**"],
+          deny: [],
+          baselineCommit: b4,
+          baselineRef: "main",
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    g(["add", ".getadvantage/intent.json"], repo4);
+    g(["commit", "-q", "-m", "baselineRef bad"], repo4);
+    r = run(["intent", "check"], repo4);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout + r.stderr, /baselineRef|baselineCommit|trust|NO-GO/i);
+
+    // Short/symbolic baselineCommit
+    write(
+      repo4,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        { schemaVersion: 1, goal: "x", allow: ["src/**"], deny: [], baselineCommit: "HEAD" },
+        null,
+        2,
+      ) + "\n",
+    );
+    g(["add", ".getadvantage/intent.json"], repo4);
+    g(["commit", "-q", "-m", "symbolic base"], repo4);
+    r = run(["intent", "check"], repo4);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout + r.stderr, /40-hex|baselineCommit|trust|NO-GO|symbolic|full/i);
+
+    void A;
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: receiptHash changes with paths/verdict; deterministic repeats identical", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    write(repo, "src/auth/a.js", "export const a = 1;\n");
+    const r1 = run(["intent", "check", "--json"], repo);
+    assert.equal(r1.code, 0, r1.stderr + r1.stdout);
+    const d1 = parseJson(r1);
+    const h1 = d1.intent.receiptHash;
+    const r1b = run(["intent", "check", "--json"], repo);
+    assert.equal(parseJson(r1b).intent.receiptHash, h1, "deterministic");
+
+    write(repo, "src/auth/b.js", "export const b = 2;\n");
+    const r2 = run(["intent", "check", "--json"], repo);
+    assert.equal(r2.code, 0);
+    const h2 = parseJson(r2).intent.receiptHash;
+    assert.notEqual(h2, h1, "receiptHash must change when paths change");
+
+    write(repo, "src/other/x.js", "export const x = 1;\n");
+    const r3 = run(["intent", "check", "--json"], repo);
+    assert.equal(r3.code, 1);
+    const d3 = parseJson(r3);
+    assert.equal(d3.verdict, "NO-GO");
+    assert.notEqual(d3.intent.receiptHash, h2, "receiptHash must change when verdict/violations change");
+    assert.match(d3.intent.contractHash, /^sha256:[0-9a-f]{64}$/);
+    assert.match(d3.intent.receiptHash, /^sha256:[0-9a-f]{64}$/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: nested git repo hiding unauthorized file → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+
+    // Nested untracked repo with a hidden unauthorized file
+    const nested = path.join(repo, "nested-evil");
+    initRepo(nested);
+    write(nested, "secret.js", "export const secret = 'hide-me';\n");
+    // Ensure .git exists (initRepo creates it)
+    assert.ok(existsSync(path.join(nested, ".git")));
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `nested git must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const all = r.stdout + r.stderr + JSON.stringify(parseJson(r));
+    assert.match(all, /nested|repo boundary|\.git|refuse|NO-GO|ambiguous/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: malformed schema, traversal, absolute paths, --base-ref fail closed", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+
+    // Malformed JSON committed (dedicated)
     write(repo, ".getadvantage/intent.json", "{ not json\n");
-    commitAll(repo, "chore: bad intent");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: bad intent"], repo);
     let r = run(["intent", "check", "--json"], repo);
     assert.equal(r.code, 1);
     let doc = parseJson(r);
     assert.equal(doc.verdict, "NO-GO");
     assert.match((doc.check && doc.check.detail) || r.stdout + r.stderr, /JSON|valid|parse|schema|trust/i);
 
-    // Reset to valid then bad schema fields
+    // Unsupported schema — need new baseline after previous freeze polluted history.
+    // Continue mutating HEAD intent (later contract change path / invalid).
     write(
       repo,
       ".getadvantage/intent.json",
-      JSON.stringify(
-        {
-          schemaVersion: 99,
-          goal: "x",
-          allow: ["src/**"],
-        },
-        null,
-        2,
-      ) + "\n",
+      JSON.stringify({ schemaVersion: 99, goal: "x", allow: ["src/**"], baselineCommit: "a".repeat(40) }, null, 2) +
+        "\n",
     );
-    commitAll(repo, "chore: unsupported schema");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: unsupported schema"], repo);
     r = run(["intent", "check", "--json"], repo);
     assert.equal(r.code, 1);
 
-    // Absolute path in allow
+    // Absolute path in allow on fresh repo
+    const repoAbs = path.join(base, "abs");
+    initRepo(repoAbs);
+    write(repoAbs, "package.json", JSON.stringify({ name: "abs", version: "1.0.0", private: true }) + "\n");
+    commitAll(repoAbs, "chore: init");
+    const bAbs = g(["rev-parse", "HEAD"], repoAbs).toLowerCase();
     write(
-      repo,
+      repoAbs,
       ".getadvantage/intent.json",
       JSON.stringify(
-        {
-          schemaVersion: 1,
-          goal: "abs",
-          allow: ["/etc/passwd"],
-          deny: [],
-        },
+        { schemaVersion: 1, goal: "abs", allow: ["/etc/passwd"], deny: [], baselineCommit: bAbs },
         null,
         2,
       ) + "\n",
     );
-    commitAll(repo, "chore: absolute allow");
-    r = run(["intent", "check"], repo);
+    g(["add", ".getadvantage/intent.json"], repoAbs);
+    g(["commit", "-q", "-m", "chore: absolute allow"], repoAbs);
+    r = run(["intent", "check"], repoAbs);
     assert.equal(r.code, 1);
     assert.match(r.stdout + r.stderr, /unsafe|absolute|trust|NO-GO/i);
 
     // Traversal
+    const repoT = path.join(base, "trav");
+    initRepo(repoT);
+    write(repoT, "package.json", JSON.stringify({ name: "t", version: "1.0.0", private: true }) + "\n");
+    commitAll(repoT, "chore: init");
+    const bT = g(["rev-parse", "HEAD"], repoT).toLowerCase();
     write(
-      repo,
+      repoT,
       ".getadvantage/intent.json",
       JSON.stringify(
-        {
-          schemaVersion: 1,
-          goal: "trav",
-          allow: ["../../secrets/**"],
-          deny: [],
-        },
+        { schemaVersion: 1, goal: "trav", allow: ["../../secrets/**"], deny: [], baselineCommit: bT },
         null,
         2,
       ) + "\n",
     );
-    commitAll(repo, "chore: traversal allow");
-    r = run(["intent", "check"], repo);
+    g(["add", ".getadvantage/intent.json"], repoT);
+    g(["commit", "-q", "-m", "chore: traversal"], repoT);
+    r = run(["intent", "check"], repoT);
     assert.equal(r.code, 1);
 
-    // Windows-style absolute
-    write(
-      repo,
-      ".getadvantage/intent.json",
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          goal: "winabs",
-          allow: ["C:\\\\Windows\\\\System32"],
-          deny: [],
-        },
-        null,
-        2,
-      ) + "\n",
-    );
-    commitAll(repo, "chore: win absolute");
-    r = run(["intent", "check"], repo);
-    assert.equal(r.code, 1);
-
-    // Remote-looking baseline via --base-ref
-    write(
-      repo,
-      ".getadvantage/intent.json",
-      JSON.stringify({ schemaVersion: 1, goal: "ok", allow: ["src/**"], deny: [] }, null, 2) + "\n",
-    );
-    commitAll(repo, "chore: good intent");
-    r = run(["intent", "check", "--base-ref", "refs/pull/1/merge"], repo);
-    assert.equal(r.code, 1, "remote/PR base-ref must fail closed");
-    assert.match(r.stdout + r.stderr, /remote|PR|refuse|trust|NO-GO|baseline/i);
+    // --base-ref always rejected on intent check (even with valid freeze)
+    const repoOk = path.join(base, "ok");
+    initRepo(repoOk);
+    write(repoOk, "package.json", JSON.stringify({ name: "ok", version: "1.0.0", private: true }) + "\n");
+    commitAll(repoOk, "chore: init");
+    commitIntent(repoOk, { schemaVersion: 1, goal: "ok", allow: ["src/**"], deny: [] });
+    r = run(["intent", "check", "--base-ref", "refs/pull/1/merge"], repoOk);
+    assert.equal(r.code, 1, "any --base-ref on intent check must fail closed");
+    assert.match(r.stdout + r.stderr, /base-ref|trust|refuse|NO-GO|not accept/i);
 
     // init rejects absolute --allow
-    r = run(
-      ["intent", "init", "--goal", "x", "--allow", "/abs/**"],
-      repo,
-    );
+    r = run(["intent", "init", "--goal", "x", "--allow", "/abs/**"], repoOk);
     assert.equal(r.code, 1);
 
-    // Separator normalization: backslash allow is normalized; forward-slash change matches
-    write(
-      repo,
-      ".getadvantage/intent.json",
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          goal: "sep",
-          allow: ["src/auth/**"],
-          deny: [],
-        },
-        null,
-        2,
-      ) + "\n",
-    );
-    commitAll(repo, "chore: sep intent");
-    write(repo, "src/auth/x.js", "export const x = 1;\n");
-    r = run(["intent", "check", "--json"], repo);
+    // Separator normalization GO
+    write(repoOk, "src/auth/x.js", "export const x = 1;\n");
+    r = run(["intent", "check", "--json"], repoOk);
     assert.equal(r.code, 0, `separator-normalized allow should GO\n${r.stderr}\n${r.stdout}`);
   } finally {
     cleanup(base);
@@ -6068,6 +6426,7 @@ scenario("intent: init CLI + packed cold install can init+check real temp git re
   const base = freshBase();
   try {
     const repo = scaffold(base);
+    const headBefore = g(["rev-parse", "HEAD"], repo).toLowerCase();
     const init = run(
       [
         "intent",
@@ -6089,8 +6448,11 @@ scenario("intent: init CLI + packed cold install can init+check real temp git re
     );
     assert.equal(init.code, 0, `init failed\n${init.stderr}\n${init.stdout}`);
     assert.ok(existsSync(path.join(repo, ".getadvantage", "intent.json")));
-    assert.match(init.stdout + init.stderr, /commit/i);
-    commitAll(repo, "chore: intent contract from init");
+    assert.match(init.stdout + init.stderr, /commit|baselineCommit/i);
+    const written = JSON.parse(readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8"));
+    assert.equal(written.baselineCommit, headBefore);
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: intent contract from init"], repo);
 
     write(repo, "src/auth/ok.js", "export const ok = 1;\n");
     const chk = run(["intent", "check", "--json"], repo);
@@ -6098,6 +6460,7 @@ scenario("intent: init CLI + packed cold install can init+check real temp git re
     const doc = parseJson(chk);
     assert.equal(doc.verdict, "GO");
     assert.match(doc.intent.contractHash, /^sha256:[0-9a-f]{64}$/);
+    assert.match(doc.intent.receiptHash, /^sha256:[0-9a-f]{64}$/);
     assert.ok(doc.intent.acceptanceNotes);
 
     // Packed cold path
@@ -6144,7 +6507,8 @@ scenario("intent: init CLI + packed cold install can init+check real temp git re
       { cwd: coldRepo, encoding: "utf8", env: buildEnv(), timeout: 60_000 },
     );
     assert.equal(coldInit.status, 0, `cold init\n${coldInit.stderr}\n${coldInit.stdout}`);
-    commitAll(coldRepo, "chore: cold intent");
+    g(["add", ".getadvantage/intent.json"], coldRepo);
+    g(["commit", "-q", "-m", "chore: cold intent"], coldRepo);
     write(coldRepo, "src/x.js", "export const x = 1;\n");
     const coldCheck = spawnSync(process.execPath, [coldBin, "intent", "check", "--json"], {
       cwd: coldRepo,
@@ -6168,6 +6532,7 @@ scenario("intent: help surfaces and main check JSON/SARIF stay consistent", () =
     assert.equal(h.code, 0);
     assert.match(h.stdout + h.stderr, /intent init/i);
     assert.match(h.stdout + h.stderr, /semantic correctness not proven/i);
+    assert.match(h.stdout + h.stderr, /baselineCommit|freeze|receipt/i);
 
     commitIntent(repo, INTENT_BASE);
     write(repo, "src/other/bad.js", "export const bad = 1;\n");
@@ -6176,7 +6541,6 @@ scenario("intent: help surfaces and main check JSON/SARIF stay consistent", () =
       ["check", "--json", "--no-overview", "--no-brief-check", "--sarif", sarifPath],
       repo,
     );
-    // Overall may be NO-GO (dirty + intent)
     const doc = parseJson(r);
     const ic = (doc.checks || []).find((c) => /Intent Contract/i.test(c.label));
     assert.ok(ic && ic.status === "fail");

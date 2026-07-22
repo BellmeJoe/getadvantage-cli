@@ -102,13 +102,14 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Feature | User-facing line | Command | Status |
 |---------|------------------|---------|--------|
-| **Intent Contract** | Freeze the task envelope before the agent starts; after work, prove repo changes stayed inside it. GO/NO-GO + receipt. *Scope verified; semantic correctness not proven.* | `intent init` · `intent check` · part of `check` when committed | **REVIEW_PENDING** · not on npm LIVE |
+| **Intent Contract** | Pin baseline + dedicated freeze before the agent starts; after work (including commits), prove every change after baseline stayed inside the freeze envelope. GO/NO-GO + contractHash + receiptHash. Nested git fail-closed. Local trust only. *Scope verified; semantic correctness not proven.* | `intent init` · `intent check` · part of `check` when freeze trusted | **REVIEW_PENDING** · not on npm LIVE |
 
 **Candidate one-liner (not for LIVE posts):**
 ```
 Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
-Commit it. After: intent check → did changes stay in the human envelope?
-Scope only — not semantic correctness. (0.10.0 candidate)
+Commit only intent.json (dedicated freeze). After: intent check → every
+post-baseline change inside the human envelope? Scope only — not semantics.
+(0.10.0 candidate · REVIEW_PENDING · not LIVE)
 ```
 
 ---

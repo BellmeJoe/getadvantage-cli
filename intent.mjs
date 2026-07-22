@@ -4,17 +4,19 @@
 // answers a different local proof question: did repository changes stay inside
 // the task envelope the human authorized?
 //
-// Trust model (fail-closed):
-//   • Authorization is the COMMITTED blob at a verified local baseline
-//     (default: HEAD:.getadvantage/intent.json via `git show`). An uncommitted
-//     or only-staged worktree copy cannot broaden scope.
-//   • Deny globs override allow globs.
-//   • Every staged / unstaged / deleted / renamed / untracked path is accounted
-//     for; renames check BOTH old and new paths.
-//   • Malformed schema, absolute paths, traversal, unsafe globs, missing trust
-//     data, or ambiguous baseline → NO-GO with actionable text.
-//   • Acceptance notes are bound into the receipt hash only — NEVER executed,
-//     NEVER claimed semantically verified.
+// Trust model (fail-closed, honest local trust):
+//   • `intent init` pins immutable `baselineCommit` (full 40-hex SHA of HEAD).
+//   • Human commits the contract as a *dedicated linear freeze* after that
+//     baseline. Authorization is the freeze-commit blob — never the worktree,
+//     never a runtime --base-ref, never a later broadened HEAD blob.
+//   • `intent check` diffs EVERY change after baselineCommit: committed,
+//     staged, unstaged, deleted, renamed, copied, type-changed, untracked.
+//   • Deny globs override allow globs. Renames check BOTH old and new paths.
+//   • Later edits to the contract (committed/index/worktree) cannot self-
+//     authorize; freeze blob remains the authorizer.
+//   • Nested git / gitlink / symlink contract / unmerged state → NO-GO.
+//   • Without signature/protected remote, unrestricted history rewrite cannot
+//     be proven human. We never claim cryptographic human identity.
 //
 // Honest limitation always emitted:
 //   "scope verified; semantic correctness not proven"
@@ -52,6 +54,8 @@ export const INTENT_LIMITATION = "scope verified; semantic correctness not prove
 const GOAL_DISPLAY_CAP = 200;
 const NOTES_DISPLAY_CAP = 400;
 
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
 // ---------------------------------------------------------------------------
 // Path / glob safety
 // ---------------------------------------------------------------------------
@@ -86,7 +90,7 @@ export function isUnsafePathOrGlob(raw) {
   const parts = norm.split("/");
   if (parts.some((seg) => seg === "..")) return true;
   // Reject globs that try to escape via absolute-looking segments after expand.
-  if (parts[0] === "" ) return true;
+  if (parts[0] === "") return true;
   return false;
 }
 
@@ -96,20 +100,18 @@ export function isUnsafePathOrGlob(raw) {
 export function validateGlob(raw) {
   if (typeof raw !== "string" || !raw.trim()) return "empty glob";
   if (isUnsafePathOrGlob(raw)) return `unsafe path/glob: ${JSON.stringify(raw)}`;
-  // Extremely pathological: bare ** alone would authorize the whole tree — that
-  // is allowed (human choice) but empty patterns after strip are not.
   const n = normalizeRepoPath(raw.trim());
   if (!n) return "empty glob after normalize";
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Canonicalization + hash
+// Canonicalization + hashes
 // ---------------------------------------------------------------------------
 
 /**
- * Build the canonical object used for SHA-256 identity. Only trusted fields;
- * key order is fixed; arrays sorted for stability.
+ * Build the canonical object used for SHA-256 contract identity. Only trusted
+ * fields; key order is fixed; arrays sorted for stability.
  * @param {object} contract validated contract
  */
 export function canonicalizeContract(contract) {
@@ -122,13 +124,11 @@ export function canonicalizeContract(contract) {
     allow,
     deny,
     require,
+    baselineCommit: String(contract.baselineCommit || "").toLowerCase(),
   };
   if (contract.maxFiles != null) out.maxFiles = contract.maxFiles;
   if (contract.acceptanceNotes != null && String(contract.acceptanceNotes).length > 0) {
     out.acceptanceNotes = String(contract.acceptanceNotes);
-  }
-  if (contract.baselineRef != null && String(contract.baselineRef).length > 0) {
-    out.baselineRef = String(contract.baselineRef);
   }
   return out;
 }
@@ -141,6 +141,44 @@ export function computeIntentHash(contract) {
   const canon = canonicalizeContract(contract);
   const payload = JSON.stringify(canon);
   return createHash("sha256").update(payload, "utf8").digest("hex");
+}
+
+/**
+ * Full proof receipt hash — binds trusted identity + evaluation outcome.
+ * Separate from contractHash (contract identity alone).
+ * @param {object} o
+ * @returns {string} 64-char lowercase hex
+ */
+export function computeReceiptHash(o) {
+  const paths = [...(o.paths || [])]
+    .map((p) => ({
+      path: normalizeRepoPath(p.path || p),
+      kind: String(p.kind || "change"),
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path) || a.kind.localeCompare(b.kind));
+  const violations = [...(o.violations || [])]
+    .map((v) => ({
+      path: String(v.path || ""),
+      reason: String(v.reason || ""),
+      ...(v.rule != null && v.rule !== "" ? { rule: String(v.rule) } : {}),
+    }))
+    .sort(
+      (a, b) =>
+        a.path.localeCompare(b.path) ||
+        a.reason.localeCompare(b.reason) ||
+        String(a.rule || "").localeCompare(String(b.rule || "")),
+    );
+  const canon = {
+    contractHash: o.contractHash ? String(o.contractHash).replace(/^sha256:/, "") : null,
+    baselineCommit: o.baselineCommit ? String(o.baselineCommit).toLowerCase() : null,
+    freezeCommit: o.freezeCommit ? String(o.freezeCommit).toLowerCase() : null,
+    headCommit: o.headCommit ? String(o.headCommit).toLowerCase() : null,
+    paths,
+    violations,
+    verdict: o.verdict === "GO" ? "GO" : "NO-GO",
+    limitation: String(o.limitation || INTENT_LIMITATION),
+  };
+  return createHash("sha256").update(JSON.stringify(canon), "utf8").digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -220,21 +258,31 @@ export function parseAndValidateContract(text) {
     acceptanceNotes = json.acceptanceNotes;
   }
 
-  let baselineRef = null;
+  // Movable symbolic baselineRef is not accepted for trust. Require immutable SHA.
   if (json.baselineRef != null) {
-    if (typeof json.baselineRef !== "string" || !json.baselineRef.trim()) {
-      return { ok: false, error: "intent contract baselineRef must be a non-empty string when present" };
-    }
-    // Local-only ref names: HEAD[~^N], refs/heads/…, simple branch/SHA-like tokens.
-    // Remote / PR refs are rejected at resolve time too.
-    const br = json.baselineRef.trim();
-    if (/[\0\n\r]/.test(br) || br.includes("..") || /:\/\//.test(br)) {
-      return { ok: false, error: `intent contract baselineRef is not a safe local ref name: ${JSON.stringify(br)}` };
-    }
-    if (!/^(HEAD([~^][0-9]+)*|refs\/heads\/[A-Za-z0-9._\/-]+|[A-Za-z0-9][A-Za-z0-9._\/-]*)$/.test(br)) {
-      return { ok: false, error: `intent contract baselineRef is not a safe local ref name: ${JSON.stringify(br)}` };
-    }
-    baselineRef = br;
+    return {
+      ok: false,
+      error:
+        "intent contract must not use baselineRef (movable/symbolic) — " +
+        "use baselineCommit (full 40-hex SHA pinned at init). Re-run `intent init`.",
+    };
+  }
+
+  const bcRaw = json.baselineCommit;
+  if (typeof bcRaw !== "string" || !bcRaw.trim()) {
+    return {
+      ok: false,
+      error:
+        "intent contract requires baselineCommit (full 40-hex SHA of the pre-freeze HEAD). " +
+        "Re-run `intent init` and commit as a dedicated freeze.",
+    };
+  }
+  const baselineCommit = bcRaw.trim().toLowerCase();
+  if (!FULL_SHA_RE.test(baselineCommit)) {
+    return {
+      ok: false,
+      error: `intent contract baselineCommit must be a full 40-hex commit SHA (got ${JSON.stringify(bcRaw.trim())})`,
+    };
   }
 
   // Reject unknown top-level keys that look like executable hooks.
@@ -256,13 +304,13 @@ export function parseAndValidateContract(text) {
     require: require.map((g) => normalizeRepoPath(String(g).trim())),
     maxFiles,
     acceptanceNotes,
-    baselineRef,
+    baselineCommit,
   };
   return { ok: true, contract };
 }
 
 // ---------------------------------------------------------------------------
-// Trust: read committed blob only
+// Git helpers (local only)
 // ---------------------------------------------------------------------------
 
 /**
@@ -272,7 +320,6 @@ export function parseAndValidateContract(text) {
 export function readGitCommitBlob(cwd, ref, relPath) {
   const want = normalizeRepoPath(relPath);
   if (!want || isUnsafePathOrGlob(want)) return null;
-  // ref is pre-validated for baseline; still refuse shell metacharacters.
   if (!ref || /[\0\n\r]/.test(ref)) return null;
   try {
     return gitRaw(["show", `${ref}:${want}`], { cwd });
@@ -282,41 +329,45 @@ export function readGitCommitBlob(cwd, ref, relPath) {
 }
 
 /**
- * Resolve a baseline ref to a verified LOCAL commit SHA only.
- * Never follows attacker-controlled remote PR refs silently.
- * @returns {{ ok: true, sha: string, ref: string } | { ok: false, error: string }}
+ * Resolve a name to a verified LOCAL full commit SHA only.
+ * @returns {{ ok: true, sha: string } | { ok: false, error: string }}
  */
-export function resolveLocalBaseline(cwd, refName) {
-  const name = (refName || "HEAD").trim();
-  if (!name) return { ok: false, error: "empty baseline ref" };
-
-  // Refuse remote-tracking and special GitHub merge refs unless they already
-  // exist as *local* objects the operator explicitly has. We only accept:
-  //   HEAD, HEAD~N, branch names, refs/heads/*, and full/abbrev local SHAs
-  // that `git rev-parse --verify <ref>^{commit}` resolves WITHOUT fetching.
-  if (/^(refs\/remotes\/|remotes\/|origin\/|pull\/|refs\/pull\/)/i.test(name)) {
+export function resolveLocalCommit(cwd, name) {
+  const n = String(name || "").trim();
+  if (!n) return { ok: false, error: "empty commit ref" };
+  if (/[\0\n\r]/.test(n) || n.includes("..") || /:\/\//.test(n)) {
+    return { ok: false, error: `unsafe commit ref ${JSON.stringify(n)}` };
+  }
+  if (/^(refs\/remotes\/|remotes\/|origin\/|pull\/|refs\/pull\/)/i.test(n)) {
     return {
       ok: false,
-      error: `baseline ref ${JSON.stringify(name)} looks remote/PR-controlled — refuse (pass an explicit local branch or SHA)`,
+      error: `ref ${JSON.stringify(n)} looks remote/PR-controlled — refuse`,
     };
   }
-
-  // Must resolve to a local commit object.
-  const sha = gitSafe(["rev-parse", "--verify", `${name}^{commit}`], { cwd });
-  if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) {
+  const sha = gitSafe(["rev-parse", "--verify", `${n}^{commit}`], { cwd });
+  if (!sha || !FULL_SHA_RE.test(sha)) {
     return {
       ok: false,
-      error: `baseline ref ${JSON.stringify(name)} does not resolve to a local commit`,
+      error: `ref ${JSON.stringify(n)} does not resolve to a local full commit SHA (missing, shallow, or unresolvable)`,
     };
   }
-
-  // Confirm the object is present locally (no implicit network).
   const type = gitSafe(["cat-file", "-t", sha], { cwd });
   if (type !== "commit") {
-    return { ok: false, error: `baseline ${sha.slice(0, 12)} is not a local commit object` };
+    return { ok: false, error: `${sha.slice(0, 12)} is not a local commit object` };
   }
+  return { ok: true, sha: sha.toLowerCase() };
+}
 
-  return { ok: true, sha: sha.toLowerCase(), ref: name };
+/** True when `ancestor` is an ancestor of `desc` (or equal). */
+function isAncestorOrEqual(cwd, ancestor, desc) {
+  if (ancestor === desc) return true;
+  // merge-base --is-ancestor exits 0 when true; gitSafe swallows exit codes → use try.
+  try {
+    gitRaw(["merge-base", "--is-ancestor", ancestor, desc], { cwd });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -324,7 +375,6 @@ export function resolveLocalBaseline(cwd, refName) {
  * (not a symlink / gitlink). Fail closed on unusual modes when detectable.
  */
 function intentBlobIsSafeOnRef(cwd, ref) {
-  // `git ls-tree` mode: 100644/100755 blob, 120000 symlink, 160000 gitlink
   const out = gitSafe(["ls-tree", ref, "--", INTENT_REL], { cwd });
   if (!out) return { ok: false, error: `${INTENT_REL} is not present on ${ref}` };
   const mode = out.split(/\s+/)[0];
@@ -340,34 +390,275 @@ function intentBlobIsSafeOnRef(cwd, ref) {
   return { ok: true };
 }
 
+/** Paths changed in a single commit vs its parent (name-only, no renames split). */
+function pathsChangedInCommit(cwd, commitSha, parentSha) {
+  try {
+    const buf = gitRaw(
+      ["diff", "--name-status", "-z", "-M", parentSha, commitSha],
+      { cwd },
+    );
+    return parseNameStatusZ(buf);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Load the trusted Intent Contract from a committed baseline.
- * Worktree edits never authorize.
+ * Locate the dedicated linear freeze commit after baseline that introduces
+ * INTENT_REL. Fail closed on merge freeze, multi-file freeze, missing freeze,
+ * or ambiguous history.
+ *
+ * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean }
+ *          | { ok: false, error: string, present?: boolean }}
+ */
+export function findFreezeCommit(cwd, baselineSha, headSha) {
+  if (!FULL_SHA_RE.test(baselineSha) || !FULL_SHA_RE.test(headSha)) {
+    return { ok: false, error: "baseline/HEAD must be full 40-hex SHAs" };
+  }
+  if (!isAncestorOrEqual(cwd, baselineSha, headSha)) {
+    return {
+      ok: false,
+      present: true,
+      error:
+        `baselineCommit ${baselineSha.slice(0, 12)} is not an ancestor of HEAD ${headSha.slice(0, 12)} ` +
+        `(rewritten, non-ancestor, or wrong baseline) — refuse`,
+    };
+  }
+
+  // Contract must not already live at the baseline (freeze is after baseline).
+  const atBase = gitSafe(["ls-tree", baselineSha, "--", INTENT_REL], { cwd });
+  if (atBase) {
+    return {
+      ok: false,
+      present: true,
+      error:
+        `${INTENT_REL} already exists at baselineCommit ${baselineSha.slice(0, 12)} — ` +
+        `baseline must be the pre-contract freeze point. Re-run intent init on a clean pre-contract HEAD.`,
+    };
+  }
+
+  if (baselineSha === headSha) {
+    return {
+      ok: false,
+      present: false,
+      error:
+        `no dedicated freeze commit after baselineCommit ${baselineSha.slice(0, 12)} — ` +
+        `commit ${INTENT_REL} alone (dedicated freeze) before the agent starts`,
+    };
+  }
+
+  let revList = "";
+  try {
+    revList = gitRaw(["rev-list", "--reverse", `${baselineSha}..${headSha}`], { cwd }).trim();
+  } catch (e) {
+    return {
+      ok: false,
+      present: true,
+      error: `cannot walk history baseline..HEAD: ${e.message || e}`,
+    };
+  }
+  const revs = revList.split(/\r?\n/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (revs.length === 0) {
+    return {
+      ok: false,
+      present: false,
+      error: `no commits after baselineCommit ${baselineSha.slice(0, 12)}`,
+    };
+  }
+
+  let freezeSha = null;
+  let freezeBlob = null;
+  let freezeContract = null;
+  let freezeHash = null;
+  let laterContractChange = false;
+
+  for (const sha of revs) {
+    const parentLine = gitSafe(["rev-list", "--parents", "-n", "1", sha], { cwd });
+    if (!parentLine) {
+      return { ok: false, present: true, error: `cannot read parents of ${sha.slice(0, 12)}` };
+    }
+    const parts = parentLine.split(/\s+/).filter(Boolean);
+    const parents = parts.slice(1);
+
+    const modeOn = intentBlobIsSafeOnRef(cwd, sha);
+    const presentHere = modeOn.ok;
+    const presentErrIsAbsent = /is not present/.test(modeOn.error || "");
+
+    if (!presentHere && !presentErrIsAbsent) {
+      // Symlink/gitlink/etc. on this commit
+      return { ok: false, present: true, error: modeOn.error };
+    }
+
+    // Did INTENT_REL change in this commit?
+    let intentTouched = false;
+    if (parents.length === 0) {
+      // Root commit in range should not happen when baseline is parent chain, but fail closed.
+      intentTouched = presentHere;
+    } else if (parents.length > 1) {
+      // Merge commit: if it introduces/changes intent relative to any parent → refuse.
+      if (presentHere) {
+        for (const p of parents) {
+          const parentBlob = readGitCommitBlob(cwd, p, INTENT_REL);
+          const hereBlob = readGitCommitBlob(cwd, sha, INTENT_REL);
+          if (parentBlob !== hereBlob) {
+            return {
+              ok: false,
+              present: true,
+              error:
+                `merge commit ${sha.slice(0, 12)} changes ${INTENT_REL} — ` +
+                `freeze must be an unambiguous single-parent dedicated commit`,
+            };
+          }
+        }
+      }
+      // Merge that does not touch intent: skip (not a freeze candidate).
+      continue;
+    } else {
+      const parent = parents[0];
+      const parentBlob = readGitCommitBlob(cwd, parent, INTENT_REL);
+      const hereBlob = presentHere ? readGitCommitBlob(cwd, sha, INTENT_REL) : null;
+      intentTouched = parentBlob !== hereBlob;
+    }
+
+    if (!intentTouched) continue;
+
+    if (!presentHere) {
+      // Deletion of contract after freeze
+      if (freezeSha) {
+        laterContractChange = true;
+        continue;
+      }
+      return {
+        ok: false,
+        present: true,
+        error: `commit ${sha.slice(0, 12)} removes ${INTENT_REL} without a prior freeze — refuse`,
+      };
+    }
+
+    // First touch after baseline = freeze candidate; must be dedicated + linear.
+    if (!freezeSha) {
+      if (parents.length !== 1) {
+        return {
+          ok: false,
+          present: true,
+          error: `freeze candidate ${sha.slice(0, 12)} is not a single-parent commit — refuse`,
+        };
+      }
+      const parent = parents[0];
+      const changed = pathsChangedInCommit(cwd, sha, parent);
+      if (!changed) {
+        return {
+          ok: false,
+          present: true,
+          error: `cannot list files in freeze candidate ${sha.slice(0, 12)}`,
+        };
+      }
+      const uniquePaths = [...new Set(changed.map((r) => r.path))];
+      if (uniquePaths.length !== 1 || uniquePaths[0] !== INTENT_REL) {
+        return {
+          ok: false,
+          present: true,
+          error:
+            `freeze commit ${sha.slice(0, 12)} must be dedicated to ${INTENT_REL} only ` +
+            `(found: ${uniquePaths.slice(0, 8).join(", ") || "(none)"}) — refuse`,
+        };
+      }
+      // Prefer parent chain attached to baseline for first freeze.
+      if (parent.toLowerCase() !== baselineSha && !isAncestorOrEqual(cwd, baselineSha, parent)) {
+        return {
+          ok: false,
+          present: true,
+          error: `freeze commit ${sha.slice(0, 12)} parent is not on the baseline..HEAD ancestry — refuse`,
+        };
+      }
+
+      const blob = readGitCommitBlob(cwd, sha, INTENT_REL);
+      if (blob == null) {
+        return {
+          ok: false,
+          present: true,
+          error: `could not read ${INTENT_REL} from freeze ${sha.slice(0, 12)}`,
+        };
+      }
+      const parsed = parseAndValidateContract(blob);
+      if (!parsed.ok) {
+        return {
+          ok: false,
+          present: true,
+          error: `freeze contract invalid: ${parsed.error}`,
+        };
+      }
+      if (parsed.contract.baselineCommit !== baselineSha) {
+        return {
+          ok: false,
+          present: true,
+          error:
+            `freeze contract baselineCommit ${parsed.contract.baselineCommit.slice(0, 12)} ` +
+            `≠ expected baseline ${baselineSha.slice(0, 12)} — refuse`,
+        };
+      }
+      freezeSha = sha;
+      freezeBlob = blob;
+      freezeContract = parsed.contract;
+      freezeHash = computeIntentHash(parsed.contract);
+    } else {
+      // Any later committed change to the contract path.
+      laterContractChange = true;
+    }
+  }
+
+  if (!freezeSha) {
+    // HEAD may still have a contract introduced outside our walk (shouldn't).
+    const onHead = intentBlobIsSafeOnRef(cwd, headSha);
+    if (onHead.ok) {
+      return {
+        ok: false,
+        present: true,
+        error:
+          `could not locate a dedicated linear freeze for ${INTENT_REL} after baseline ` +
+          `${baselineSha.slice(0, 12)} — refuse (ambiguous or non-dedicated history)`,
+      };
+    }
+    return {
+      ok: false,
+      present: false,
+      error:
+        `no freeze commit introducing ${INTENT_REL} after baselineCommit ${baselineSha.slice(0, 12)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    freezeSha,
+    blob: freezeBlob,
+    contract: freezeContract,
+    hash: freezeHash,
+    laterContractChange,
+  };
+}
+
+/**
+ * Load the trusted Intent Contract from frozen history.
+ * Worktree / later HEAD blobs never authorize.
+ * Runtime --base-ref must never select trust (removed).
  *
  * @param {string} cwd
- * @param {{ baselineRef?: string }} [opts] CLI override for baseline (must be local)
- * @returns {{
- *   present: boolean,
- *   trusted: boolean,
- *   contract: object|null,
- *   hash: string|null,
- *   baseline: { ref: string, sha: string }|null,
- *   error: string|null,
- *   worktreeDiffers: boolean,
- * }}
+ * @param {{}} [opts]
  */
-export function loadTrustedIntent(cwd, opts = {}) {
+export function loadTrustedIntent(cwd, _opts = {}) {
   const empty = {
     present: false,
     trusted: false,
     contract: null,
     hash: null,
     baseline: null,
+    freezeSha: null,
+    headSha: null,
     error: null,
     worktreeDiffers: false,
+    laterContractChange: false,
   };
 
-  // Detect worktree presence (informational only — never authorizes).
   const abs = path.join(cwd, ...INTENT_REL.split("/"));
   let worktreeExists = false;
   try {
@@ -376,121 +667,182 @@ export function loadTrustedIntent(cwd, opts = {}) {
     worktreeExists = false;
   }
 
-  // Adversarial: if worktree path is a symlink, note it; still only trust HEAD blob.
-  if (worktreeExists) {
+  const headRes = resolveLocalCommit(cwd, "HEAD");
+  if (!headRes.ok) {
+    if (!worktreeExists) return empty;
+    return {
+      ...empty,
+      present: true,
+      error:
+        `cannot resolve HEAD to a local commit (${headRes.error}). ` +
+        `Create an initial commit, run intent init, then commit the contract as a dedicated freeze.`,
+    };
+  }
+  const headSha = headRes.sha;
+
+  // Presence probe: committed somewhere on HEAD or only worktree.
+  const headMode = intentBlobIsSafeOnRef(cwd, headSha);
+  const headHasIntent = headMode.ok;
+  if (!headHasIntent && !worktreeExists) {
+    // Also: contract might exist only between baseline and HEAD tip? Unreachable
+    // without being on HEAD if history is linear. Absent.
+    return empty;
+  }
+  if (!headHasIntent && worktreeExists) {
+    return {
+      ...empty,
+      present: true,
+      headSha,
+      error:
+        `${INTENT_REL} exists in the working tree but is not committed — ` +
+        `run intent init (pins baselineCommit), then commit only that file as a dedicated freeze before the agent starts.`,
+    };
+  }
+  if (!headHasIntent) {
+    return { ...empty, present: true, headSha, error: headMode.error };
+  }
+
+  // Read HEAD blob only to discover baselineCommit pointer — trust still from freeze.
+  const headBlob = readGitCommitBlob(cwd, headSha, INTENT_REL);
+  if (headBlob == null) {
+    return {
+      ...empty,
+      present: true,
+      headSha,
+      error: `could not read committed ${INTENT_REL} from HEAD ${headSha.slice(0, 12)}`,
+    };
+  }
+
+  // If HEAD is malformed, still try to recover freeze via walking if we can parse
+  // baseline from a partial JSON — fail closed on parse errors at HEAD unless we
+  // can find freeze another way. Spec: fail closed.
+  const headParsed = parseAndValidateContract(headBlob);
+  // Discover baseline: prefer validated HEAD field; if HEAD is a later mutation
+  // that broke schema, attempt freeze discovery is hard without baseline.
+  // Fail closed with actionable text.
+  if (!headParsed.ok) {
+    // Later broadened invalid? Still NO-GO untrusted.
+    // But freeze may still be valid — try to extract baselineCommit loosely.
+    let looseBaseline = null;
     try {
-      const st = lstatSync(abs);
-      if (st.isSymbolicLink()) {
-        // Do not fail solely on worktree symlink if HEAD is a regular blob;
-        // but if there is no trusted HEAD blob, this alone is not trust.
+      const loose = JSON.parse(stripBom(headBlob));
+      if (loose && typeof loose.baselineCommit === "string" && FULL_SHA_RE.test(loose.baselineCommit.trim().toLowerCase())) {
+        looseBaseline = loose.baselineCommit.trim().toLowerCase();
       }
     } catch {
       /* ignore */
     }
-  }
-
-  // Resolve baseline: CLI override > contract field (after we load HEAD) > HEAD.
-  // First try HEAD for the contract body (must be committed). Optional
-  // baselineRef inside the contract may re-point the *diff* baseline, but the
-  // authorizing contract text is always the blob at the trust ref.
-  //
-  // Trust ref selection:
-  //   1. Explicit CLI --base-ref (local only) — contract blob must exist there
-  //   2. Else HEAD — contract must be committed on HEAD
-  const cliBase = opts.baselineRef ? String(opts.baselineRef).trim() : "";
-  const trustRefName = cliBase || "HEAD";
-  const trustRes = resolveLocalBaseline(cwd, trustRefName);
-  if (!trustRes.ok) {
-    // No commits yet / bad ref: if nothing on disk either, absent; else fail closed.
-    if (!worktreeExists) return empty;
-    return {
-      ...empty,
-      present: true,
-      error: trustRes.error,
-    };
-  }
-
-  const modeCheck = intentBlobIsSafeOnRef(cwd, trustRes.sha);
-  if (!modeCheck.ok) {
-    // Genuinely absent on trust ref.
-    const absent = /is not present/.test(modeCheck.error || "");
-    if (absent && !worktreeExists && !cliBase) return empty;
-    if (absent && worktreeExists) {
+    if (!looseBaseline) {
       return {
         ...empty,
         present: true,
-        error:
-          `${INTENT_REL} exists in the working tree but is not committed on ${trustRes.ref} — ` +
-          `commit the contract before the agent starts so the baseline is reviewable and frozen.`,
+        headSha,
+        error: headParsed.error,
       };
     }
-    return { ...empty, present: true, error: modeCheck.error };
-  }
-
-  const blob = readGitCommitBlob(cwd, trustRes.sha, INTENT_REL);
-  if (blob == null) {
-    if (!worktreeExists) return empty;
-    return {
-      ...empty,
-      present: true,
-      error: `could not read committed ${INTENT_REL} from ${trustRes.sha.slice(0, 12)}`,
-    };
-  }
-
-  const parsed = parseAndValidateContract(blob);
-  if (!parsed.ok) {
-    return {
-      ...empty,
-      present: true,
-      baseline: { ref: trustRes.ref, sha: trustRes.sha },
-      error: parsed.error,
-    };
-  }
-
-  // Diff baseline: optional contract.baselineRef or CLI override, else trust ref.
-  // CLI --base-ref already used as trust ref. Contract field may further pin
-  // the *change* comparison base when trust is HEAD.
-  let diffRef = trustRes;
-  const contractBase = parsed.contract.baselineRef;
-  if (!cliBase && contractBase) {
-    const br = resolveLocalBaseline(cwd, contractBase);
-    if (!br.ok) {
+    const freezeTry = findFreezeCommit(cwd, looseBaseline, headSha);
+    if (!freezeTry.ok) {
       return {
         ...empty,
         present: true,
-        baseline: { ref: trustRes.ref, sha: trustRes.sha },
-        error: `contract baselineRef: ${br.error}`,
+        headSha,
+        error: `HEAD contract invalid (${headParsed.error}); freeze recovery: ${freezeTry.error}`,
       };
     }
-    // Contract still authorized from trustRes blob; diff uses br.
-    diffRef = br;
+    // Trusted freeze despite bad HEAD mutation.
+    let worktreeDiffers = false;
+    if (worktreeExists) {
+      try {
+        worktreeDiffers = readFileSync(abs, "utf8") !== freezeTry.blob;
+      } catch {
+        worktreeDiffers = true;
+      }
+    } else {
+      worktreeDiffers = true;
+    }
+    return {
+      present: true,
+      trusted: true,
+      contract: freezeTry.contract,
+      hash: freezeTry.hash,
+      baseline: {
+        ref: "baselineCommit",
+        sha: freezeTry.contract.baselineCommit,
+        trustSha: freezeTry.freezeSha,
+        trustRef: "freeze",
+      },
+      freezeSha: freezeTry.freezeSha,
+      headSha,
+      error: null,
+      worktreeDiffers: worktreeDiffers || freezeTry.laterContractChange || headBlob !== freezeTry.blob,
+      laterContractChange: freezeTry.laterContractChange || headBlob !== freezeTry.blob,
+    };
   }
 
-  // Worktree differs disclosure (never authorizes).
+  const baselineCommit = headParsed.contract.baselineCommit;
+  const baseRes = resolveLocalCommit(cwd, baselineCommit);
+  if (!baseRes.ok) {
+    return {
+      ...empty,
+      present: true,
+      headSha,
+      error: `baselineCommit unresolvable: ${baseRes.error}`,
+    };
+  }
+  if (baseRes.sha !== baselineCommit) {
+    // Should not happen for full SHA input; symbolic was already rejected.
+    return {
+      ...empty,
+      present: true,
+      headSha,
+      error: `baselineCommit must resolve to itself as full SHA (got ${baseRes.sha})`,
+    };
+  }
+
+  const freeze = findFreezeCommit(cwd, baselineCommit, headSha);
+  if (!freeze.ok) {
+    return {
+      ...empty,
+      present: freeze.present !== false,
+      headSha,
+      baseline: { ref: "baselineCommit", sha: baselineCommit },
+      error: freeze.error,
+    };
+  }
+
+  // Worktree / HEAD vs freeze disclosure.
   let worktreeDiffers = false;
   if (worktreeExists) {
     try {
-      const wt = readFileSync(abs, "utf8");
-      if (wt !== blob) worktreeDiffers = true;
+      if (readFileSync(abs, "utf8") !== freeze.blob) worktreeDiffers = true;
     } catch {
-      /* ignore */
+      worktreeDiffers = true;
     }
   }
+  const headDiffers = headBlob !== freeze.blob;
+  if (headDiffers) worktreeDiffers = true;
 
-  const hash = computeIntentHash(parsed.contract);
   return {
     present: true,
     trusted: true,
-    contract: parsed.contract,
-    hash,
-    baseline: { ref: diffRef.ref, sha: diffRef.sha, trustSha: trustRes.sha, trustRef: trustRes.ref },
+    contract: freeze.contract,
+    hash: freeze.hash,
+    baseline: {
+      ref: "baselineCommit",
+      sha: baselineCommit,
+      trustSha: freeze.freezeSha,
+      trustRef: "freeze",
+    },
+    freezeSha: freeze.freezeSha,
+    headSha,
     error: null,
     worktreeDiffers,
+    laterContractChange: freeze.laterContractChange || headDiffers,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Change collection (staged + unstaged + deleted + renamed + untracked)
+// Change collection (committed-since-baseline + staged + unstaged + untracked)
 // ---------------------------------------------------------------------------
 
 /**
@@ -508,8 +860,20 @@ function parseNameStatusZ(buf) {
     if (code === "R" || code === "C") {
       const oldPath = parts[i++] || "";
       const newPath = parts[i++] || "";
-      if (oldPath) out.push({ path: normalizeRepoPath(oldPath), kind: code === "R" ? "rename-from" : "copy-from", oldPath: null });
-      if (newPath) out.push({ path: normalizeRepoPath(newPath), kind: code === "R" ? "rename-to" : "copy-to", oldPath: normalizeRepoPath(oldPath) });
+      if (oldPath) {
+        out.push({
+          path: normalizeRepoPath(oldPath),
+          kind: code === "R" ? "rename-from" : "copy-from",
+          oldPath: null,
+        });
+      }
+      if (newPath) {
+        out.push({
+          path: normalizeRepoPath(newPath),
+          kind: code === "R" ? "rename-to" : "copy-to",
+          oldPath: normalizeRepoPath(oldPath),
+        });
+      }
     } else {
       const p = parts[i++] || "";
       if (!p) continue;
@@ -527,23 +891,109 @@ function parseNameStatusZ(buf) {
 }
 
 /**
- * Collect every path that differs from the baseline commit through the
- * current index + worktree + untracked files. Fail closed on unmerged paths.
+ * Detect nested repository / worktree boundaries that hide files from normal
+ * untracked listing. Fail closed.
+ * @returns {string|null} error message or null if clean
+ */
+export function detectNestedRepoBoundary(cwd, pathRecords) {
+  for (const r of pathRecords || []) {
+    const p = r.path || "";
+    if (p === ".git" || p.startsWith(".git/") || /(^|\/)\.git(\/|$)/.test(p)) {
+      return `nested or embedded .git path in changes (${p}) — refuse (ambiguous repo boundary)`;
+    }
+    if (r.kind === "gitlink" || r.kind === "submodule") {
+      return `gitlink/submodule change (${p}) — refuse (ambiguous repo boundary)`;
+    }
+  }
+
+  // Untracked directory entries (git may hide contents of nested repos).
+  let dirEntries = "";
+  try {
+    dirEntries = gitRaw(["ls-files", "-o", "--directory", "--exclude-standard", "-z"], { cwd });
+  } catch {
+    dirEntries = "";
+  }
+  for (const raw of dirEntries.split("\0").filter(Boolean)) {
+    const d = normalizeRepoPath(raw).replace(/\/$/, "");
+    if (!d) continue;
+    if (d === ".git" || d.endsWith("/.git") || /(^|\/)\.git(\/|$)/.test(d + "/")) {
+      return `nested or embedded .git path (${d}) — refuse (ambiguous repo boundary)`;
+    }
+    const abs = path.join(cwd, ...d.split("/"));
+    try {
+      const st = lstatSync(abs);
+      if (st.isDirectory()) {
+        const gitMarker = path.join(abs, ".git");
+        if (existsSync(gitMarker)) {
+          return (
+            `untracked nested repository at ${d}/ (contains .git) — refuse ` +
+            `(nested repos can hide unauthorized files from change listing)`
+          );
+        }
+      } else if (st.isFile() && (d === ".git" || d.endsWith("/.git"))) {
+        return `nested gitfile at ${d} — refuse (ambiguous repo boundary)`;
+      }
+    } catch {
+      /* ignore race */
+    }
+  }
+
+  // Also scan unique parent dirs of untracked files for a .git child.
+  const untrackedParents = new Set();
+  for (const r of pathRecords || []) {
+    if (r.kind !== "untracked") continue;
+    const parts = normalizeRepoPath(r.path).split("/");
+    for (let i = 1; i < parts.length; i++) {
+      untrackedParents.add(parts.slice(0, i).join("/"));
+    }
+    // Top-level file: still check nothing. Top-level dir file path "evil/x" → evil
+  }
+  for (const d of untrackedParents) {
+    const gitMarker = path.join(cwd, ...d.split("/"), ".git");
+    try {
+      if (existsSync(gitMarker)) {
+        return (
+          `untracked nested repository at ${d}/ (contains .git) — refuse ` +
+          `(nested repos can hide unauthorized files from change listing)`
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // gitlinks in the index/tree vs baseline via diff-tree filter
+  try {
+    const raw = gitRaw(["status", "--porcelain=v1", "-z"], { cwd });
+    // Look for submodule-ish entries (git status shows "M  path" with special modes elsewhere).
+    // Also catch "?? foo/" patterns already covered.
+    void raw;
+  } catch {
+    /* ignore */
+  }
+
+  return null;
+}
+
+/**
+ * Collect every path that differs from the baseline commit through current
+ * HEAD commits + index + worktree + untracked. Fail closed on unmerged paths
+ * and nested repos.
  *
- * @returns {{ ok: true, paths: Array<{path,kind,oldPath}>, ambiguous: string|null }
+ * @returns {{ ok: true, paths: Array<{path,kind,oldPath}> }
  *          | { ok: false, error: string }}
  */
 export function collectChangedPaths(cwd, baselineSha) {
-  if (!baselineSha || !/^[0-9a-f]{40}$/i.test(baselineSha)) {
+  if (!baselineSha || !FULL_SHA_RE.test(baselineSha)) {
     return { ok: false, error: "invalid baseline SHA for change collection" };
   }
 
-  // Detect nested repo / submodule ambiguity: if .git is a file (worktree) ok;
-  // if multiple nested .git dirs appear as untracked, we still list paths but
-  // flag gitlinks from name-status.
   try {
-    // Index vs baseline (covers all committed-since-baseline + staged).
-    const cached = gitRaw(["diff", "--name-status", "-z", "-M", "--cached", baselineSha], { cwd });
+    // Committed-since-baseline + staged (index vs baseline).
+    const cached = gitRaw(
+      ["diff", "--name-status", "-z", "-M", "--cached", baselineSha],
+      { cwd },
+    );
     // Worktree vs index (unstaged).
     const unstaged = gitRaw(["diff", "--name-status", "-z", "-M"], { cwd });
     // Untracked (not ignored).
@@ -569,8 +1019,6 @@ export function collectChangedPaths(cwd, baselineSha) {
       };
     }
 
-    // Dedupe by path; keep first kind (rename-from/to both retained as separate
-    // path keys already).
     const byPath = new Map();
     for (const r of records) {
       if (!r.path) continue;
@@ -580,34 +1028,66 @@ export function collectChangedPaths(cwd, baselineSha) {
           error: `changed path fails safety checks: ${JSON.stringify(r.path)}`,
         };
       }
-      // Nested .git directory as a changed path → adversarial / nested repo.
-      if (r.path === ".git" || r.path.startsWith(".git/") || /(^|\/)\.git\//.test(r.path + "/")) {
-        return {
-          ok: false,
-          error: `nested or embedded .git path in changes (${r.path}) — refuse (ambiguous repo boundary)`,
-        };
-      }
       if (!byPath.has(r.path)) byPath.set(r.path, r);
       else {
-        // Prefer more specific kinds when merging duplicates.
         const prev = byPath.get(r.path);
         if (prev.kind === "modify" && r.kind !== "modify") byPath.set(r.path, r);
       }
     }
 
-    return { ok: true, paths: [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)), ambiguous: null };
+    const paths = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+
+    const nestedErr = detectNestedRepoBoundary(cwd, paths);
+    if (nestedErr) return { ok: false, error: nestedErr };
+
+    return { ok: true, paths };
   } catch (e) {
     return { ok: false, error: `failed to collect changes: ${e.message || e}` };
   }
+}
+
+/**
+ * Exclude the freeze contract path from evaluation only when invariants hold:
+ * content still matches freeze blob, and no later change (committed/index/worktree).
+ */
+export function filterFreezeContractPath(cwd, paths, freezeSha, freezeBlob, laterContractChange) {
+  if (!freezeSha || freezeBlob == null) return paths;
+  if (laterContractChange) return paths;
+
+  const abs = path.join(cwd, ...INTENT_REL.split("/"));
+  // Current content must match freeze exactly.
+  let current = null;
+  if (existsSync(abs)) {
+    try {
+      current = readFileSync(abs, "utf8");
+    } catch {
+      return paths;
+    }
+  } else {
+    // Prefer HEAD blob if file deleted in worktree — that is a later change.
+    current = readGitCommitBlob(cwd, "HEAD", INTENT_REL);
+    if (current == null) return paths;
+  }
+  if (current !== freezeBlob) return paths;
+
+  // Index must also match freeze when staged differently.
+  try {
+    const indexBlob = gitRaw(["show", `:${INTENT_REL}`], { cwd });
+    if (indexBlob !== freezeBlob) return paths;
+  } catch {
+    // Not in index — if worktree matches and committed freeze matches, OK only
+    // if HEAD still has the freeze blob.
+    const headBlob = readGitCommitBlob(cwd, "HEAD", INTENT_REL);
+    if (headBlob !== freezeBlob) return paths;
+  }
+
+  return paths.filter((r) => r.path !== INTENT_REL);
 }
 
 // ---------------------------------------------------------------------------
 // Policy evaluation
 // ---------------------------------------------------------------------------
 
-/**
- * Does any glob in list match path?
- */
 function matchesAny(relPath, globs) {
   for (const g of globs || []) {
     if (pathMatchesGlob(relPath, g)) return g;
@@ -618,14 +1098,6 @@ function matchesAny(relPath, globs) {
 /**
  * Evaluate changed paths against a trusted contract.
  * Deny wins. Outside allow → violation. Required globs must each match ≥1 change.
- * maxFiles counts unique paths (rename-from and rename-to are separate if both listed).
- *
- * @returns {{
- *   ok: boolean,
- *   violations: Array<{ path: string, reason: string, rule?: string }>,
- *   changedPaths: string[],
- *   requiredMissing: string[],
- * }}
  */
 export function evaluateIntentScope(contract, pathRecords) {
   const violations = [];
@@ -653,7 +1125,6 @@ export function evaluateIntentScope(contract, pathRecords) {
     }
   }
 
-  // Required globs: each must match at least one changed path.
   const requiredMissing = [];
   for (const g of contract.require || []) {
     const hit = changedPaths.some((p) => pathMatchesGlob(p, g));
@@ -694,19 +1165,38 @@ export function evaluateIntentScope(contract, pathRecords) {
 export function buildIntentReceipt(o) {
   const goal = String(o.goal || "");
   const notes = o.acceptanceNotes != null ? String(o.acceptanceNotes) : null;
+  const pathRecords = o.pathRecords || (o.changedPaths || []).map((p) => ({ path: p, kind: "change" }));
+  const verdict = o.verdict === "GO" ? "GO" : "NO-GO";
+  const contractHashHex = o.hash || null;
+  const receiptHashHex = computeReceiptHash({
+    contractHash: contractHashHex,
+    baselineCommit: o.baselineCommit || (o.baseline && o.baseline.sha) || null,
+    freezeCommit: o.freezeSha || null,
+    headCommit: o.headSha || null,
+    paths: pathRecords,
+    violations: o.violations || [],
+    verdict,
+    limitation: INTENT_LIMITATION,
+  });
+
   return {
     goal: goal.length > GOAL_DISPLAY_CAP ? goal.slice(0, GOAL_DISPLAY_CAP) + "…" : goal,
-    contractHash: o.hash ? `sha256:${o.hash}` : null,
+    contractHash: contractHashHex ? `sha256:${contractHashHex}` : null,
+    receiptHash: `sha256:${receiptHashHex}`,
     baseline: o.baseline
       ? {
           ref: o.baseline.ref,
           sha: o.baseline.sha,
-          ...(o.baseline.trustSha && o.baseline.trustSha !== o.baseline.sha
-            ? { trustSha: o.baseline.trustSha }
-            : {}),
+          ...(o.baseline.trustSha ? { freezeSha: o.baseline.trustSha } : {}),
         }
       : null,
+    freezeCommit: o.freezeSha || null,
+    headCommit: o.headSha || null,
     changedPaths: o.changedPaths || [],
+    changedPathRecords: pathRecords.map((r) => ({
+      path: r.path,
+      kind: r.kind,
+    })),
     violations: (o.violations || []).map((v) => ({
       path: v.path,
       reason: v.reason,
@@ -714,6 +1204,8 @@ export function buildIntentReceipt(o) {
     })),
     fileCount: o.fileCount ?? (o.changedPaths || []).length,
     worktreeContractDiffers: !!o.worktreeDiffers,
+    laterContractChange: !!o.laterContractChange,
+    verdict,
     limitation: INTENT_LIMITATION,
     ...(notes
       ? {
@@ -731,14 +1223,43 @@ export function buildIntentReceipt(o) {
  * When trusted: GO/NO-GO from scope evaluation.
  *
  * @param {string} cwd
- * @param {{ baselineRef?: string }} [opts]
+ * @param {{}} [opts]  (no trust-selecting base-ref — ignored if passed)
  * @returns {ReturnType<typeof result> | null}
  */
 export function checkIntent(cwd, opts = {}) {
+  // Defense in depth: never honor runtime trust selection.
+  if (opts && (opts.baselineRef || opts.baseRef || opts.trustRef)) {
+    const r = result(
+      "fail",
+      "Intent Contract",
+      "NO-GO — runtime trust selection is not allowed (--base-ref cannot choose the authorizing contract).",
+      [
+        "Authorization always comes from the dedicated freeze commit after baselineCommit.",
+        "Remove --base-ref from intent check. Schema-bump --base-ref is unrelated.",
+        INTENT_LIMITATION,
+      ],
+    );
+    r.findings = [
+      {
+        ruleId: "intent/trust-selection-forbidden",
+        label: "Intent Contract trust selection forbidden",
+        message: "runtime --base-ref / baselineRef cannot select authorizing contract",
+      },
+    ];
+    r.intent = buildIntentReceipt({
+      goal: "",
+      hash: null,
+      baseline: null,
+      changedPaths: [],
+      violations: [{ path: INTENT_REL, reason: "trust-selection-forbidden", rule: null }],
+      verdict: "NO-GO",
+    });
+    return r;
+  }
+
   const loaded = loadTrustedIntent(cwd, opts);
 
   if (!loaded.present) {
-    // No contract at all — do not emit a check (no false verified claim).
     return null;
   }
 
@@ -749,8 +1270,8 @@ export function checkIntent(cwd, opts = {}) {
       `NO-GO — cannot trust intent baseline: ${loaded.error || "untrusted contract"}`,
       [
         `Contract path: ${INTENT_REL}`,
-        "Authorization requires a committed contract on a verified local ref (default: HEAD).",
-        "Fix: write the contract with `getadvantage intent init …`, commit it, then re-run.",
+        "Authorization requires baselineCommit (full SHA) + a dedicated linear freeze commit of the contract.",
+        "Fix: getadvantage intent init …  then: git add .getadvantage/intent.json && git commit -m \"chore: intent contract\"",
         INTENT_LIMITATION,
       ],
     );
@@ -765,9 +1286,14 @@ export function checkIntent(cwd, opts = {}) {
       goal: "",
       hash: null,
       baseline: loaded.baseline,
+      baselineCommit: loaded.baseline && loaded.baseline.sha,
+      freezeSha: loaded.freezeSha,
+      headSha: loaded.headSha,
       changedPaths: [],
       violations: [{ path: INTENT_REL, reason: "untrusted", rule: null }],
       worktreeDiffers: loaded.worktreeDiffers,
+      laterContractChange: loaded.laterContractChange,
+      verdict: "NO-GO",
     });
     return r;
   }
@@ -791,37 +1317,61 @@ export function checkIntent(cwd, opts = {}) {
       goal: loaded.contract.goal,
       hash: loaded.hash,
       baseline: loaded.baseline,
+      baselineCommit: loaded.baseline.sha,
+      freezeSha: loaded.freezeSha,
+      headSha: loaded.headSha,
       changedPaths: [],
       violations: [{ path: "(repo)", reason: "ambiguous", rule: null }],
       worktreeDiffers: loaded.worktreeDiffers,
+      laterContractChange: loaded.laterContractChange,
       acceptanceNotes: loaded.contract.acceptanceNotes,
+      verdict: "NO-GO",
     });
     return r;
   }
 
-  const evaled = evaluateIntentScope(loaded.contract, collected.paths);
+  const freezeBlob = readGitCommitBlob(cwd, loaded.freezeSha, INTENT_REL);
+  let evalPaths = filterFreezeContractPath(
+    cwd,
+    collected.paths,
+    loaded.freezeSha,
+    freezeBlob,
+    loaded.laterContractChange,
+  );
+
+  const evaled = evaluateIntentScope(loaded.contract, evalPaths);
+  const verdict = evaled.ok ? "GO" : "NO-GO";
   const receipt = buildIntentReceipt({
     goal: loaded.contract.goal,
     hash: loaded.hash,
     baseline: loaded.baseline,
+    baselineCommit: loaded.baseline.sha,
+    freezeSha: loaded.freezeSha,
+    headSha: loaded.headSha,
     changedPaths: evaled.changedPaths,
+    pathRecords: evalPaths,
     violations: evaled.violations,
     fileCount: evaled.fileCount,
     worktreeDiffers: loaded.worktreeDiffers,
+    laterContractChange: loaded.laterContractChange,
     acceptanceNotes: loaded.contract.acceptanceNotes,
+    verdict,
   });
 
   if (evaled.ok) {
     const extras = [
       `goal: ${receipt.goal}`,
       `contract: ${receipt.contractHash}`,
-      `baseline: ${loaded.baseline.ref} @ ${loaded.baseline.sha.slice(0, 12)}`,
+      `receipt: ${receipt.receiptHash}`,
+      `baseline: ${loaded.baseline.sha.slice(0, 12)}`,
+      `freeze: ${(loaded.freezeSha || "").slice(0, 12)}`,
+      `head: ${(loaded.headSha || "").slice(0, 12)}`,
       `changed: ${evaled.fileCount} path${pl(evaled.fileCount)}`,
       INTENT_LIMITATION,
     ];
     if (loaded.worktreeDiffers) {
       extras.push(
-        `note: worktree ${INTENT_REL} differs from trusted commit — only the committed blob authorizes (edits cannot broaden scope).`,
+        `note: worktree/HEAD ${INTENT_REL} differs from freeze blob — only the freeze commit authorizes (edits cannot broaden scope).`,
       );
     }
     if (evaled.changedPaths.length > 0) {
@@ -841,7 +1391,6 @@ export function checkIntent(cwd, opts = {}) {
     return r;
   }
 
-  // NO-GO: name violating paths only — never file contents.
   const lines = [];
   for (const v of evaled.violations) {
     if (v.reason === "denied") {
@@ -859,14 +1408,16 @@ export function checkIntent(cwd, opts = {}) {
   const extras = [
     `goal: ${receipt.goal}`,
     `contract: ${receipt.contractHash}`,
-    `baseline: ${loaded.baseline.ref} @ ${loaded.baseline.sha.slice(0, 12)}`,
+    `receipt: ${receipt.receiptHash}`,
+    `baseline: ${loaded.baseline.sha.slice(0, 12)}`,
+    `freeze: ${(loaded.freezeSha || "").slice(0, 12)}`,
     ...lines.slice(0, 40),
     ...(lines.length > 40 ? [`…and ${lines.length - 40} more violations`] : []),
     INTENT_LIMITATION,
   ];
-  if (loaded.worktreeDiffers) {
+  if (loaded.worktreeDiffers || loaded.laterContractChange) {
     extras.push(
-      `note: worktree ${INTENT_REL} differs from trusted commit — broadening the worktree copy cannot authorize itself.`,
+      `note: freeze blob remains the authorizer — broadening ${INTENT_REL} after freeze cannot self-authorize.`,
     );
   }
   const r = result(
@@ -888,6 +1439,13 @@ export function checkIntent(cwd, opts = {}) {
 // ---------------------------------------------------------------------------
 // CLI: intent init / intent check
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve current HEAD to full SHA for baseline pin. Fail if no trustworthy commit.
+ */
+export function resolveInitBaseline(cwd) {
+  return resolveLocalCommit(cwd, "HEAD");
+}
 
 /**
  * Write a new Intent Contract into the worktree and explain freeze/commit.
@@ -914,17 +1472,25 @@ export function runIntentInit(o) {
     return 1;
   }
 
-  // Validate before write.
+  const baseRes = resolveInitBaseline(cwd);
+  if (!baseRes.ok) {
+    console.error(c.red(`✗ intent init cannot pin baselineCommit: ${baseRes.error}`));
+    console.error(c.gray("  Create at least one local commit first, then re-run intent init."));
+    console.error(c.gray("  Next: git add -A && git commit -m \"chore: initial\" && getadvantage intent init …"));
+    return 1;
+  }
+  const baselineCommit = baseRes.sha;
+
   const draft = {
     schemaVersion: 1,
     goal: String(goal).trim(),
     allow,
     deny,
     require,
+    baselineCommit,
     maxFiles: maxFiles != null ? maxFiles : undefined,
     acceptanceNotes: notes != null ? String(notes) : undefined,
   };
-  // Drop undefined keys for cleaner file.
   if (draft.maxFiles === undefined) delete draft.maxFiles;
   if (draft.acceptanceNotes === undefined) delete draft.acceptanceNotes;
   if (!draft.deny.length) draft.deny = [];
@@ -938,26 +1504,28 @@ export function runIntentInit(o) {
 
   const abs = path.join(cwd, ...INTENT_REL.split("/"));
   if (existsSync(abs) && !force) {
-    console.error(c.red(`✗ ${INTENT_REL} already exists — pass --force to overwrite (then re-commit).`));
+    console.error(c.red(`✗ ${INTENT_REL} already exists — pass --force to overwrite (then re-commit as a new dedicated freeze).`));
     return 1;
   }
 
   mkdirSync(path.dirname(abs), { recursive: true });
-  const body = JSON.stringify(
-    {
-      schemaVersion: check.contract.schemaVersion,
-      goal: check.contract.goal,
-      allow: check.contract.allow,
-      deny: check.contract.deny,
-      ...(check.contract.require.length ? { require: check.contract.require } : {}),
-      ...(check.contract.maxFiles != null ? { maxFiles: check.contract.maxFiles } : {}),
-      ...(check.contract.acceptanceNotes != null
-        ? { acceptanceNotes: check.contract.acceptanceNotes }
-        : {}),
-    },
-    null,
-    2,
-  ) + "\n";
+  const body =
+    JSON.stringify(
+      {
+        schemaVersion: check.contract.schemaVersion,
+        goal: check.contract.goal,
+        allow: check.contract.allow,
+        deny: check.contract.deny,
+        baselineCommit: check.contract.baselineCommit,
+        ...(check.contract.require.length ? { require: check.contract.require } : {}),
+        ...(check.contract.maxFiles != null ? { maxFiles: check.contract.maxFiles } : {}),
+        ...(check.contract.acceptanceNotes != null
+          ? { acceptanceNotes: check.contract.acceptanceNotes }
+          : {}),
+      },
+      null,
+      2,
+    ) + "\n";
   writeFileSync(abs, body, "utf8");
 
   const hash = computeIntentHash(check.contract);
@@ -968,16 +1536,18 @@ export function runIntentInit(o) {
   if (check.contract.deny.length) console.log(`  ${c.gray("deny:")} ${check.contract.deny.join(", ")}`);
   if (check.contract.require.length) console.log(`  ${c.gray("require:")} ${check.contract.require.join(", ")}`);
   if (check.contract.maxFiles != null) console.log(`  ${c.gray("maxFiles:")} ${check.contract.maxFiles}`);
+  console.log(`  ${c.gray("baselineCommit:")} ${baselineCommit}`);
   console.log(`  ${c.gray("hash:")} sha256:${hash}`);
   console.log("");
-  console.log(c.bold("  Freeze this contract before the agent starts:"));
+  console.log(c.bold("  Freeze this contract as a dedicated commit before the agent starts:"));
   console.log(c.cyan(`    git add ${INTENT_REL} && git commit -m "chore: intent contract"`));
   console.log("");
   console.log(
     c.gray(
-      "  Authorization uses the COMMITTED blob on HEAD (not the worktree). An agent that\n" +
-        "  edits the file to broaden --allow cannot authorize itself. After the agent works:\n" +
-        `    ${binName()} intent check`,
+      "  Authorization uses the FREEZE commit blob (first dedicated linear commit of this file\n" +
+        "  after baselineCommit) — not the worktree, not a later broadened HEAD, not --base-ref.\n" +
+        "  Local trust only: history rewrite without signatures cannot be proven human.\n" +
+        `  After the agent works: ${binName()} intent check`,
     ),
   );
   console.log(c.gray(`  Limitation: ${INTENT_LIMITATION}`));
@@ -990,32 +1560,53 @@ export function runIntentInit(o) {
  */
 export function runIntentCheck(o) {
   const cwd = o.cwd;
-  const r = checkIntent(cwd, { baselineRef: o.baselineRef });
+
+  // Reject trust-selecting flags explicitly (fail closed).
+  if (o.baselineRef) {
+    section("Intent Contract");
+    const msg =
+      "NO-GO — intent check does not accept --base-ref (cannot select authorizing contract at runtime).";
+    console.log(`  ${c.red("✗")} ${c.bold("Intent Contract")} — ${msg}`);
+    console.log(
+      c.gray(
+        "      Trust always comes from baselineCommit + dedicated freeze history. " +
+          "Schema-bump --base-ref on `check` is unrelated.",
+      ),
+    );
+    console.log(c.gray(`      ${INTENT_LIMITATION}`));
+    const r = result("fail", "Intent Contract", msg, [INTENT_LIMITATION]);
+    r.intent = buildIntentReceipt({
+      goal: "",
+      hash: null,
+      violations: [{ path: INTENT_REL, reason: "trust-selection-forbidden", rule: null }],
+      verdict: "NO-GO",
+    });
+    return { exitCode: 1, result: r, receipt: r.intent };
+  }
+
+  const r = checkIntent(cwd, {});
 
   section("Intent Contract");
   if (!r) {
     console.log(
-      `  ${c.yellow("–")} ${c.bold("Intent Contract")} — no trusted contract on HEAD (${INTENT_REL}).`,
+      `  ${c.yellow("–")} ${c.bold("Intent Contract")} — no trusted contract (${INTENT_REL}).`,
     );
     console.log(
       c.gray(
-        `      Create one with \`${binName()} intent init --goal "…" --allow "src/**"\`, commit it, then re-run.`,
+        `      Create one with \`${binName()} intent init --goal "…" --allow "src/**"\`, ` +
+          `commit it as a dedicated freeze, then re-run.`,
       ),
     );
     console.log(c.gray(`      ${INTENT_LIMITATION}`));
-    // No contract is not a false GO claim — exit 0 for bare `intent check` when
-    // absent would imply pass. Prefer exit 1 with clear "not configured" so CI
-    // that explicitly runs intent check fails closed. Spec: main `check` omits;
-    // dedicated `intent check` without contract → actionable non-zero.
     return {
       exitCode: 1,
       result: result(
         "fail",
         "Intent Contract",
-        `no trusted contract on HEAD (${INTENT_REL})`,
+        `no trusted contract (${INTENT_REL})`,
         [
           `Create one: ${binName()} intent init --goal "…" --allow "…"`,
-          "Commit it before the agent starts.",
+          "Commit only that file as a dedicated freeze before the agent starts.",
           INTENT_LIMITATION,
         ],
       ),
@@ -1060,8 +1651,6 @@ export function runIntent(o) {
       baselineRef: o.flags["base-ref"],
     });
     if (o.flags.json) {
-      // Caller may emit JSON; when runIntent owns stdout, print here if requested.
-      // index.mjs handles --json routing; return structured via o._jsonDoc if set.
       if (o.emitJson) {
         o.emitJson({
           command: "intent",
@@ -1097,28 +1686,32 @@ ${c.bold("Usage")}
   ${bin} intent init --goal "…" --allow <glob> [--allow <glob> …]
                      [--deny <glob>] [--require <glob>] [--max-files N]
                      [--notes "…"] [--force]
-  ${bin} intent check [--json] [--base-ref <local-ref>]
+  ${bin} intent check [--json]
 
 ${c.bold("Cold path")}
   1. Human writes the contract ${c.bold("before")} the agent starts:
        ${bin} intent init --goal "Add password reset" \\
          --allow "src/auth/**" --allow "tests/auth/**" --deny ".github/**"
-  2. ${c.bold("Commit")} ${INTENT_REL} — authorization is the committed HEAD blob,
-     not a mutable worktree copy the agent could broaden.
-  3. After the agent works:
+     → pins immutable ${c.bold("baselineCommit")} (full SHA of current HEAD).
+  2. ${c.bold("Commit only")} ${INTENT_REL} as a dedicated freeze:
+       git add ${INTENT_REL} && git commit -m "chore: intent contract"
+     Authorization is that freeze blob — not the worktree, not later HEAD, not --base-ref.
+  3. After the agent works (including commits):
        ${bin} intent check
-     → GO / NO-GO + stable proof receipt (goal, contract hash, baseline,
-       changed paths, violations). ${c.bold(INTENT_LIMITATION)}.
+     → diffs every change after baselineCommit (committed + staged + unstaged +
+       deleted + renamed + untracked) → GO / NO-GO + contractHash + receiptHash.
+     ${c.bold(INTENT_LIMITATION)}.
 
 ${c.bold("Trust")}
   • Deny overrides allow. Renames check old and new paths.
-  • Staged, unstaged, deleted, renamed, and untracked paths all count.
-  • Editing the worktree contract cannot authorize a broader scope.
+  • Staged, unstaged, deleted, renamed, untracked, and post-freeze commits all count.
+  • Editing or re-committing a broader contract cannot authorize itself; freeze wins.
+  • Nested git repos / gitfiles that hide files → NO-GO.
+  • No runtime flag selects the authorizing contract. Local trust only — no crypto human claim.
   • No network, no shell hooks, no model calls, no file-content dumps.
 
 ${c.bold("Main gate")}
-  \`${bin} check\` includes the Intent Contract result when a trusted contract
-  is present on HEAD. Projects without a contract keep existing checks only —
-  there is never a false "intent verified" claim.
+  \`${bin} check\` includes the Intent Contract result when a trusted freeze is present.
+  Projects without a contract keep existing checks only — never a false "intent verified".
 `);
 }

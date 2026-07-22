@@ -201,10 +201,11 @@ ${c.bold("Commands")}
            in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
            GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
   ${c.cyan("intent")}   Local Intent Contract — human goal bound to an enforceable change envelope.
-           ${c.bold("init")} writes ${c.bold(".getadvantage/intent.json")}; ${c.bold("commit it before the agent starts")}
-           (authorization is the committed HEAD blob, not a worktree copy). ${c.bold("check")} compares
-           staged+unstaged+untracked paths → GO / NO-GO + proof receipt.
-           ${c.dim("scope verified; semantic correctness not proven.")} See ${c.bold(`${binName()} intent --help`)}.
+           ${c.bold("init")} pins immutable ${c.bold("baselineCommit")} and writes ${c.bold(".getadvantage/intent.json")};
+           ${c.bold("commit only that file")} as a dedicated freeze before the agent starts (authorization is the
+           freeze blob, not worktree / later HEAD / --base-ref). ${c.bold("check")} diffs every change after baseline
+           → GO / NO-GO + contractHash + receiptHash. ${c.dim("scope verified; semantic correctness not proven.")}
+           See ${c.bold(`${binName()} intent --help`)}.
   ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — one-copy first-party Action
            (${c.bold("uses: BellmeJoe/getadvantage-cli@v1")}) on every push + pull request: GO/NO-GO,
            SARIF → ${c.bold("upload-sarif@v4")}, update-in-place PR summary (job-summary fallback).
@@ -283,7 +284,7 @@ ${c.bold("Examples")}
   ${bin} check --sarif out.sarif   also write SARIF 2.1 for GitHub code scanning
   ${bin} github-action          write the GitHub Actions workflow (gate + SARIF upload)
   ${bin} intent init --goal "Add password reset" --allow "src/auth/**" --deny ".github/**"
-  ${bin} intent check           prove working-tree changes stayed inside the contract
+  ${bin} intent check           prove all changes after baseline stayed inside the freeze contract
   ${bin} deploy --expect-prefix myproject-
 `);
 }
