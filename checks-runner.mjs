@@ -20,6 +20,7 @@ import {
 import { briefStaleness } from "./brief.mjs";
 import { detectProject, detectRepoStack } from "./detect.mjs";
 import { architectureAdvisory } from "./architecture.mjs";
+import { checkIntent } from "./intent.mjs";
 
 /**
  * Run every check and print a clean summary.
@@ -75,6 +76,28 @@ export async function runChecks(o) {
   // d. Schema-bump check (only on the SCHEMA_VERSION-sentinel pattern)
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
   printResult(results[results.length - 1]);
+
+  // e. Intent Contract — only when a trusted (committed) contract is present.
+  // Projects without a contract keep existing checks only; never emit a false
+  // "intent verified" pass. When present, scope violations → NO-GO.
+  // Use intentBaseRef only (never silently reuse PR/schema base-ref).
+  {
+    let intentResult = null;
+    try {
+      intentResult = checkIntent(cwd, { baselineRef: o.intentBaseRef });
+    } catch (e) {
+      intentResult = {
+        status: "fail",
+        label: "Intent Contract",
+        detail: `Check errored: ${e.message || e}`,
+        extra: [],
+      };
+    }
+    if (intentResult) {
+      results.push(intentResult);
+      printResult(intentResult);
+    }
+  }
 
   // ---- v1.1 OVERVIEW SCANNERS (read-only maps) ----------------------------
   // Default-on: three fast, read-only repo scans that give the builder a map of

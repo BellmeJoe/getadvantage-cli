@@ -110,6 +110,12 @@
 //                                     public VITE_/NEXT_PUBLIC_ config alone → not
 //                                     a secret NO-GO; .next/cache still skipped
 //                                     (honest non-static boundary); packed cold path
+//  46. Intent Contract (0.10.0)       — init+commit+check GO; outside allow NO-GO
+//                                     (path names only); deny wins; required/maxFiles;
+//                                     staged/unstaged/delete/rename/untracked;
+//                                     worktree broaden cannot self-authorize;
+//                                     malformed/traversal fail closed; packed cold
+//                                     init+check; main check omits without contract
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -5686,6 +5692,504 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     assert.ok(/^runs:/m.test(actionYml));
     assert.ok(/using:\s*composite/.test(actionYml));
     assert.ok(/action\/main\.mjs/.test(actionYml));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 46. Intent Contract (0.10.0) — local change-scope trust layer
+// ---------------------------------------------------------------------------
+
+/** Write + commit a trusted intent contract on HEAD. */
+function commitIntent(repo, contract) {
+  write(repo, ".getadvantage/intent.json", JSON.stringify(contract, null, 2) + "\n");
+  commitAll(repo, "chore: intent contract");
+}
+
+const INTENT_BASE = {
+  schemaVersion: 1,
+  goal: "Add password reset",
+  allow: ["src/auth/**", "tests/auth/**"],
+  deny: [".github/**"],
+};
+
+scenario("intent: authorized source+test change → GO; stable hash; human/JSON agree", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    // Agent work inside allowlist
+    write(repo, "src/auth/reset.js", "export function reset() { return true; }\n");
+    write(repo, "tests/auth/reset.test.js", "import { reset } from '../../src/auth/reset.js';\n");
+    // Unstaged + one staged
+    g(["add", "src/auth/reset.js"], repo);
+
+    const human = run(["intent", "check"], repo);
+    assert.equal(human.code, 0, `expected GO\n${human.stderr}\n${human.stdout}`);
+    assert.match(human.stdout + human.stderr, /\bGO\b/);
+    assert.match(human.stdout + human.stderr, /scope verified; semantic correctness not proven/i);
+    assert.doesNotMatch(human.stdout + human.stderr, /export function reset/);
+
+    const j = run(["intent", "check", "--json"], repo);
+    assert.equal(j.code, 0, `json GO\n${j.stderr}\n${j.stdout}`);
+    const doc = parseJson(j);
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.exitCode, 0);
+    assert.ok(doc.intent, "receipt present");
+    assert.equal(doc.intent.limitation, "scope verified; semantic correctness not proven");
+    assert.match(doc.intent.contractHash, /^sha256:[0-9a-f]{64}$/);
+    assert.ok(doc.intent.changedPaths.some((p) => /src\/auth\/reset\.js/.test(p)));
+    assert.ok(doc.intent.changedPaths.some((p) => /tests\/auth/.test(p)));
+    assert.equal((doc.intent.violations || []).length, 0);
+
+    // Stable hash across two runs
+    const j2 = run(["intent", "check", "--json"], repo);
+    const doc2 = parseJson(j2);
+    assert.equal(doc2.intent.contractHash, doc.intent.contractHash, "intent hash must be stable");
+
+    // Main check includes intent when trusted contract present
+    const gate = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    // Dirty tree may NO-GO the overall gate; intent itself must still be present + pass
+    const gdoc = parseJson(gate);
+    const ic = (gdoc.checks || []).find((c) => /Intent Contract/i.test(c.label));
+    assert.ok(ic, "main check must include Intent Contract when trusted contract on HEAD");
+    assert.equal(ic.status, "pass", `intent should pass inside check\n${JSON.stringify(ic)}`);
+    assert.ok(gdoc.intent || ic.intent, "intent receipt exposed on check JSON");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: outside allowlist → NO-GO; names path only; no content leak", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    const secretBody = "TOP_SECRET_PAYLOAD_should_never_print_xyzzy";
+    write(repo, "src/other/leak.js", `export const x = "${secretBody}";\n`);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `expected NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.ok((doc.intent.violations || []).some((v) => v.reason === "outside-allow"));
+    assert.ok(doc.intent.changedPaths.some((p) => p.replace(/\\/g, "/") === "src/other/leak.js"));
+    const all = r.stdout + r.stderr;
+    assert.ok(/src\/other\/leak\.js/.test(all), "must name violating path");
+    assert.ok(!all.includes(secretBody), "must not leak file contents");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: deny wins even when allow also matches", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Touch workflows under broad allow",
+      allow: [".github/**", "src/**"],
+      deny: [".github/**"],
+    });
+    write(repo, ".github/workflows/ci.yml", "name: ci\non: push\njobs: {}\n");
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.ok(
+      (doc.intent.violations || []).some((v) => v.reason === "denied" && /ci\.yml/.test(v.path)),
+      `expected deny violation: ${JSON.stringify(doc.intent.violations)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: missing required change and maxFiles → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Must change auth tests; cap files",
+      allow: ["src/**", "tests/**"],
+      deny: [],
+      require: ["tests/auth/**"],
+      maxFiles: 1,
+    });
+    // Only src change — required tests missing, and if we add two files maxFiles fails
+    write(repo, "src/a.js", "export const a = 1;\n");
+    write(repo, "src/b.js", "export const b = 2;\n");
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+    const doc = parseJson(r);
+    const reasons = (doc.intent.violations || []).map((v) => v.reason);
+    assert.ok(reasons.includes("required-missing"), `expected required-missing: ${reasons}`);
+    assert.ok(reasons.includes("max-files"), `expected max-files: ${reasons}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: staged/unstaged/deleted/renamed/untracked cannot evade", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Seed files inside and outside future allow
+    write(repo, "src/auth/old.js", "export const old = 1;\n");
+    write(repo, "src/keep.js", "export const keep = 1;\n");
+    write(repo, "lib/util.js", "export const u = 1;\n");
+    commitAll(repo, "chore: seed paths");
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Auth only",
+      allow: ["src/auth/**"],
+      deny: [],
+    });
+
+    // Staged add inside allow
+    write(repo, "src/auth/new.js", "export const n = 1;\n");
+    g(["add", "src/auth/new.js"], repo);
+    // Unstaged modify inside allow
+    write(repo, "src/auth/old.js", "export const old = 2;\n");
+    // Deleted outside allow (must NO-GO)
+    g(["rm", "-q", "lib/util.js"], repo);
+    // Rename outside → inside would need both paths authorized; rename from lib
+    // Untracked outside
+    write(repo, "docs/secret-plan.md", "plan\n");
+    // Rename: move src/keep.js → src/auth/keep.js (old path outside allow)
+    g(["mv", "src/keep.js", "src/auth/keep.js"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `expected NO-GO on evasion attempts\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const paths = doc.intent.changedPaths.map((p) => p.replace(/\\/g, "/"));
+    assert.ok(paths.some((p) => p === "lib/util.js"), `delete must count: ${paths}`);
+    assert.ok(paths.some((p) => p === "docs/secret-plan.md"), `untracked must count: ${paths}`);
+    assert.ok(paths.some((p) => p === "src/keep.js") || paths.some((p) => p === "src/auth/keep.js"), `rename paths: ${paths}`);
+    // At least one outside-allow or the rename-from path
+    assert.ok((doc.intent.violations || []).length > 0);
+    assert.ok(
+      (doc.intent.violations || []).some(
+        (v) =>
+          v.reason === "outside-allow" &&
+          (v.path === "lib/util.js" || v.path === "docs/secret-plan.md" || v.path === "src/keep.js"),
+      ),
+      `expected outside-allow on evasion path: ${JSON.stringify(doc.intent.violations)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: editing worktree contract to broaden scope cannot authorize itself", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    // Agent broadens allow in worktree only
+    const broadened = {
+      ...INTENT_BASE,
+      allow: ["src/**", "tests/**", "**/*"],
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
+    write(repo, "src/other/pwn.js", "export const pwn = true;\n");
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `worktree broaden must not authorize\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    // Either outside-allow on src/other, or intent.json itself outside allow
+    const violPaths = (doc.intent.violations || []).map((v) => v.path.replace(/\\/g, "/"));
+    assert.ok(
+      violPaths.some((p) => p === "src/other/pwn.js" || p === ".getadvantage/intent.json"),
+      `expected violation naming pwn or intent.json: ${JSON.stringify(doc.intent.violations)}`,
+    );
+    assert.ok(doc.intent.worktreeContractDiffers, "receipt should note worktree differs");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: malformed schema, traversal, absolute paths, unsafe baseline fail closed", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+
+    // Malformed JSON committed
+    write(repo, ".getadvantage/intent.json", "{ not json\n");
+    commitAll(repo, "chore: bad intent");
+    let r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+    let doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.match((doc.check && doc.check.detail) || r.stdout + r.stderr, /JSON|valid|parse|schema|trust/i);
+
+    // Reset to valid then bad schema fields
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 99,
+          goal: "x",
+          allow: ["src/**"],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: unsupported schema");
+    r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1);
+
+    // Absolute path in allow
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          goal: "abs",
+          allow: ["/etc/passwd"],
+          deny: [],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: absolute allow");
+    r = run(["intent", "check"], repo);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout + r.stderr, /unsafe|absolute|trust|NO-GO/i);
+
+    // Traversal
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          goal: "trav",
+          allow: ["../../secrets/**"],
+          deny: [],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: traversal allow");
+    r = run(["intent", "check"], repo);
+    assert.equal(r.code, 1);
+
+    // Windows-style absolute
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          goal: "winabs",
+          allow: ["C:\\\\Windows\\\\System32"],
+          deny: [],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: win absolute");
+    r = run(["intent", "check"], repo);
+    assert.equal(r.code, 1);
+
+    // Remote-looking baseline via --base-ref
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify({ schemaVersion: 1, goal: "ok", allow: ["src/**"], deny: [] }, null, 2) + "\n",
+    );
+    commitAll(repo, "chore: good intent");
+    r = run(["intent", "check", "--base-ref", "refs/pull/1/merge"], repo);
+    assert.equal(r.code, 1, "remote/PR base-ref must fail closed");
+    assert.match(r.stdout + r.stderr, /remote|PR|refuse|trust|NO-GO|baseline/i);
+
+    // init rejects absolute --allow
+    r = run(
+      ["intent", "init", "--goal", "x", "--allow", "/abs/**"],
+      repo,
+    );
+    assert.equal(r.code, 1);
+
+    // Separator normalization: backslash allow is normalized; forward-slash change matches
+    write(
+      repo,
+      ".getadvantage/intent.json",
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          goal: "sep",
+          allow: ["src/auth/**"],
+          deny: [],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: sep intent");
+    write(repo, "src/auth/x.js", "export const x = 1;\n");
+    r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 0, `separator-normalized allow should GO\n${r.stderr}\n${r.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: no contract → main check omits intent (no false verified); intent check fails closed", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const gate = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(gate.code, 0, `clean sample should GO\n${gate.stderr}`);
+    const gdoc = parseJson(gate);
+    const ic = (gdoc.checks || []).find((c) => /Intent Contract/i.test(c.label));
+    assert.equal(ic, undefined, "no Intent Contract check without trusted contract");
+    assert.equal(gdoc.intent, undefined, "no top-level intent receipt without contract");
+    assert.doesNotMatch(JSON.stringify(gdoc), /intent verified/i);
+
+    const bare = run(["intent", "check", "--json"], repo);
+    assert.equal(bare.code, 1, "dedicated intent check without contract is non-zero");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: init CLI + packed cold install can init+check real temp git repo", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const init = run(
+      [
+        "intent",
+        "init",
+        "--goal",
+        "Add password reset",
+        "--allow",
+        "src/auth/**",
+        "--allow",
+        "tests/auth/**",
+        "--deny",
+        ".github/**",
+        "--max-files",
+        "10",
+        "--notes",
+        "Human acceptance notes only — never executed",
+      ],
+      repo,
+    );
+    assert.equal(init.code, 0, `init failed\n${init.stderr}\n${init.stdout}`);
+    assert.ok(existsSync(path.join(repo, ".getadvantage", "intent.json")));
+    assert.match(init.stdout + init.stderr, /commit/i);
+    commitAll(repo, "chore: intent contract from init");
+
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+    const chk = run(["intent", "check", "--json"], repo);
+    assert.equal(chk.code, 0, `check after init\n${chk.stderr}\n${chk.stdout}`);
+    const doc = parseJson(chk);
+    assert.equal(doc.verdict, "GO");
+    assert.match(doc.intent.contractHash, /^sha256:[0-9a-f]{64}$/);
+    assert.ok(doc.intent.acceptanceNotes);
+
+    // Packed cold path
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    const pkgRoot = path.join(__dirname, "..");
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgzName = readdirSync(packDir).find((f) => f.endsWith(".tgz"));
+    assert.ok(tgzName, "tarball created");
+    const listing = execFileSync("tar", ["-tzf", path.join(packDir, tgzName)], { encoding: "utf8" });
+    assert.ok(listing.replace(/\\/g, "/").includes("package/intent.mjs"), `tarball must include intent.mjs:\n${listing.slice(0, 500)}`);
+
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--ignore-scripts", path.join(packDir, tgzName)], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const coldBin = path.join(cold, "node_modules", "getadvantage", "index.mjs");
+    const coldRepo = path.join(base, "cold-repo");
+    initRepo(coldRepo);
+    write(coldRepo, "package.json", JSON.stringify({ name: "cold", version: "1.0.0", private: true }) + "\n");
+    write(coldRepo, "app.js", "console.log(1)\n");
+    commitAll(coldRepo, "chore: cold base");
+
+    const coldInit = spawnSync(
+      process.execPath,
+      [
+        coldBin,
+        "intent",
+        "init",
+        "--goal",
+        "Cold path task",
+        "--allow",
+        "src/**",
+      ],
+      { cwd: coldRepo, encoding: "utf8", env: buildEnv(), timeout: 60_000 },
+    );
+    assert.equal(coldInit.status, 0, `cold init\n${coldInit.stderr}\n${coldInit.stdout}`);
+    commitAll(coldRepo, "chore: cold intent");
+    write(coldRepo, "src/x.js", "export const x = 1;\n");
+    const coldCheck = spawnSync(process.execPath, [coldBin, "intent", "check", "--json"], {
+      cwd: coldRepo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 60_000,
+    });
+    assert.equal(coldCheck.status, 0, `cold check\n${coldCheck.stderr}\n${coldCheck.stdout}`);
+    const coldDoc = JSON.parse(coldCheck.stdout);
+    assert.equal(coldDoc.verdict, "GO");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: help surfaces and main check JSON/SARIF stay consistent", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const h = run(["help", "intent"], repo);
+    assert.equal(h.code, 0);
+    assert.match(h.stdout + h.stderr, /intent init/i);
+    assert.match(h.stdout + h.stderr, /semantic correctness not proven/i);
+
+    commitIntent(repo, INTENT_BASE);
+    write(repo, "src/other/bad.js", "export const bad = 1;\n");
+    const sarifPath = path.join(repo, "out.sarif");
+    const r = run(
+      ["check", "--json", "--no-overview", "--no-brief-check", "--sarif", sarifPath],
+      repo,
+    );
+    // Overall may be NO-GO (dirty + intent)
+    const doc = parseJson(r);
+    const ic = (doc.checks || []).find((c) => /Intent Contract/i.test(c.label));
+    assert.ok(ic && ic.status === "fail");
+    assert.ok(existsSync(sarifPath), "SARIF written");
+    const sarif = JSON.parse(readFileSync(sarifPath, "utf8"));
+    const results = (((sarif.runs || [])[0] || {}).results) || [];
+    const intentHit = results.some(
+      (x) =>
+        /intent/i.test(JSON.stringify(x)) ||
+        /Intent Contract/i.test(JSON.stringify(x)),
+    );
+    assert.ok(intentHit, "SARIF should include Intent Contract finding");
+    assert.ok(!JSON.stringify(sarif).includes("export const bad"), "SARIF no file body");
   } finally {
     cleanup(base);
   }

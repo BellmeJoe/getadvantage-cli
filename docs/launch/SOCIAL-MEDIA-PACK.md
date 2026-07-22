@@ -95,6 +95,22 @@ their named current test or source. Anything marked *roadmap* is not live.
 - “Replaces gitleaks / every security scanner”
 - Policy/allowlist surface (shipped safe in 0.8.3; still a secondary detail — lead with GO/NO-GO, not config)
 
+### E. Candidate (not LIVE) — Intent Contract 0.10.0 REVIEW_PENDING
+
+> **Do not advertise as shipped/LIVE until independent REVIEW_GO + publish.**
+> Factual candidate copy only for internal review / founder social drafts.
+
+| Feature | User-facing line | Command | Status |
+|---------|------------------|---------|--------|
+| **Intent Contract** | Freeze the task envelope before the agent starts; after work, prove repo changes stayed inside it. GO/NO-GO + receipt. *Scope verified; semantic correctness not proven.* | `intent init` · `intent check` · part of `check` when committed | **REVIEW_PENDING** · not on npm LIVE |
+
+**Candidate one-liner (not for LIVE posts):**
+```
+Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
+Commit it. After: intent check → did changes stay in the human envelope?
+Scope only — not semantic correctness. (0.10.0 candidate)
+```
+
 ---
 
 ## Ready-to-post copy

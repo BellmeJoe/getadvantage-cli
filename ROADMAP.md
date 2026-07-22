@@ -37,8 +37,38 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
 | **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
-| 0.9+ | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
+| **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; committed-HEAD blob trust; `intent init` / `intent check`; main `check` integration; GO/NO-GO + proof receipt | **REVIEW_PENDING** (candidate — no publish/tag/LIVE) |
+| 0.9.x | ICP stack-fit: Vite+React+Supabase map (deferred by founder priority behind Intent Contract) | **Deferred backlog** |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
+
+---
+
+## 0.10.0 — Intent Contract (REVIEW_PENDING)
+
+Local, deterministic proof that repository changes stayed inside the task the
+human authorized. Complements access control (whether an agent *may use* a tool)
+with a change-scope receipt — not an LLM opinion, not a claim of semantic
+correctness.
+
+**Cold path**
+1. `getadvantage intent init --goal "…" --allow <glob> [--deny …] [--require …] [--max-files N]`
+2. Commit `.getadvantage/intent.json` **before** the agent starts (authorization
+   is `git show HEAD:.getadvantage/intent.json`, never the worktree copy).
+3. After the agent works: `getadvantage intent check` → GO / NO-GO + stable
+   receipt (goal, `sha256` contract hash, baseline, changed paths, violations).
+   Honest limitation always emitted: *scope verified; semantic correctness not proven*.
+
+**Trust / fail-closed**
+- Deny wins over allow; renames check old + new paths; staged/unstaged/deleted/
+  untracked all count.
+- Worktree edits that broaden the contract cannot self-authorize.
+- Malformed schema, absolute/traversal paths, remote/PR base refs, unmerged
+  state → NO-GO with actionable text.
+- No contract → existing checks only (no false “intent verified”).
+- No network, shell hooks, model calls, or file-content dumps on violations.
+
+**Surfaces:** CLI human + `--json`, main `check` (when trusted contract present),
+SARIF findings via `check --sarif`, MCP `check` tool (same runner).
 
 ---
 

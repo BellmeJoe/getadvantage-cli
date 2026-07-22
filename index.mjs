@@ -58,11 +58,14 @@ import { runDemo } from "./demo.mjs";
 import { envReportOn, reportRun, lanesForIngest, ciDefaultBaseRef, runLogin, runLogout } from "./report.mjs";
 import { runGithubAction } from "./action.mjs";
 import { buildSarif, writeSarifFile } from "./sarif.mjs";
+import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
   const flags = {};
   const positional = [];
+  // Multi-value flags accumulate as arrays (intent --allow / --deny / --require).
+  const multiFlags = new Set(["allow", "deny", "require"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -79,8 +82,21 @@ function parseArgs(argv) {
         "into",
         "top",
         "sarif",
+        "goal",
+        "notes",
+        "acceptance-notes",
+        "max-files",
       ]);
-      if (valueFlags.has(key)) {
+      if (multiFlags.has(key)) {
+        const val = argv[++i];
+        if (val === undefined || (typeof val === "string" && val.startsWith("--"))) {
+          if (!Array.isArray(flags[key])) flags[key] = [];
+          if (val !== undefined && val.startsWith("--")) i--;
+        } else {
+          if (!Array.isArray(flags[key])) flags[key] = [];
+          flags[key].push(val);
+        }
+      } else if (valueFlags.has(key)) {
         const val = argv[++i];
         // Missing value (end of argv or next flag) — record empty so callers
         // can fail honestly instead of treating --sarif as a boolean.
@@ -97,7 +113,7 @@ function parseArgs(argv) {
       positional.push(a);
     }
   }
-  return { cmd: positional[0] || "check", arg: positional[1], flags };
+  return { cmd: positional[0] || "check", arg: positional[1], flags, positional };
 }
 
 function header() {
@@ -184,6 +200,11 @@ ${c.bold("Commands")}
   ${c.cyan("login")}    Connect this machine to your getAdvantage account: store an ${c.bold("adv_live_")} API key
            in ~/.getadvantage/config.json (owner-only). Used by ${c.bold("--report")}; env
            GETADVANTAGE_API_KEY always wins over the stored key. ${c.cyan("logout")} removes it.
+  ${c.cyan("intent")}   Local Intent Contract — human goal bound to an enforceable change envelope.
+           ${c.bold("init")} writes ${c.bold(".getadvantage/intent.json")}; ${c.bold("commit it before the agent starts")}
+           (authorization is the committed HEAD blob, not a worktree copy). ${c.bold("check")} compares
+           staged+unstaged+untracked paths → GO / NO-GO + proof receipt.
+           ${c.dim("scope verified; semantic correctness not proven.")} See ${c.bold(`${binName()} intent --help`)}.
   ${c.cyan("github-action")}  Write .github/workflows/getadvantage.yml — one-copy first-party Action
            (${c.bold("uses: BellmeJoe/getadvantage-cli@v1")}) on every push + pull request: GO/NO-GO,
            SARIF → ${c.bold("upload-sarif@v4")}, update-in-place PR summary (job-summary fallback).
@@ -261,6 +282,8 @@ ${c.bold("Examples")}
   ${bin} check --ci --report    CI gate + post the verdict to your account (what the Action runs)
   ${bin} check --sarif out.sarif   also write SARIF 2.1 for GitHub code scanning
   ${bin} github-action          write the GitHub Actions workflow (gate + SARIF upload)
+  ${bin} intent init --goal "Add password reset" --allow "src/auth/**" --deny ".github/**"
+  ${bin} intent check           prove working-tree changes stayed inside the contract
   ${bin} deploy --expect-prefix myproject-
 `);
 }
@@ -358,7 +381,7 @@ Want the whole thing acted out in ~10 seconds, zero setup? ${c.cyan(`${bin} demo
 }
 
 async function main() {
-  let { cmd, arg, flags } = parseArgs(process.argv.slice(2));
+  let { cmd, arg, flags, positional } = parseArgs(process.argv.slice(2));
 
   // --version / -v — print the package version, nothing else. (Before 0.6.2
   // this silently ran the full check.)
@@ -386,10 +409,16 @@ async function main() {
       printMcpHelp();
       process.exit(0);
     }
+    if (topic === "intent") {
+      header();
+      printIntentHelp();
+      process.exit(0);
+    }
     if (topic === "fan-out" || topic === "fan-in" || topic === "fanout" || topic === "fanin") {
       printFanHelp();
       process.exit(0);
     }
+    // `intent --help` / `intent help` already covered when cmd is intent below.
     printHelp();
     process.exit(0);
   }
@@ -501,6 +530,7 @@ async function main() {
       // Brief-staleness warning is default-on; `--no-brief-check` turns it off.
       briefCheck: !flags["no-brief-check"],
     });
+    const intentCheck = results.find((r) => r && r.label === "Intent Contract" && r.intent);
     const doc = {
       command: "check",
       verdict: exitCode === 0 ? "GO" : "NO-GO",
@@ -513,7 +543,11 @@ async function main() {
         // Optional structured findings (secret scan, tracked .env, …) for
         // tooling. Human lines stay in extra; raw matches are never present.
         ...(Array.isArray(r.findings) && r.findings.length > 0 ? { findings: r.findings } : {}),
+        ...(r.intent ? { intent: r.intent } : {}),
       })),
+      // Top-level intent receipt when a trusted contract was evaluated — never
+      // invent a verified claim when the check was omitted (no contract).
+      ...(intentCheck ? { intent: intentCheck.intent, limitation: INTENT_LIMITATION } : {}),
       generatedAt: new Date().toISOString(),
     };
     let finalExit = exitCode;
@@ -598,6 +632,40 @@ async function main() {
     process.exit(runInit({ cwd }));
   }
 
+  // Intent Contract: local change-scope proof (init + check).
+  if (cmd === "intent") {
+    const sub = arg || "help";
+    if (sub === "help" || flags.help) {
+      header();
+      printIntentHelp();
+      process.exit(0);
+    }
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
+    header();
+    let jsonDoc = null;
+    const code = runIntent({
+      cwd,
+      sub,
+      flags,
+      emitJson: restore
+        ? (doc) => {
+            jsonDoc = doc;
+          }
+        : null,
+    });
+    if (restore && jsonDoc) emitJson(restore, jsonDoc);
+    else if (restore && !jsonDoc) {
+      // init or help under --json — emit a minimal document
+      emitJson(restore, {
+        command: "intent",
+        sub,
+        exitCode: code,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+    process.exit(code);
+  }
+
   if (cmd === "fan-out" || cmd === "fanout") {
     header();
     process.exit(runFanOut({ cwd, n: arg, task: flags.task }));
@@ -680,8 +748,9 @@ async function main() {
   const known = [
     "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
     "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
-    "github-action", "deploy", "help", "version",
+    "github-action", "intent", "deploy", "help", "version",
   ];
+  void positional; // parseArgs exposes full positional list for future multi-arg cmds
   const suggestion = didYouMean(cmd, known);
   console.error(c.red(`✗ Unknown command: ${cmd}`));
   if (suggestion) {
