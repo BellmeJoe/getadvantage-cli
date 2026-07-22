@@ -5603,7 +5603,8 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     assert.ok(existsSync(path.join(installed, "action", "enforce.mjs")));
     assert.ok(existsSync(path.join(installed, "action", "install.mjs")));
     const pkg = JSON.parse(readFileSync(path.join(installed, "package.json"), "utf8"));
-    assert.equal(pkg.version, "0.9.0");
+    const expectedVersion = JSON.parse(readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).version;
+    assert.equal(pkg.version, expectedVersion);
 
     // Packed cold path: scrub helpers + summary marker + action gate entry load
     const utilCold = readFileSync(path.join(installed, "util.mjs"), "utf8");
