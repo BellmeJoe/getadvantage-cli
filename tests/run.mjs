@@ -5435,6 +5435,10 @@ scenario("action repair pass-4: published source identity, annotated peel, pre-t
     assert.ok(/gitHead/i.test(yml));
     assert.ok(/\^\{\}/.test(yml), "workflow must peel tags with ^{}");
     assert.ok(/source_sha/.test(yml), "workflow must pass proven source_sha to apply");
+    const identityIdx = yml.search(/git config user\.name[\s\S]*git config user\.email/);
+    assert.ok(identityIdx >= 0, "workflow must configure a repository-local tagger identity");
+    assert.ok(identityIdx < applyIdx, "tagger identity must be configured before annotated-tag apply");
+    assert.ok(!/git config --global user\.(?:name|email)/.test(yml), "workflow must not mutate global git identity");
     // Gate step must not use blind HEAD for already-published identity.
     assert.ok(/action-release\.mjs\s+--gate/.test(yml));
   }
