@@ -57,9 +57,10 @@ lane ships or is killed. Only one implementation lane may be open.
 4. **Client-bundle secret exposure** — built `dist/` and `.next/static` output,
    with honest handling of intentionally public prefixes such as `VITE_` and
    `NEXT_PUBLIC_`.
-   **Status (2026-07-22):** **REVIEW_PENDING** local candidate (not LIVE) —
-   secret scan covers committed `.next/static/**` (other `.next` still skipped);
-   public prefixes are not exemptions. Independent audit next; no publish yet.
+   **Status (2026-07-22):** **LIVE 0.9.1** — secret scan covers committed
+   `.next/static/**` (other `.next` still skipped honestly); public prefixes
+   are not exemptions. npm/`@v1`/`@v0.9.1`. Rollback: **0.9.0** / `v0.9.0`
+   and **0.8.4** / `v0.8.4`.
 5. **Vite + React + Supabase understanding** — useful map and check output on the
    dominant AI-app export path rather than a blank or backend-centric result.
 6. **Supabase RLS and ungated mutation checks** — static checks over migrations,

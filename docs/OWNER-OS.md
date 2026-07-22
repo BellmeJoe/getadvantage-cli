@@ -10,16 +10,15 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.8.4** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | **0.9.0 candidate** (first-party Action) | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.9.1** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | **0.9.1** (matches npm) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | **65/65** erwartet (Action + PR summary + repair hostiles) | `npm test` |
+| Tests grün? | **71/71** erwartet (client-bundle + Action + SARIF hostiles) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **Live npm remains 0.8.4.** Local candidate **0.9.0** = first-party GitHub
-> Action (`action.yml` + `uses: BellmeJoe/getadvantage-cli@v1`) + update-in-place
-> PR summary + job-summary fallback. State: **REVIEW_PENDING** — no publish/tag/
-> social LIVE flip until independent REVIEW_GO with 0 open P1/P2.
+> **Live npm is 0.9.1.** Secret scan covers committed `.next/static/**` (other
+> `.next` skipped honestly); first-party Action `@v1` / `@v0.9.1`; SARIF + PR
+> summary. Rollback: **0.9.0** / `v0.9.0` and **0.8.4** / `v0.8.4`.
 
 ---
 

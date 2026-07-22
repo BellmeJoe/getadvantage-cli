@@ -35,8 +35,9 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.2** | Policy config + secret allowlist (built-in AWS EXAMPLE + `.getadvantage/config.json`) — false-positive escape hatch | **Released** (npm, 2026-07-20; later independent review found false-GO risks) |
 | **0.8.3** | Policy-safety repair: index-blob auth only, sha256 auth ids (not display fingerprints), full-block + incomplete PEM, config ship-risk | **Released** (npm + tag v0.8.3, 2026-07-20) |
 | **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
-| **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Candidate** — REVIEW_PENDING (local 0.9.0; live npm remains 0.8.4) |
-| 0.8.x / 0.9.x | Remaining table stakes: client-bundle keys | Planned |
+| **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
+| **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
+| 0.9+ | ICP stack-fit residual: Vite+React+Supabase map / RLS | Planned |
 | 0.9+ | ICP stack-fit: Vite+React+Supabase + the AI-app failure modes (the wedge) | Planned |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
@@ -176,15 +177,15 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
   when written; update-in-place PR summary (`<!-- getadvantage:pr-summary -->`)
   with job-summary fallback; honest fork path (no `pull_request_target`, no
   secret claims); minimal permissions; 0.8.4 redaction carried forward; cold
-  install vs `--force` migration for pre-0.9.0 workflows. **Done in 0.9.0
-  candidate** (not published until independent REVIEW_GO).
+  install vs `--force` migration for pre-0.9.0 workflows. **Done in 0.9.0**
+  (shipped npm + tag v0.9.0; cold published path verified).
 - [x] **Client-bundle key exposure (scan path)** — committed `dist/**` / `build/**`
   already scanned; hole closed for committed **`.next/static/**`** browser assets
   (other `.next` segments still skipped honestly). `NEXT_PUBLIC_*` / `VITE_*` names
   alone are not findings; private material under those names still NO-GO.
-  **Candidate under lane `0.9.x-client-bundle-secret-exposure`** — not published
-  LIVE; not a security seal / live-key verification. Residual: broader Vite
-  route-map + Supabase RLS remain separate roadmap items.
+  **Done in 0.9.1** (shipped npm + tag v0.9.1; independent REVIEW_GO; cold
+  published path verified). Not a security seal / live-key verification.
+  Residual: broader Vite route-map + Supabase RLS remain separate roadmap items.
 
 ---
 
