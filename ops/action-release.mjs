@@ -413,6 +413,24 @@ function git(args, opts = {}) {
 }
 
 /**
+ * Annotated tags require a committer identity. GitHub-hosted runners often have
+ * none configured; set a bot identity only when missing (never overwrite CI-set
+ * values). Lightweight tags and other git ops do not need this.
+ */
+function ensureGitIdentityForAnnotatedTag(cwd = REPO_ROOT) {
+  const name = git(["config", "user.name"], { cwd });
+  const email = git(["config", "user.email"], { cwd });
+  const hasName = name.status === 0 && String(name.stdout || "").trim();
+  const hasEmail = email.status === 0 && String(email.stdout || "").trim();
+  if (!hasName) {
+    git(["config", "user.name", "github-actions[bot]"], { cwd });
+  }
+  if (!hasEmail) {
+    git(["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], { cwd });
+  }
+}
+
+/**
  * Query npm registry for package@version gitHead (or empty string).
  * Injectable for tests.
  *
@@ -650,6 +668,7 @@ export function applyActionRelease(o = {}) {
   for (const op of plan.ops) {
     if (op.op === "keep-tag" || op.op === "keep-release") continue;
     if (op.op === "create-tag") {
+      ensureGitIdentityForAnnotatedTag();
       const r = git(["tag", "-a", op.tag, "-m", `release: getadvantage ${version}`, op.sha]);
       if (r.status !== 0) {
         // Tag may already exist on this SHA from a race — re-check peeled commit.

@@ -138,6 +138,9 @@ jobs:
           set -euo pipefail
           # Ensure remote tags are visible for mismatch detection (peel with ^{}).
           git fetch origin --tags --force 2>/dev/null || true
+          # Annotated exact tags need a committer identity on hosted runners.
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
           # Released source SHA:
           # - new publish: verified npm gitHead / candidate (from verify step or gate)
