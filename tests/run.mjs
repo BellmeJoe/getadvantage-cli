@@ -4470,6 +4470,7 @@ scenario("action repair pass-2: pull_request_target refuse, SARIF digest, actor 
     parsePackageVersion,
     exactTagName,
     actionMajorTagForVersion,
+    githubRefApiRequest,
     validatePublishWorkflowContract,
     ACTION_MAJOR_TAG,
   } = await import(pathToFileURL(path.join(__dirname, "..", "ops", "action-release.mjs")).href);
@@ -4877,6 +4878,26 @@ process.exit(0);
     assert.equal(exactTagName("0.9.0"), "v0.9.0");
     assert.equal(actionMajorTagForVersion("0.9.0"), "v1");
     assert.equal(ACTION_MAJOR_TAG, "v1");
+
+    const createRef = githubRefApiRequest({
+      repository: "BellmeJoe/getadvantage-cli",
+      tag: "v0.9.1",
+      sha: "a".repeat(40),
+    });
+    assert.equal(createRef.ok, true);
+    assert.deepEqual(createRef.args.slice(0, 4), ["api", "--method", "POST", "repos/BellmeJoe/getadvantage-cli/git/refs"]);
+    assert.ok(createRef.args.includes("ref=refs/tags/v0.9.1"));
+
+    const moveRef = githubRefApiRequest({
+      repository: "BellmeJoe/getadvantage-cli",
+      tag: "v1",
+      sha: "b".repeat(40),
+      force: true,
+    });
+    assert.equal(moveRef.ok, true);
+    assert.deepEqual(moveRef.args.slice(0, 4), ["api", "--method", "PATCH", "repos/BellmeJoe/getadvantage-cli/git/refs/tags/v1"]);
+    assert.ok(moveRef.args.includes("force=true"));
+    assert.equal(githubRefApiRequest({ repository: "bad", tag: "v1", sha: "a".repeat(40) }).ok, false);
 
     const head = "a".repeat(40);
     const other = "b".repeat(40);

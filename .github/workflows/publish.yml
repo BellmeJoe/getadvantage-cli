@@ -165,12 +165,6 @@ jobs:
             echo "floating v1 peels to ${V1_COMMIT}"
           fi
 
-          # Annotated exact tags need a committer identity on clean CI runners.
-          # Keep this repository-local and deterministic; never depend on a
-          # founder's global git configuration.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           node ops/action-release.mjs --apply \
             --version="${{ steps.version.outputs.version }}" \
             --sha="$SOURCE_SHA"

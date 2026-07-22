@@ -90,6 +90,56 @@ export function actionMajorTagForVersion(_version) {
 }
 
 /**
+ * Build a GitHub Git-refs API request for a release tag. This is the CI-safe
+ * fallback when GitHub rejects a normal tag push because the target commit
+ * contains workflow-file changes.
+ *
+ * @param {{repository:string,tag:string,sha:string,force?:boolean}} o
+ * @returns {{ok:true,args:string[]}|{ok:false,reason:string}}
+ */
+export function githubRefApiRequest(o = {}) {
+  const repository = String(o.repository || "").trim();
+  const tag = String(o.tag || "").trim();
+  const sha = normalizeSha(o.sha);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    return { ok: false, reason: "invalid-github-repository" };
+  }
+  if (!tag || tag.includes("..") || /[\s\\~^:?*\[]/.test(tag)) {
+    return { ok: false, reason: "invalid-tag" };
+  }
+  if (!sha) return { ok: false, reason: "invalid-sha" };
+
+  if (o.force) {
+    return {
+      ok: true,
+      args: [
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${repository}/git/refs/tags/${encodeURIComponent(tag)}`,
+        "-f",
+        `sha=${sha}`,
+        "-F",
+        "force=true",
+      ],
+    };
+  }
+  return {
+    ok: true,
+    args: [
+      "api",
+      "--method",
+      "POST",
+      `repos/${repository}/git/refs`,
+      "-f",
+      `ref=refs/tags/${tag}`,
+      "-f",
+      `sha=${sha}`,
+    ],
+  };
+}
+
+/**
  * Peel a tag ref to the underlying commit SHA.
  * Annotated tags: `refs/tags/name` is a tag object; `refs/tags/name^{}` is the commit.
  * Lightweight tags: both resolve to the same commit.
@@ -430,6 +480,48 @@ function ensureGitIdentityForAnnotatedTag(cwd = REPO_ROOT) {
   }
 }
 
+function githubRepository(opts = {}) {
+  const fromEnv = String(opts.repository || process.env.GITHUB_REPOSITORY || "").trim();
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fromEnv)) return fromEnv;
+  const remote = git(["remote", "get-url", "origin"], opts);
+  if (remote.status !== 0) return "";
+  const match = String(remote.stdout || "")
+    .trim()
+    .match(/github\.com(?::|\/)([^/]+)\/([^/]+)$/i);
+  return match ? `${match[1]}/${match[2].replace(/\.git$/i, "")}` : "";
+}
+
+function pushTagWithApiFallback(tag, sha, opts = {}) {
+  const pushArgs = ["push", "origin", `refs/tags/${tag}`];
+  if (opts.force) pushArgs.push("--force");
+  const push = git(pushArgs, opts);
+  if (push.status === 0) return { ok: true, transport: "git" };
+
+  const request = githubRefApiRequest({
+    repository: githubRepository(opts),
+    tag,
+    sha,
+    force: Boolean(opts.force),
+  });
+  if (!request.ok) {
+    return { ok: false, error: `${push.stderr || push.stdout}\nAPI fallback unavailable: ${request.reason}` };
+  }
+
+  console.warn(`action-release: git push for ${tag} rejected; retrying through GitHub refs API`);
+  const api = spawnSync("gh", request.args, {
+    cwd: opts.cwd || REPO_ROOT,
+    encoding: "utf8",
+    env: opts.env || process.env,
+  });
+  if (api.status !== 0) {
+    return {
+      ok: false,
+      error: `${push.stderr || push.stdout}\nGitHub refs API fallback failed: ${api.stderr || api.stdout}`,
+    };
+  }
+  return { ok: true, transport: "github-api" };
+}
+
 /**
  * Query npm registry for package@version gitHead (or empty string).
  * Injectable for tests.
@@ -678,18 +770,19 @@ export function applyActionRelease(o = {}) {
           return { ok: false, plan, exitCode: 1 };
         }
       }
-      const push = git(["push", "origin", `refs/tags/${op.tag}`]);
-      if (push.status !== 0) {
-        console.error(`action-release: push tag ${op.tag} failed: ${push.stderr || push.stdout}`);
+      const tagObject = normalizeSha(git(["rev-parse", `refs/tags/${op.tag}`]).stdout);
+      const pushed = pushTagWithApiFallback(op.tag, tagObject, { cwd: o.cwd || REPO_ROOT });
+      if (!pushed.ok) {
+        console.error(`action-release: push tag ${op.tag} failed: ${pushed.error}`);
         return { ok: false, plan, exitCode: 1 };
       }
     } else if (op.op === "move-tag") {
       // Floating major: force-update local + remote (standard Action major pattern).
       // Prefer lightweight floating tag (common Action convention); force move is fine.
       git(["tag", "-f", op.tag, op.sha]);
-      const push = git(["push", "origin", `refs/tags/${op.tag}`, "--force"]);
-      if (push.status !== 0) {
-        console.error(`action-release: move-tag push ${op.tag} failed: ${push.stderr || push.stdout}`);
+      const pushed = pushTagWithApiFallback(op.tag, op.sha, { cwd: o.cwd || REPO_ROOT, force: true });
+      if (!pushed.ok) {
+        console.error(`action-release: move-tag push ${op.tag} failed: ${pushed.error}`);
         return { ok: false, plan, exitCode: 1 };
       }
     } else if (op.op === "create-release") {
