@@ -30,7 +30,7 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Outcome (Kunde versteht das) | Wie das Tool es prüft (komplex, unsichtbar) |
 |------------------------------|-----------------------------------------------|
-| **„Kein Live-Key im Repo“** | Secret-Scan inkl. Sourcemaps/Dist, Redaction, kein Full-Key in Output |
+| **„Kein Live-Key im Repo“** | Secret-Scan inkl. Sourcemaps/Dist + committed `.next/static/**` client assets; `NEXT_PUBLIC_*`/`VITE_*` names are not an exemption for private values; Redaction, kein Full-Key in Output (pattern coverage, no security seal) |
 | **„Kein .env committed“** | Tracked-.env-Check (History = Leak) |
 | **„Ich shippe nicht aus Versehen ungespeicherten Dreck“** | Dirty-tree-Check: warnt bei lokal geänderten, noch nicht committeten Dateien — Hosts wie Vercel deployen genau diesen Stand |
 | **„Ein sauberes Projekt wird nicht falsch blockiert“** | Clean fixture → GO |

@@ -178,10 +178,13 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
   secret claims); minimal permissions; 0.8.4 redaction carried forward; cold
   install vs `--force` migration for pre-0.9.0 workflows. **Done in 0.9.0
   candidate** (not published until independent REVIEW_GO).
-- [ ] **Client-bundle key exposure check** (built `dist/`, `.next/static`,
-  `VITE_`/`NEXT_PUBLIC_` misuse) — add #1. The most common real damage in
-  AI-built apps (~1.5M keys exposed across documented 2025/26 incidents; 98% of
-  1,072 scanned vibe-apps had ≥1 flaw). Extends the existing secret scanner. **S**
+- [x] **Client-bundle key exposure (scan path)** — committed `dist/**` / `build/**`
+  already scanned; hole closed for committed **`.next/static/**`** browser assets
+  (other `.next` segments still skipped honestly). `NEXT_PUBLIC_*` / `VITE_*` names
+  alone are not findings; private material under those names still NO-GO.
+  **Candidate under lane `0.9.x-client-bundle-secret-exposure`** — not published
+  LIVE; not a security seal / live-key verification. Residual: broader Vite
+  route-map + Supabase RLS remain separate roadmap items.
 
 ---
 

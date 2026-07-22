@@ -277,15 +277,28 @@ const SECRET_PATTERNS = [
 // Files we never scan (binary-ish, generated, vendored).
 //
 // ⚠ Deliberately NOT skipped: .env* files AND build-output dirs (dist/build/
-// coverage). filesToScan() runs through git ls-files, which honours .gitignore —
-// so a normally-generated dir only ever reaches the scan when the user COMMITTED
-// it. A dir/basename skip here could therefore only suppress the DANGEROUS case:
+// coverage) AND committed Next.js browser assets under .next/static/**.
+// filesToScan() runs through git ls-files, which honours .gitignore — so a
+// normally-generated dir only ever reaches the scan when the user COMMITTED it.
+// A dir/basename skip here could therefore only suppress the DANGEROUS case:
 // a bundled/copied key inside committed build output (the classic vibe-coder
 // `git add .` of a dist folder). Skipping .env was a real hole in ≤0.5.0 (fixed
 // 0.6.0); skipping build dirs was the same silent-GO hole
-// (finding: F1-buildpath-secret-skip). Truly-huge trees that are normally
+// (finding: F1-buildpath-secret-skip); blanket-skipping every `.next` path
+// segment was the same class of hole for Next.js client bundles
+// (finding: F-client-bundle-next-static). Truly-huge trees that are normally
 // gitignored stay skipped for perf — if they're committed, that's a separate smell.
-const SKIP_DIR = new Set([".git", "node_modules", ".next", ".vercel", ".data"]);
+//
+// Honesty boundary for `.next`:
+//   • SCAN  committed text under `.next/static/**` (JS/CSS/chunks/maps that
+//     browsers actually load — the place a private key can ship to the client).
+//   • SKIP  other `.next` segments (cache, server, types, traces, BUILD_ID, …)
+//     which are not browser static assets and are often binary/huge.
+//   • Binary/ext skips (SKIP_EXT, looksBinary) still apply under static/.
+// This is pattern coverage of committed client build output — not a guarantee
+// that every secret shape is known, and public name prefixes (NEXT_PUBLIC_*,
+// VITE_*) are NOT an exemption: only the value's shape decides a hit.
+const SKIP_DIR = new Set([".git", "node_modules", ".vercel", ".data"]);
 // Lockfiles USED to be skipped for perf, but a committed npm/yarn _authToken (or a
 // key pasted into one) then slipped through silently — so nothing is skipped by
 // basename anymore; they're scanned like any other text file.
@@ -298,6 +311,24 @@ const SKIP_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
   ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".webm", ".zip", ".gz",
 ]);
+
+/**
+ * True when a relative path should be excluded from the secret scan.
+ * Always skip .git / node_modules / .vercel / .data. For `.next`, skip unless
+ * the path is under a `.next/static/` segment (committed browser assets).
+ */
+function shouldSkipSecretPath(rel) {
+  const segs = rel.split(/[\\/]/).filter(Boolean);
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    if (SKIP_DIR.has(seg)) return true;
+    if (seg === ".next") {
+      // Only client static assets under .next/static/** are scanned.
+      if (segs[i + 1] !== "static") return true;
+    }
+  }
+  return false;
+}
 
 const MAX_FILE_BYTES = 2_000_000; // full-scan cap (same cap as safety.ts corpus)
 const PARTIAL_CHUNK_BYTES = 262_144; // oversized files: scan first + last 256 KB
@@ -391,8 +422,9 @@ export function checkSecrets(cwd) {
     const ext = path.extname(rel).toLowerCase();
     if (SKIP_BASENAME.has(base)) continue;
     if (SKIP_EXT.has(ext)) continue;
-    // Skip anything inside a skipped directory.
-    if (rel.split(/[\\/]/).some((seg) => SKIP_DIR.has(seg))) continue;
+    // Skip vendored/cache dirs; keep committed client build assets (dist/,
+    // build/, .next/static/**) so a bundled key cannot silent-GO.
+    if (shouldSkipSecretPath(rel)) continue;
 
     const abs = path.join(cwd, rel);
     let text;

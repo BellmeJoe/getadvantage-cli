@@ -104,6 +104,12 @@
 //                                     workflow working-directory + materialize;
 //                                     nested-git clean GO; product-root still NO-GO
 //                                     on intentional tests/run.mjs hostiles
+//  45. client-bundle secret exposure — committed sk_live in .next/static → NO-GO;
+//                                     Vite dist / VITE_* assignment with private
+//                                     material → NO-GO (prefix not an exemption);
+//                                     public VITE_/NEXT_PUBLIC_ config alone → not
+//                                     a secret NO-GO; .next/cache still skipped
+//                                     (honest non-static boundary); packed cold path
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -2537,6 +2543,227 @@ scenario("secret scan: a key committed in a lockfile or a .map sourcemap is caug
     commitAll(clean, "chore: png");
     const rc = run(["check", "--json", "--no-brief-check", "--no-overview"], clean);
     assert.equal(rc.code, 0, `binary-only repo must GO: ${rc.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 45. client-bundle secret exposure (.next/static + Vite dist; public prefixes
+//     are not an exemption for private material) — lane 0.9.x
+// ---------------------------------------------------------------------------
+scenario("secret scan: committed sk_live only in .next/static/** → NO-GO; full secret not printed", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Classic silent-GO hole: committed Next browser chunk with a live Stripe key.
+    const key = "sk_live_" + "NEXTSTATICCHUNK0000000001";
+    write(
+      repo,
+      ".next/static/chunks/app-pages-internals.js",
+      `self.__next_f.push([1,"const STRIPE=\\"${key}\\";"]);\n`,
+    );
+    // Non-static .next internals must remain skipped (honest boundary).
+    write(repo, ".next/cache/webpack/client-development/0.pack", `junk ${key} junk\n`);
+    write(repo, ".next/server/app/page.js", `export const k="${key}";\n`);
+    commitAll(repo, "chore: commit .next browser chunk with embedded live key");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 1, `committed secret in .next/static must NO-GO: ${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    const sec = doc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.ok(sec, "secret scan present");
+    assert.equal(sec.status, "fail", `.next/static secret must fail: ${JSON.stringify(sec)}`);
+    const joined = JSON.stringify(doc);
+    assert.ok(/\.next[\\/]static/.test(joined) || /app-pages-internals/.test(joined),
+      `must name the static client asset:\n${joined.slice(0, 800)}`);
+    assert.ok(!joined.includes(key), "the full secret must never be echoed in JSON");
+    assert.ok(!(r.stdout + r.stderr).includes(key), "full secret must never appear in human output");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret scan: sk_live in Vite dist asset or VITE_* assignment → NO-GO (prefix not exemption)", () => {
+  const base = freshBase();
+  try {
+    // Case A: private key inside a committed Vite dist asset.
+    const distRepo = scaffold(path.join(base, "dist-case"));
+    const distKey = "sk_live_" + "VITEDISTBUNDLEKEY00000001";
+    write(
+      distRepo,
+      "dist/assets/index-a1b2c3d4.js",
+      `const __vite__={VITE_STRIPE_SECRET:"${distKey}"};\n`,
+    );
+    commitAll(distRepo, "chore: commit Vite dist with live key");
+    const rd = run(["check", "--json", "--no-brief-check", "--no-overview"], distRepo);
+    assert.equal(rd.code, 1, `committed secret in dist/ must NO-GO: ${rd.stdout}`);
+    const ddoc = JSON.parse(rd.stdout);
+    const dsec = ddoc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.equal(dsec.status, "fail", `dist secret must fail: ${JSON.stringify(dsec)}`);
+    assert.ok(!JSON.stringify(ddoc).includes(distKey), "full dist secret never echoed");
+
+    // Case B: private key under a VITE_* name in source — prefix alone is not safe.
+    const viteRepo = scaffold(path.join(base, "vite-case"));
+    const viteKey = "sk_live_" + "VITEPREFIXLIVEKEY00000001";
+    write(
+      viteRepo,
+      "src/env.js",
+      `export const VITE_STRIPE_SECRET_KEY = "${viteKey}";\n`,
+    );
+    commitAll(viteRepo, "chore: VITE_ name holding a private live key");
+    const rv = run(["check", "--json", "--no-brief-check", "--no-overview"], viteRepo);
+    assert.equal(rv.code, 1, `VITE_*-named private key must NO-GO: ${rv.stdout}`);
+    const vdoc = JSON.parse(rv.stdout);
+    const vsec = vdoc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.equal(vsec.status, "fail", `VITE_ private material must fail: ${JSON.stringify(vsec)}`);
+    assert.ok(!JSON.stringify(vdoc).includes(viteKey), "full VITE_ secret never echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret scan: intentional public client config (VITE_/NEXT_PUBLIC_) alone is not a secret NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Values deliberately do NOT match private secret regexes (no sk_live, no JWT
+    // header shape, no PEM, etc.). Proves the public *name* is not a finding.
+    write(
+      repo,
+      ".env.local.example",
+      [
+        "VITE_SUPABASE_URL=https://xyzcompany.supabase.co",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY=public-anon-placeholder-not-a-secret",
+        "NEXT_PUBLIC_APP_NAME=demo-client",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "src/client-config.js",
+      [
+        'export const VITE_SUPABASE_URL = "https://xyzcompany.supabase.co";',
+        'export const NEXT_PUBLIC_SUPABASE_ANON_KEY = "public-anon-placeholder-not-a-secret";',
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: intentional public client config only");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 0, `public client config alone must GO:\n${r.stdout}\n${r.stderr}`);
+    const doc = JSON.parse(r.stdout);
+    const sec = doc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.ok(sec, "secret scan present");
+    assert.equal(sec.status, "pass", `must not secret-NO-GO on public prefixes alone: ${JSON.stringify(sec)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret scan: key only under .next/cache (non-static) stays honest-skip; no claim of coverage", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const key = "sk_live_" + "NEXTCACHEONLYSKIP00000001";
+    // Only non-static .next paths — scanner must NOT pretend to cover these.
+    write(repo, ".next/cache/webpack/client-development/1.pack", `packed ${key}\n`);
+    write(repo, ".next/server/chunks/ssr.js", `module.exports={k:"${key}"};\n`);
+    commitAll(repo, "chore: secret only in non-static .next paths");
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 0, `non-static .next alone must not be claimed covered (GO):\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    const sec = doc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.equal(sec.status, "pass", JSON.stringify(sec));
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("packed package: cold install catches .next/static + dist secrets; public config GO", () => {
+  const base = freshBase();
+  try {
+    const pkgRoot = path.join(__dirname, "..");
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgz = path.join(packDir, readdirPack(packDir));
+    assert.ok(existsSync(tgz), `expected tarball in ${packDir}`);
+    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    assert.ok(
+      listing.includes("package/checks.mjs") || listing.replace(/\\/g, "/").includes("package/checks.mjs"),
+      "tarball must include checks.mjs",
+    );
+
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--ignore-scripts", tgz], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const bin = path.join(cold, "node_modules", "getadvantage", "index.mjs");
+    assert.ok(existsSync(bin), "packed index.mjs must install");
+
+    // Cold: .next/static secret → NO-GO, redacted
+    const nextSample = path.join(base, "sample-next");
+    initRepo(nextSample);
+    write(nextSample, "package.json", '{"name":"cold-next","version":"1.0.0","private":true}\n');
+    const nextKey = "sk_live_" + "COLDNEXTSTATICSECRET00001";
+    write(
+      nextSample,
+      ".next/static/chunks/main-app.js",
+      `window.__ENV={stripe:"${nextKey}"};\n`,
+    );
+    commitAll(nextSample, "chore: cold .next/static secret");
+    const rNext = spawnSync(
+      process.execPath,
+      [bin, "check", "--json", "--no-brief-check", "--no-overview"],
+      { cwd: nextSample, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(rNext.status, 1, `cold .next/static must NO-GO:\n${rNext.stderr}\n${rNext.stdout}`);
+    assert.ok(!((rNext.stdout || "") + (rNext.stderr || "")).includes(nextKey), "cold: full next secret absent");
+    const nextDoc = JSON.parse(rNext.stdout);
+    const nextSec = nextDoc.checks.find((c) => /Secret scan/i.test(c.label));
+    assert.equal(nextSec.status, "fail");
+
+    // Cold: dist secret → NO-GO
+    const distSample = path.join(base, "sample-dist");
+    initRepo(distSample);
+    write(distSample, "package.json", '{"name":"cold-dist","version":"1.0.0","private":true}\n');
+    const distKey = "sk_live_" + "COLDDISTBUNDLESECRET00001";
+    write(distSample, "dist/assets/index.js", `export const k="${distKey}";\n`);
+    commitAll(distSample, "chore: cold dist secret");
+    const rDist = spawnSync(
+      process.execPath,
+      [bin, "check", "--json", "--no-brief-check", "--no-overview"],
+      { cwd: distSample, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(rDist.status, 1, `cold dist must NO-GO:\n${rDist.stderr}\n${rDist.stdout}`);
+    assert.ok(!((rDist.stdout || "") + (rDist.stderr || "")).includes(distKey), "cold: full dist secret absent");
+
+    // Cold: public client config alone → GO
+    const pubSample = path.join(base, "sample-public");
+    initRepo(pubSample);
+    write(pubSample, "package.json", '{"name":"cold-pub","version":"1.0.0","private":true}\n');
+    write(
+      pubSample,
+      "src/config.js",
+      'export const VITE_SUPABASE_URL="https://xyzcompany.supabase.co";\n' +
+        'export const NEXT_PUBLIC_SUPABASE_ANON_KEY="public-anon-placeholder-not-a-secret";\n',
+    );
+    commitAll(pubSample, "chore: cold public config");
+    const rPub = spawnSync(
+      process.execPath,
+      [bin, "check", "--json", "--no-brief-check", "--no-overview"],
+      { cwd: pubSample, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(rPub.status, 0, `cold public config must GO:\n${rPub.stderr}\n${rPub.stdout}`);
   } finally {
     cleanup(base);
   }

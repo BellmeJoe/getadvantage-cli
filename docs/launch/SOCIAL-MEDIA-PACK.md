@@ -60,7 +60,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | Feature | User-facing line | Command / surface | Proof |
 |---------|------------------|-------------------|--------|
 | **Pre-deploy GO/NO-GO** | Safe to ship? Yes or no. Exit 0 / 1. | `npx getadvantage check` · alias `ship` (+build) | Evidence: clean-go, catches-the-leak, … |
-| **Secret scan** | Catches committed keys — including inside **sourcemaps/dist**. Never prints the full secret. | part of `check` | Evidence: catches-the-leak, build-output-leak |
+| **Secret scan** | Catches committed keys — including inside **sourcemaps/dist** and committed **`.next/static`** browser assets. Public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not treated as proof a private value is safe. Never prints the full secret. Not a security seal. | part of `check` | Evidence: catches-the-leak, build-output-leak · candidate tests: `.next/static` + Vite dist hostiles (lane `0.9.x-client-bundle-secret-exposure`, not published LIVE) |
 | **Tracked `.env`** | A committed `.env` is a leak by itself. | part of `check` | Evidence: tracked-env |
 | **Dirty-tree guard** | Stops “I deployed my uncommitted mess” (vercel --prod ships the working tree). | part of `check` | Evidence: dirty-tree |
 | **Honest skips** | No TypeScript? No fake typecheck fail. Not checkable ≠ silent GO on manifests. | part of `check` | Honesty principle + tests |
@@ -166,6 +166,7 @@ Roadmap 0.9 (Vite/Supabase ICP failure modes) is the **wedge expansion**; 0.8.x 
 |--------------|----------------------------------------|
 | Catches committed keys | `catches-the-leak` |
 | Catches keys in build/sourcemap | `build-output-leak` |
+| Catches keys in committed `.next/static` (candidate) | Integration tests in `tests/run.mjs` (lane `0.9.x`); evidence suite still covers dist/sourcemap via `build-output-leak` |
 | Blocks tracked .env | `tracked-env` |
 | Clean repo gets GO | `clean-go` |
 | Dirty tree blocks | `dirty-tree` |
