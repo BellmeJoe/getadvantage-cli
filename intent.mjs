@@ -9,14 +9,21 @@
 //   • Human commits the contract as a *dedicated linear freeze* after that
 //     baseline. Authorization is the freeze-commit blob — never the worktree,
 //     never a runtime --base-ref, never a later broadened HEAD blob.
+//   • Unsigned local mode allows ONE Intent Contract lineage per reachable
+//     history: freeze discovery walks all commits reachable from HEAD and uses
+//     the earliest introduction of INTENT_REL. The current HEAD contract is a
+//     presence/tamper signal only — never a trust pointer for which history
+//     slice to search. Deletion, re-addition, or any later mutation of the
+//     intent path after that original freeze is always NO-GO.
+//   • `intent init` refuses if INTENT_REL ever existed in HEAD ancestry (no
+//     fake --force trust reset).
 //   • `intent check` diffs EVERY change after baselineCommit: committed,
 //     staged, unstaged, deleted, renamed, copied, type-changed, untracked.
 //   • Deny globs override allow globs. Renames check BOTH old and new paths.
-//   • Later edits to the contract (committed/index/worktree) cannot self-
-//     authorize; freeze blob remains the authorizer.
 //   • Nested git / gitlink / symlink contract / unmerged state → NO-GO.
-//   • Without signature/protected remote, unrestricted history rewrite cannot
-//     be proven human. We never claim cryptographic human identity.
+//   • Local unsigned Git history cannot prove human identity or resist a party
+//     that rewrites all reachable history. We never claim cryptographic
+//     attestation or human-identity proof.
 //
 // Honest limitation always emitted:
 //   "scope verified; semantic correctness not proven"
@@ -404,73 +411,61 @@ function pathsChangedInCommit(cwd, commitSha, parentSha) {
 }
 
 /**
- * Locate the dedicated linear freeze commit after baseline that introduces
- * INTENT_REL. Fail closed on merge freeze, multi-file freeze, missing freeze,
- * or ambiguous history.
+ * True when INTENT_REL was ever introduced/touched on a commit reachable from
+ * the given tip (including after a later deletion). Used by `intent init` to
+ * refuse a second freeze on the same clean lineage.
+ */
+export function intentPathEverInAncestry(cwd, tipRef = "HEAD") {
+  try {
+    const out = gitRaw(["rev-list", "-n", "1", tipRef, "--", INTENT_REL], { cwd }).trim();
+    return !!out;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * History-first discovery of the original Intent Contract freeze.
  *
- * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean }
+ * Walks every commit reachable from headSha (oldest → newest). The first
+ * introduction of INTENT_REL is the only possible freeze. Its blob supplies
+ * the authorizing contract + baselineCommit. Any later touch (delete, modify,
+ * re-add) sets laterContractChange. Does NOT take baseline from the HEAD
+ * contract — the current contract never chooses which history slice is searched.
+ *
+ * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean, baselineSha: string }
  *          | { ok: false, error: string, present?: boolean }}
  */
-export function findFreezeCommit(cwd, baselineSha, headSha) {
-  if (!FULL_SHA_RE.test(baselineSha) || !FULL_SHA_RE.test(headSha)) {
-    return { ok: false, error: "baseline/HEAD must be full 40-hex SHAs" };
-  }
-  if (!isAncestorOrEqual(cwd, baselineSha, headSha)) {
-    return {
-      ok: false,
-      present: true,
-      error:
-        `baselineCommit ${baselineSha.slice(0, 12)} is not an ancestor of HEAD ${headSha.slice(0, 12)} ` +
-        `(rewritten, non-ancestor, or wrong baseline) — refuse`,
-    };
-  }
-
-  // Contract must not already live at the baseline (freeze is after baseline).
-  const atBase = gitSafe(["ls-tree", baselineSha, "--", INTENT_REL], { cwd });
-  if (atBase) {
-    return {
-      ok: false,
-      present: true,
-      error:
-        `${INTENT_REL} already exists at baselineCommit ${baselineSha.slice(0, 12)} — ` +
-        `baseline must be the pre-contract freeze point. Re-run intent init on a clean pre-contract HEAD.`,
-    };
-  }
-
-  if (baselineSha === headSha) {
-    return {
-      ok: false,
-      present: false,
-      error:
-        `no dedicated freeze commit after baselineCommit ${baselineSha.slice(0, 12)} — ` +
-        `commit ${INTENT_REL} alone (dedicated freeze) before the agent starts`,
-    };
+export function discoverOriginalFreeze(cwd, headSha) {
+  if (!FULL_SHA_RE.test(headSha)) {
+    return { ok: false, error: "HEAD must be a full 40-hex SHA" };
   }
 
   let revList = "";
   try {
-    revList = gitRaw(["rev-list", "--reverse", `${baselineSha}..${headSha}`], { cwd }).trim();
+    revList = gitRaw(["rev-list", "--reverse", headSha], { cwd }).trim();
   } catch (e) {
     return {
       ok: false,
       present: true,
-      error: `cannot walk history baseline..HEAD: ${e.message || e}`,
+      error: `cannot walk reachable history from HEAD: ${e.message || e}`,
     };
   }
-  const revs = revList.split(/\r?\n/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const revs = revList
+    .split(/\r?\n/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
   if (revs.length === 0) {
-    return {
-      ok: false,
-      present: false,
-      error: `no commits after baselineCommit ${baselineSha.slice(0, 12)}`,
-    };
+    return { ok: false, present: false, error: "no commits reachable from HEAD" };
   }
 
   let freezeSha = null;
   let freezeBlob = null;
   let freezeContract = null;
   let freezeHash = null;
+  let baselineSha = null;
   let laterContractChange = false;
+  let sawUnsafeMode = null;
 
   for (const sha of revs) {
     const parentLine = gitSafe(["rev-list", "--parents", "-n", "1", sha], { cwd });
@@ -478,7 +473,7 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
       return { ok: false, present: true, error: `cannot read parents of ${sha.slice(0, 12)}` };
     }
     const parts = parentLine.split(/\s+/).filter(Boolean);
-    const parents = parts.slice(1);
+    const parents = parts.slice(1).map((p) => p.toLowerCase());
 
     const modeOn = intentBlobIsSafeOnRef(cwd, sha);
     const presentHere = modeOn.ok;
@@ -486,32 +481,41 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
 
     if (!presentHere && !presentErrIsAbsent) {
       // Symlink/gitlink/etc. on this commit
-      return { ok: false, present: true, error: modeOn.error };
+      if (!freezeSha) {
+        return { ok: false, present: true, error: modeOn.error };
+      }
+      // After freeze, unsafe mode is later tamper.
+      laterContractChange = true;
+      sawUnsafeMode = modeOn.error;
+      continue;
     }
 
-    // Did INTENT_REL change in this commit?
+    // Did INTENT_REL change in this commit relative to parents?
     let intentTouched = false;
     if (parents.length === 0) {
-      // Root commit in range should not happen when baseline is parent chain, but fail closed.
       intentTouched = presentHere;
     } else if (parents.length > 1) {
-      // Merge commit: if it introduces/changes intent relative to any parent → refuse.
-      if (presentHere) {
-        for (const p of parents) {
-          const parentBlob = readGitCommitBlob(cwd, p, INTENT_REL);
-          const hereBlob = readGitCommitBlob(cwd, sha, INTENT_REL);
-          if (parentBlob !== hereBlob) {
-            return {
-              ok: false,
-              present: true,
-              error:
-                `merge commit ${sha.slice(0, 12)} changes ${INTENT_REL} — ` +
-                `freeze must be an unambiguous single-parent dedicated commit`,
-            };
-          }
+      const hereBlob = presentHere ? readGitCommitBlob(cwd, sha, INTENT_REL) : null;
+      for (const p of parents) {
+        const parentBlob = readGitCommitBlob(cwd, p, INTENT_REL);
+        if (parentBlob !== hereBlob) {
+          intentTouched = true;
+          break;
         }
       }
-      // Merge that does not touch intent: skip (not a freeze candidate).
+      if (!intentTouched) continue;
+
+      // Merge touching intent: never a valid freeze; after freeze → later change.
+      if (!freezeSha) {
+        return {
+          ok: false,
+          present: true,
+          error:
+            `merge commit ${sha.slice(0, 12)} introduces or changes ${INTENT_REL} — ` +
+            `freeze must be an unambiguous single-parent dedicated commit`,
+        };
+      }
+      laterContractChange = true;
       continue;
     } else {
       const parent = parents[0];
@@ -523,7 +527,7 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
     if (!intentTouched) continue;
 
     if (!presentHere) {
-      // Deletion of contract after freeze
+      // Deletion of contract
       if (freezeSha) {
         laterContractChange = true;
         continue;
@@ -535,8 +539,9 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
       };
     }
 
-    // First touch after baseline = freeze candidate; must be dedicated + linear.
+    // Present and touched.
     if (!freezeSha) {
+      // Original introduction — must be dedicated single-parent freeze.
       if (parents.length !== 1) {
         return {
           ok: false,
@@ -563,14 +568,6 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
             `(found: ${uniquePaths.slice(0, 8).join(", ") || "(none)"}) — refuse`,
         };
       }
-      // Prefer parent chain attached to baseline for first freeze.
-      if (parent.toLowerCase() !== baselineSha && !isAncestorOrEqual(cwd, baselineSha, parent)) {
-        return {
-          ok: false,
-          present: true,
-          error: `freeze commit ${sha.slice(0, 12)} parent is not on the baseline..HEAD ancestry — refuse`,
-        };
-      }
 
       const blob = readGitCommitBlob(cwd, sha, INTENT_REL);
       if (blob == null) {
@@ -588,42 +585,63 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
           error: `freeze contract invalid: ${parsed.error}`,
         };
       }
-      if (parsed.contract.baselineCommit !== baselineSha) {
+      const declaredBaseline = parsed.contract.baselineCommit;
+      if (declaredBaseline !== parent) {
         return {
           ok: false,
           present: true,
           error:
-            `freeze contract baselineCommit ${parsed.contract.baselineCommit.slice(0, 12)} ` +
-            `≠ expected baseline ${baselineSha.slice(0, 12)} — refuse`,
+            `freeze contract baselineCommit ${declaredBaseline.slice(0, 12)} ` +
+            `≠ freeze parent ${parent.slice(0, 12)} — refuse`,
         };
       }
+      // Baseline must not already carry the contract (pre-freeze point).
+      const atBase = gitSafe(["ls-tree", declaredBaseline, "--", INTENT_REL], { cwd });
+      if (atBase) {
+        return {
+          ok: false,
+          present: true,
+          error:
+            `${INTENT_REL} already exists at baselineCommit ${declaredBaseline.slice(0, 12)} — ` +
+            `baseline must be the pre-contract freeze point.`,
+        };
+      }
+      if (!isAncestorOrEqual(cwd, declaredBaseline, headSha)) {
+        return {
+          ok: false,
+          present: true,
+          error:
+            `baselineCommit ${declaredBaseline.slice(0, 12)} is not an ancestor of HEAD ` +
+            `${headSha.slice(0, 12)} (rewritten, non-ancestor, or wrong baseline) — refuse`,
+        };
+      }
+
       freezeSha = sha;
       freezeBlob = blob;
       freezeContract = parsed.contract;
       freezeHash = computeIntentHash(parsed.contract);
+      baselineSha = declaredBaseline;
     } else {
-      // Any later committed change to the contract path.
+      // Any later committed change to the contract path (modify / re-add).
       laterContractChange = true;
     }
   }
 
   if (!freezeSha) {
-    // HEAD may still have a contract introduced outside our walk (shouldn't).
     const onHead = intentBlobIsSafeOnRef(cwd, headSha);
-    if (onHead.ok) {
+    if (onHead.ok || (sawUnsafeMode && !/is not present/.test(sawUnsafeMode))) {
       return {
         ok: false,
         present: true,
         error:
-          `could not locate a dedicated linear freeze for ${INTENT_REL} after baseline ` +
-          `${baselineSha.slice(0, 12)} — refuse (ambiguous or non-dedicated history)`,
+          `could not locate a dedicated linear freeze for ${INTENT_REL} in reachable history — ` +
+          `refuse (ambiguous or non-dedicated history)`,
       };
     }
     return {
       ok: false,
       present: false,
-      error:
-        `no freeze commit introducing ${INTENT_REL} after baselineCommit ${baselineSha.slice(0, 12)}`,
+      error: `no freeze commit introducing ${INTENT_REL} in reachable HEAD ancestry`,
     };
   }
 
@@ -633,13 +651,61 @@ export function findFreezeCommit(cwd, baselineSha, headSha) {
     blob: freezeBlob,
     contract: freezeContract,
     hash: freezeHash,
+    baselineSha,
     laterContractChange,
+  };
+}
+
+/**
+ * Locate the dedicated linear freeze for INTENT_REL.
+ *
+ * History-first: walks all commits reachable from headSha and uses the earliest
+ * introduction as the only freeze. When baselineSha is provided (legacy callers),
+ * the discovered freeze's declared baseline must match it.
+ *
+ * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean }
+ *          | { ok: false, error: string, present?: boolean }}
+ */
+export function findFreezeCommit(cwd, baselineSha, headSha) {
+  if (!FULL_SHA_RE.test(headSha)) {
+    return { ok: false, error: "HEAD must be a full 40-hex SHA" };
+  }
+  if (baselineSha != null && baselineSha !== "" && !FULL_SHA_RE.test(baselineSha)) {
+    return { ok: false, error: "baseline must be a full 40-hex SHA when provided" };
+  }
+
+  const disc = discoverOriginalFreeze(cwd, headSha);
+  if (!disc.ok) return disc;
+
+  if (baselineSha && FULL_SHA_RE.test(baselineSha) && disc.baselineSha !== baselineSha) {
+    // Callers that still pass a baseline (e.g. from a later replacement contract)
+    // must not re-root trust. The original freeze is the only authorizer; report
+    // later-contract-change semantics rather than inventing a new window.
+    return {
+      ok: true,
+      freezeSha: disc.freezeSha,
+      blob: disc.blob,
+      contract: disc.contract,
+      hash: disc.hash,
+      laterContractChange: true,
+    };
+  }
+
+  return {
+    ok: true,
+    freezeSha: disc.freezeSha,
+    blob: disc.blob,
+    contract: disc.contract,
+    hash: disc.hash,
+    laterContractChange: disc.laterContractChange,
   };
 }
 
 /**
  * Load the trusted Intent Contract from frozen history.
  * Worktree / later HEAD blobs never authorize.
+ * Freeze discovery is independent of the baselineCommit declared by the current
+ * HEAD contract — HEAD is only a presence/tamper signal.
  * Runtime --base-ref must never select trust (removed).
  *
  * @param {string} cwd
@@ -680,164 +746,83 @@ export function loadTrustedIntent(cwd, _opts = {}) {
   }
   const headSha = headRes.sha;
 
-  // Presence probe: committed somewhere on HEAD or only worktree.
   const headMode = intentBlobIsSafeOnRef(cwd, headSha);
   const headHasIntent = headMode.ok;
-  if (!headHasIntent && !worktreeExists) {
-    // Also: contract might exist only between baseline and HEAD tip? Unreachable
-    // without being on HEAD if history is linear. Absent.
-    return empty;
-  }
-  if (!headHasIntent && worktreeExists) {
-    return {
-      ...empty,
-      present: true,
-      headSha,
-      error:
-        `${INTENT_REL} exists in the working tree but is not committed — ` +
-        `run intent init (pins baselineCommit), then commit only that file as a dedicated freeze before the agent starts.`,
-    };
-  }
-  if (!headHasIntent) {
-    return { ...empty, present: true, headSha, error: headMode.error };
-  }
+  const headAbsentClean = !headHasIntent && /is not present/.test(headMode.error || "");
+  const headUnsafe = !headHasIntent && !headAbsentClean;
 
-  // Read HEAD blob only to discover baselineCommit pointer — trust still from freeze.
-  const headBlob = readGitCommitBlob(cwd, headSha, INTENT_REL);
-  if (headBlob == null) {
-    return {
-      ...empty,
-      present: true,
-      headSha,
-      error: `could not read committed ${INTENT_REL} from HEAD ${headSha.slice(0, 12)}`,
-    };
-  }
+  // History-first: original freeze discovery never uses HEAD's baselineCommit.
+  const disc = discoverOriginalFreeze(cwd, headSha);
 
-  // If HEAD is malformed, still try to recover freeze via walking if we can parse
-  // baseline from a partial JSON — fail closed on parse errors at HEAD unless we
-  // can find freeze another way. Spec: fail closed.
-  const headParsed = parseAndValidateContract(headBlob);
-  // Discover baseline: prefer validated HEAD field; if HEAD is a later mutation
-  // that broke schema, attempt freeze discovery is hard without baseline.
-  // Fail closed with actionable text.
-  if (!headParsed.ok) {
-    // Later broadened invalid? Still NO-GO untrusted.
-    // But freeze may still be valid — try to extract baselineCommit loosely.
-    let looseBaseline = null;
-    try {
-      const loose = JSON.parse(stripBom(headBlob));
-      if (loose && typeof loose.baselineCommit === "string" && FULL_SHA_RE.test(loose.baselineCommit.trim().toLowerCase())) {
-        looseBaseline = loose.baselineCommit.trim().toLowerCase();
-      }
-    } catch {
-      /* ignore */
-    }
-    if (!looseBaseline) {
+  if (!disc.ok && disc.present === false) {
+    // No historical freeze. Worktree-only or nothing.
+    if (!worktreeExists && !headHasIntent) return empty;
+    if (worktreeExists && !headHasIntent) {
       return {
         ...empty,
         present: true,
         headSha,
-        error: headParsed.error,
+        error:
+          `${INTENT_REL} exists in the working tree but is not committed — ` +
+          `run intent init (pins baselineCommit), then commit only that file as a dedicated freeze before the agent starts.`,
       };
     }
-    const freezeTry = findFreezeCommit(cwd, looseBaseline, headSha);
-    if (!freezeTry.ok) {
-      return {
-        ...empty,
-        present: true,
-        headSha,
-        error: `HEAD contract invalid (${headParsed.error}); freeze recovery: ${freezeTry.error}`,
-      };
+    if (headUnsafe) {
+      return { ...empty, present: true, headSha, error: headMode.error };
     }
-    // Trusted freeze despite bad HEAD mutation.
-    let worktreeDiffers = false;
-    if (worktreeExists) {
-      try {
-        worktreeDiffers = readFileSync(abs, "utf8") !== freezeTry.blob;
-      } catch {
-        worktreeDiffers = true;
-      }
-    } else {
-      worktreeDiffers = true;
-    }
-    return {
-      present: true,
-      trusted: true,
-      contract: freezeTry.contract,
-      hash: freezeTry.hash,
-      baseline: {
-        ref: "baselineCommit",
-        sha: freezeTry.contract.baselineCommit,
-        trustSha: freezeTry.freezeSha,
-        trustRef: "freeze",
-      },
-      freezeSha: freezeTry.freezeSha,
-      headSha,
-      error: null,
-      worktreeDiffers: worktreeDiffers || freezeTry.laterContractChange || headBlob !== freezeTry.blob,
-      laterContractChange: freezeTry.laterContractChange || headBlob !== freezeTry.blob,
-    };
-  }
-
-  const baselineCommit = headParsed.contract.baselineCommit;
-  const baseRes = resolveLocalCommit(cwd, baselineCommit);
-  if (!baseRes.ok) {
+    // HEAD claims a contract but discovery failed (e.g. non-dedicated).
     return {
       ...empty,
       present: true,
       headSha,
-      error: `baselineCommit unresolvable: ${baseRes.error}`,
+      error: disc.error || "could not locate a dedicated linear freeze",
     };
   }
-  if (baseRes.sha !== baselineCommit) {
-    // Should not happen for full SHA input; symbolic was already rejected.
+
+  if (!disc.ok) {
+    // Historical presence but untrusted / invalid freeze lineage.
     return {
       ...empty,
       present: true,
       headSha,
-      error: `baselineCommit must resolve to itself as full SHA (got ${baseRes.sha})`,
+      error: disc.error,
     };
   }
 
-  const freeze = findFreezeCommit(cwd, baselineCommit, headSha);
-  if (!freeze.ok) {
-    return {
-      ...empty,
-      present: freeze.present !== false,
-      headSha,
-      baseline: { ref: "baselineCommit", sha: baselineCommit },
-      error: freeze.error,
-    };
-  }
-
-  // Worktree / HEAD vs freeze disclosure.
+  // Trusted original freeze found (may be deleted or mutated later).
+  const headBlob = headHasIntent ? readGitCommitBlob(cwd, headSha, INTENT_REL) : null;
   let worktreeDiffers = false;
   if (worktreeExists) {
     try {
-      if (readFileSync(abs, "utf8") !== freeze.blob) worktreeDiffers = true;
+      if (readFileSync(abs, "utf8") !== disc.blob) worktreeDiffers = true;
     } catch {
       worktreeDiffers = true;
     }
+  } else if (!headHasIntent) {
+    // Deleted from HEAD and worktree — still a tamper signal.
+    worktreeDiffers = true;
   }
-  const headDiffers = headBlob !== freeze.blob;
+  const headDiffers = headHasIntent ? headBlob !== disc.blob : true;
   if (headDiffers) worktreeDiffers = true;
+
+  const laterContractChange = disc.laterContractChange || headDiffers;
 
   return {
     present: true,
     trusted: true,
-    contract: freeze.contract,
-    hash: freeze.hash,
+    contract: disc.contract,
+    hash: disc.hash,
     baseline: {
       ref: "baselineCommit",
-      sha: baselineCommit,
-      trustSha: freeze.freezeSha,
+      sha: disc.baselineSha || disc.contract.baselineCommit,
+      trustSha: disc.freezeSha,
       trustRef: "freeze",
     },
-    freezeSha: freeze.freezeSha,
+    freezeSha: disc.freezeSha,
     headSha,
     error: null,
     worktreeDiffers,
-    laterContractChange: freeze.laterContractChange || headDiffers,
+    laterContractChange,
   };
 }
 
@@ -1340,7 +1325,22 @@ export function checkIntent(cwd, opts = {}) {
   );
 
   const evaled = evaluateIntentScope(loaded.contract, evalPaths);
-  const verdict = evaled.ok ? "GO" : "NO-GO";
+
+  // Deletion / re-add / any later mutation of the intent path after the original
+  // freeze is always NO-GO. Replacement broad contracts never authorize.
+  const violations = [...evaled.violations];
+  if (loaded.laterContractChange) {
+    const already = violations.some((v) => v.reason === "later-contract-change");
+    if (!already) {
+      violations.push({
+        path: INTENT_REL,
+        reason: "later-contract-change",
+        rule: null,
+      });
+    }
+  }
+
+  const verdict = violations.length === 0 ? "GO" : "NO-GO";
   const receipt = buildIntentReceipt({
     goal: loaded.contract.goal,
     hash: loaded.hash,
@@ -1350,7 +1350,7 @@ export function checkIntent(cwd, opts = {}) {
     headSha: loaded.headSha,
     changedPaths: evaled.changedPaths,
     pathRecords: evalPaths,
-    violations: evaled.violations,
+    violations,
     fileCount: evaled.fileCount,
     worktreeDiffers: loaded.worktreeDiffers,
     laterContractChange: loaded.laterContractChange,
@@ -1358,7 +1358,7 @@ export function checkIntent(cwd, opts = {}) {
     verdict,
   });
 
-  if (evaled.ok) {
+  if (verdict === "GO") {
     const extras = [
       `goal: ${receipt.goal}`,
       `contract: ${receipt.contractHash}`,
@@ -1392,7 +1392,7 @@ export function checkIntent(cwd, opts = {}) {
   }
 
   const lines = [];
-  for (const v of evaled.violations) {
+  for (const v of violations) {
     if (v.reason === "denied") {
       lines.push(`${v.path} — DENY matched ${JSON.stringify(v.rule)}`);
     } else if (v.reason === "outside-allow") {
@@ -1401,6 +1401,11 @@ export function checkIntent(cwd, opts = {}) {
       lines.push(`required change missing — no path matched ${JSON.stringify(v.rule)}`);
     } else if (v.reason === "max-files") {
       lines.push(`too many files changed: ${evaled.fileCount} > maxFiles ${v.rule}`);
+    } else if (v.reason === "later-contract-change") {
+      lines.push(
+        `${INTENT_REL} — lineage tamper: deleted, re-added, or mutated after the original freeze ` +
+          `(unsigned local mode allows one freeze per clean lineage; replacement contracts never authorize)`,
+      );
     } else {
       lines.push(`${v.path} — ${v.reason}`);
     }
@@ -1417,16 +1422,16 @@ export function checkIntent(cwd, opts = {}) {
   ];
   if (loaded.worktreeDiffers || loaded.laterContractChange) {
     extras.push(
-      `note: freeze blob remains the authorizer — broadening ${INTENT_REL} after freeze cannot self-authorize.`,
+      `note: original freeze blob remains the only authorizer — broadening or re-freezing ${INTENT_REL} after the first freeze cannot self-authorize.`,
     );
   }
   const r = result(
     "fail",
     "Intent Contract",
-    `NO-GO — ${evaled.violations.length} scope violation${pl(evaled.violations.length)} against the Intent Contract.`,
+    `NO-GO — ${violations.length} scope violation${pl(violations.length)} against the Intent Contract.`,
     extras,
   );
-  r.findings = evaled.violations.slice(0, 50).map((v) => ({
+  r.findings = violations.slice(0, 50).map((v) => ({
     ruleId: `intent/${v.reason}`,
     label: "Intent Contract violation",
     file: v.path !== "(none)" && v.path !== "(count)" ? v.path : undefined,
@@ -1481,6 +1486,29 @@ export function runIntentInit(o) {
   }
   const baselineCommit = baseRes.sha;
 
+  // Unsigned local mode: one Intent Contract lineage per reachable history.
+  // Deleting and re-initing must never mint a new authorizing freeze.
+  if (intentPathEverInAncestry(cwd, "HEAD")) {
+    console.error(
+      c.red(
+        `✗ intent init refused — ${INTENT_REL} already exists in reachable HEAD ancestry.`,
+      ),
+    );
+    console.error(
+      c.gray(
+        "  Unsigned local mode allows one freeze per clean lineage. Deleting the contract\n" +
+          "  and re-running init cannot mint a new authorizing baseline (that would be a false-GO attack).",
+      ),
+    );
+    console.error(
+      c.gray(
+        "  Start a new branch from a trusted clean base (no intent history), or use a future\n" +
+          "  signed/protected reset path. There is no --force trust reset for local unsigned mode.",
+      ),
+    );
+    return 1;
+  }
+
   const draft = {
     schemaVersion: 1,
     goal: String(goal).trim(),
@@ -1504,7 +1532,17 @@ export function runIntentInit(o) {
 
   const abs = path.join(cwd, ...INTENT_REL.split("/"));
   if (existsSync(abs) && !force) {
-    console.error(c.red(`✗ ${INTENT_REL} already exists — pass --force to overwrite (then re-commit as a new dedicated freeze).`));
+    console.error(
+      c.red(
+        `✗ ${INTENT_REL} already exists in the worktree — pass --force to overwrite the uncommitted draft ` +
+          `(then commit only that file as the dedicated freeze).`,
+      ),
+    );
+    console.error(
+      c.gray(
+        "  --force only rewrites an uncommitted worktree draft; it is not a trust reset after a freeze.",
+      ),
+    );
     return 1;
   }
 
@@ -1705,9 +1743,11 @@ ${c.bold("Cold path")}
 ${c.bold("Trust")}
   • Deny overrides allow. Renames check old and new paths.
   • Staged, unstaged, deleted, renamed, untracked, and post-freeze commits all count.
-  • Editing or re-committing a broader contract cannot authorize itself; freeze wins.
+  • Freeze discovery walks reachable history; the first introduction of ${INTENT_REL} is the only freeze.
+  • Deleting, re-adding, or mutating the contract after that freeze is always NO-GO — replacement contracts never authorize.
+  • \`intent init\` refuses if ${INTENT_REL} ever existed in HEAD ancestry (no --force trust reset).
   • Nested git repos / gitfiles that hide files → NO-GO.
-  • No runtime flag selects the authorizing contract. Local trust only — no crypto human claim.
+  • No runtime flag selects the authorizing contract. Local unsigned history only — not cryptographic attestation or human-identity proof.
   • No network, no shell hooks, no model calls, no file-content dumps.
 
 ${c.bold("Main gate")}

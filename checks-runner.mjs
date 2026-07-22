@@ -77,11 +77,13 @@ export async function runChecks(o) {
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
   printResult(results[results.length - 1]);
 
-  // e. Intent Contract — only when a trusted freeze is present.
+  // e. Intent Contract — only when a trusted freeze is present (including
+  // historically: deletion after freeze still surfaces as present + NO-GO).
   // Projects without a contract keep existing checks only; never emit a false
   // "intent verified" pass. When present, scope violations → NO-GO.
-  // Trust always comes from baselineCommit + dedicated freeze history — never
-  // from schema-bump/PR --base-ref or any runtime trust selector.
+  // Trust comes from the original dedicated freeze in reachable history — never
+  // from HEAD's baselineCommit pointer, schema-bump/PR --base-ref, or any
+  // runtime trust selector.
   {
     let intentResult = null;
     try {

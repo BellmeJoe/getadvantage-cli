@@ -6559,6 +6559,228 @@ scenario("intent: help surfaces and main check JSON/SARIF stay consistent", () =
   }
 });
 
+// --- P1: false-GO rebootstrap attack + lineage integrity ---
+
+scenario("intent: delete→re-init broad freeze→arbitrary commit is NO-GO (false-GO attack)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit: originalFreeze } = commitIntent(repo, INTENT_BASE);
+
+    // 2. Agent deletes the contract and commits the deletion
+    g(["rm", "-q", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: agent deletes intent"], repo);
+
+    // 3. Agent runs intent init again (must refuse — but also exercise direct write
+    //    + re-freeze in case init is bypassed with raw file write)
+    const reinit = run(
+      ["intent", "init", "--goal", "agent takeover", "--allow", "**"],
+      repo,
+    );
+    assert.equal(reinit.code, 1, `init after deletion must refuse\n${reinit.stderr}\n${reinit.stdout}`);
+    assert.match(reinit.stdout + reinit.stderr, /ancestry|lineage|refuse|one freeze|already exists/i);
+
+    // Attack via direct write (bypass init) — pins deletion commit as new baseline
+    const agentBaseline = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    const broad = {
+      schemaVersion: 1,
+      goal: "agent takeover",
+      allow: ["**"],
+      deny: [],
+      baselineCommit: agentBaseline,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broad, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: agent broad re-freeze"], repo);
+
+    // 5. Arbitrary work outside original envelope
+    write(repo, "src/other/pwn.js", "export const pwn = true;\n");
+    g(["add", "src/other/pwn.js"], repo);
+    g(["commit", "-q", "-m", "feat: pwn outside original envelope"], repo);
+
+    // 6. Must be NO-GO — original freeze remains authorizer; rebootstrap cannot authorize
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `false-GO attack must be NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.intent.freezeCommit, originalFreeze, "original freeze remains authorizer");
+    assert.ok(
+      doc.intent.laterContractChange ||
+        (doc.intent.violations || []).some(
+          (v) =>
+            v.reason === "later-contract-change" ||
+            v.reason === "outside-allow" ||
+            /pwn|intent\.json/.test(v.path || ""),
+        ),
+      `expected lineage tamper / outside-allow: ${JSON.stringify(doc.intent.violations)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: init after committed deletion refuses (no --force trust reset)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, INTENT_BASE);
+    g(["rm", "-q", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: delete intent"], repo);
+
+    const r = run(
+      ["intent", "init", "--goal", "try again", "--allow", "src/**", "--force"],
+      repo,
+    );
+    assert.equal(r.code, 1, `init after deletion must refuse even with --force\n${r.stderr}\n${r.stdout}`);
+    assert.match(r.stdout + r.stderr, /ancestry|lineage|refuse|one freeze|already exists|no --force trust/i);
+    assert.ok(
+      !existsSync(path.join(repo, ".getadvantage", "intent.json")),
+      "must not write a replacement contract after historical freeze",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: replacement HEAD contract with later baselineCommit cannot hide original freeze", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit: originalFreeze, baselineCommit: originalBaseline } = commitIntent(
+      repo,
+      INTENT_BASE,
+    );
+
+    // Advance history with an unrelated commit, then replace intent pointing at new baseline
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+    g(["add", "src/auth/ok.js"], repo);
+    g(["commit", "-q", "-m", "feat: authorized"], repo);
+    const laterBase = g(["rev-parse", "HEAD"], repo).toLowerCase();
+    assert.notEqual(laterBase, originalBaseline);
+
+    const replacement = {
+      schemaVersion: 1,
+      goal: "replacement broad",
+      allow: ["**"],
+      deny: [],
+      baselineCommit: laterBase,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(replacement, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: replacement contract later baseline"], repo);
+
+    write(repo, "lib/hidden.js", "export const h = 1;\n");
+    g(["add", "lib/hidden.js"], repo);
+    g(["commit", "-q", "-m", "feat: outside original"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `later baseline must not hide original freeze\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.intent.freezeCommit, originalFreeze, "original freeze authorizes");
+    assert.equal(doc.intent.baseline.sha, originalBaseline, "original baseline used for scope");
+    assert.ok(doc.intent.laterContractChange, "replacement is later contract change");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: original freeze then delete without re-add → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit } = commitIntent(repo, INTENT_BASE);
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+    g(["add", "src/auth/ok.js"], repo);
+    g(["commit", "-q", "-m", "feat: authorized"], repo);
+
+    g(["rm", "-q", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: delete intent without re-add"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `delete without re-add must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    // Must not omit the check (false "no contract")
+    assert.ok(doc.intent, "receipt present even when deleted from HEAD");
+    assert.equal(doc.intent.freezeCommit, freezeCommit);
+    assert.ok(
+      doc.intent.laterContractChange ||
+        (doc.intent.violations || []).some((v) => v.reason === "later-contract-change"),
+      JSON.stringify(doc.intent),
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: modify then restore exact original content still NO-GO (history touched)", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit, baselineCommit } = commitIntent(repo, INTENT_BASE);
+    const originalBlob = readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8");
+
+    // Modify contract
+    const broadened = {
+      schemaVersion: 1,
+      goal: "Add password reset",
+      allow: ["**"],
+      deny: [],
+      baselineCommit,
+    };
+    write(repo, ".getadvantage/intent.json", JSON.stringify(broadened, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: broaden"], repo);
+
+    // Restore exact original content
+    write(repo, ".getadvantage/intent.json", originalBlob);
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: restore original intent bytes"], repo);
+
+    // Authorized-looking work only
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+    g(["add", "src/auth/ok.js"], repo);
+    g(["commit", "-q", "-m", "feat: would-be authorized"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `history touch must NO-GO even after restore\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.intent.freezeCommit, freezeCommit);
+    assert.ok(doc.intent.laterContractChange, "history was touched");
+    assert.ok(
+      (doc.intent.violations || []).some((v) => v.reason === "later-contract-change"),
+      JSON.stringify(doc.intent.violations),
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: normal first freeze + authorized committed work remains GO", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit, baselineCommit } = commitIntent(repo, INTENT_BASE);
+    write(repo, "src/auth/reset.js", "export function reset() { return true; }\n");
+    write(repo, "tests/auth/reset.test.js", "export const t = 1;\n");
+    g(["add", "src/auth/reset.js", "tests/auth/reset.test.js"], repo);
+    g(["commit", "-q", "-m", "feat: password reset"], repo);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 0, `happy path must stay GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.intent.freezeCommit, freezeCommit);
+    assert.equal(doc.intent.baseline.sha, baselineCommit);
+    assert.equal(doc.intent.laterContractChange, false);
+    assert.equal((doc.intent.violations || []).length, 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
