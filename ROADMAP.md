@@ -37,13 +37,17 @@ independently reproduced 1:1 against the live npm package.
 | **0.8.4** | GitHub-native SARIF 2.1 export + generated workflow upload path | **Released** (npm + tag v0.8.4, 2026-07-20) |
 | **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
-| **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; `intent init` / `intent check`; main `check` integration | **RELEASING** (0.10.0 package identity; publish/tag/LIVE after objective gate + cold verify) |
+| **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; `intent init` / `intent check`; main `check` integration | **Released** (npm + tag v0.10.0 + floating v1, 2026-07-23; cold published verified) |
 | 0.9.x | ICP stack-fit: Vite+React+Supabase map (deferred by founder priority behind Intent Contract) | **Deferred backlog** |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
 
-## 0.10.0 — Intent Contract (RELEASING)
+## 0.10.0 — Intent Contract (**LIVE**)
+
+**Shipped:** npm `getadvantage@0.10.0` · source `gitHead` `705986c` · tags
+`v0.10.0` + floating `v1` · [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.0).
+Rollback: **0.9.1** / `v0.9.1`.
 
 **Also covers:** non-ignored untracked only (ship-diff; gitignored paths not
 evaluated); gitlink mode 160000 and symlink mode 120000 always NO-GO (cannot

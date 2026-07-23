@@ -10,16 +10,16 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.10.0** (after publish) | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | **0.10.0** | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.10.0** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | **0.10.0** (matches npm) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
 | Tests grün? | **96/96** erwartet (Intent Contract + gitlink fail-closed + prior hostiles) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **Package identity is 0.10.0** (Intent Contract). After registry publish:
-> secret scan still covers committed `.next/static/**`; first-party Action
-> `@v1` / `@v0.10.0`; Intent Contract when a trusted freeze is present.
-> Rollback: **0.9.1** / `v0.9.1`, **0.9.0** / `v0.9.0`, **0.8.4** / `v0.8.4`.
+> **Live npm is 0.10.0.** Intent Contract (scope envelope + receiptHash; gitlink
+> fail-closed); secret scan covers committed `.next/static/**`; first-party
+> Action `@v1` / `@v0.10.0`. Registry `gitHead` `705986c`. Rollback: **0.9.1** /
+> `v0.9.1`, **0.9.0** / `v0.9.0`, **0.8.4** / `v0.8.4`.
 
 ---
 
