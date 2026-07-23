@@ -61,6 +61,12 @@ lane ships or is killed. Only one implementation lane may be open.
    `.next/static/**` (other `.next` still skipped honestly); public prefixes
    are not exemptions. npm/`@v1`/`@v0.9.1`. Rollback: **0.9.0** / `v0.9.0`
    and **0.8.4** / `v0.8.4`.
+4b. **Intent Contract (change-scope trust)** — human goal bound to an enforceable
+   path envelope; freeze blob authorizes; receiptHash; nested-git/gitlink fail-closed.
+   **Status (2026-07-23):** **0.10.0 RELEASING** — package identity 0.10.0; promote
+   LIVE only after npm publish + cold `npx getadvantage@0.10.0`. Rollback pin:
+   **0.9.1** / `v0.9.1`. Limitation always: *scope verified; semantic correctness
+   not proven.*
 5. **Vite + React + Supabase understanding** — useful map and check output on the
    dominant AI-app export path rather than a blank or backend-centric result.
 6. **Supabase RLS and ungated mutation checks** — static checks over migrations,

@@ -18,9 +18,14 @@
 //   • `intent init` refuses if INTENT_REL ever existed in HEAD ancestry (no
 //     fake --force trust reset).
 //   • `intent check` diffs EVERY change after baselineCommit: committed,
-//     staged, unstaged, deleted, renamed, copied, type-changed, untracked.
+//     staged, unstaged, deleted, renamed, copied, type-changed, and
+//     non-ignored untracked (`ls-files -o --exclude-standard`). Gitignored
+//     untracked paths are not in the change set (ship-diff semantics; not a
+//     full agent filesystem seal — say so in docs).
 //   • Deny globs override allow globs. Renames check BOTH old and new paths.
-//   • Nested git / gitlink / symlink contract / unmerged state → NO-GO.
+//   • Nested git / gitlink (mode 160000) / symlink (mode 120000) / unmerged
+//     state → NO-GO. Gitlinks collapse whole trees into one path and must never
+//     authorize as a normal allow match.
 //   • Local unsigned Git history cannot prove human identity or resist a party
 //     that rewrites all reachable history. We never claim cryptographic
 //     attestation or human-identity proof.
@@ -876,11 +881,149 @@ function parseNameStatusZ(buf) {
 }
 
 /**
+ * Parse `git diff --raw -z` records and return special-mode hits.
+ * A gitlink (160000) collapses an entire nested tree into one path entry and
+ * must never authorize as a normal file match. Symlinks (120000) are also
+ * fail-closed (contract / ship ambiguity).
+ *
+ * Raw -z layout: `:oldmode newmode oldsha newsha status\0path\0`
+ * (renames/copies: two path fields).
+ *
+ * @returns {{ path: string, mode: string, role: "gitlink"|"symlink" }[]}
+ */
+export function parseRawDiffSpecialModes(buf) {
+  const hits = [];
+  if (!buf) return hits;
+  const parts = buf.split("\0").filter((p) => p.length > 0);
+  for (let i = 0; i < parts.length; ) {
+    const meta = parts[i++];
+    if (!meta || meta[0] !== ":") break;
+    const fields = meta.slice(1).split(" ");
+    // oldmode newmode oldsha newsha status[score]
+    if (fields.length < 5) continue;
+    const oldMode = fields[0];
+    const newMode = fields[1];
+    const status = fields[4] || "";
+    const code = status[0] || "";
+    const paths = [];
+    if (code === "R" || code === "C") {
+      const oldPath = parts[i++] || "";
+      const newPath = parts[i++] || "";
+      if (oldPath) paths.push(oldPath);
+      if (newPath) paths.push(newPath);
+    } else {
+      const p = parts[i++] || "";
+      if (p) paths.push(p);
+    }
+    for (const mode of [oldMode, newMode]) {
+      let role = null;
+      if (mode === "160000") role = "gitlink";
+      else if (mode === "120000") role = "symlink";
+      if (!role) continue;
+      for (const p of paths) {
+        const np = normalizeRepoPath(p);
+        if (np) hits.push({ path: np, mode, role });
+      }
+    }
+  }
+  return hits;
+}
+
+/**
+ * Fail closed when any change since baseline involves a gitlink or symlink mode.
+ * `git diff --name-status` collapses gitlinks to ordinary A/M/D — modes must be
+ * read from `--raw` (and index `ls-files -s` as a belt-and-suspenders check).
+ *
+ * @returns {string|null} error message or null if clean
+ */
+export function detectGitlinkOrSymlinkModes(cwd, baselineSha) {
+  const blobs = [];
+  try {
+    blobs.push(gitRaw(["diff", "--raw", "-z", "-M", "--cached", baselineSha], { cwd }));
+  } catch {
+    /* fall through */
+  }
+  try {
+    blobs.push(gitRaw(["diff", "--raw", "-z", "-M"], { cwd }));
+  } catch {
+    /* fall through */
+  }
+  for (const buf of blobs) {
+    for (const hit of parseRawDiffSpecialModes(buf)) {
+      if (hit.role === "gitlink") {
+        return (
+          `gitlink/submodule change (${hit.path}, mode 160000) — refuse ` +
+          `(gitlinks collapse nested trees into one path and hide unauthorized files)`
+        );
+      }
+      if (hit.role === "symlink") {
+        return (
+          `symlink change (${hit.path}, mode 120000) — refuse ` +
+          `(symlink targets are an ambiguous ship/contract boundary)`
+        );
+      }
+    }
+  }
+
+  // Index stage: any path currently recorded as gitlink/symlink that also
+  // differs from baseline (caught above) is enough; also refuse if the index
+  // holds a gitlink whose path appeared in name-status but raw parsing missed.
+  let ls = "";
+  try {
+    ls = gitRaw(["ls-files", "-s", "-z"], { cwd });
+  } catch {
+    ls = "";
+  }
+  const indexSpecial = new Map(); // path → mode
+  for (const rec of ls.split("\0").filter(Boolean)) {
+    // format: <mode> <sha> <stage>\t<path>
+    const tab = rec.indexOf("\t");
+    if (tab < 0) continue;
+    const meta = rec.slice(0, tab).trim().split(/\s+/);
+    const mode = meta[0] || "";
+    const p = normalizeRepoPath(rec.slice(tab + 1));
+    if (!p) continue;
+    if (mode === "160000" || mode === "120000") indexSpecial.set(p, mode);
+  }
+  if (indexSpecial.size > 0) {
+    // Only flag specials that are not present as the same mode at baseline
+    // (i.e. they are part of the change set). A pre-existing gitlink already at
+    // baseline with no mode/path change is not a post-baseline change — but
+    // name-status would not list it either. Double-check against baseline tree.
+    for (const [p, mode] of indexSpecial) {
+      let baseMode = "";
+      try {
+        const lt = gitRaw(["ls-tree", baselineSha, "--", p], { cwd }).trim();
+        // e.g. "160000 commit <sha>\tpath" or "100644 blob <sha>\tpath"
+        baseMode = (lt.split(/\s+/)[0] || "").trim();
+      } catch {
+        baseMode = "";
+      }
+      if (baseMode === mode) continue; // unchanged special already at baseline
+      if (mode === "160000") {
+        return (
+          `gitlink/submodule change (${p}, mode 160000) — refuse ` +
+          `(gitlinks collapse nested trees into one path and hide unauthorized files)`
+        );
+      }
+      if (mode === "120000") {
+        return (
+          `symlink change (${p}, mode 120000) — refuse ` +
+          `(symlink targets are an ambiguous ship/contract boundary)`
+        );
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Detect nested repository / worktree boundaries that hide files from normal
  * untracked listing. Fail closed.
  * @returns {string|null} error message or null if clean
  */
-export function detectNestedRepoBoundary(cwd, pathRecords) {
+export function detectNestedRepoBoundary(cwd, pathRecords, baselineSha) {
   for (const r of pathRecords || []) {
     const p = r.path || "";
     if (p === ".git" || p.startsWith(".git/") || /(^|\/)\.git(\/|$)/.test(p)) {
@@ -889,6 +1032,12 @@ export function detectNestedRepoBoundary(cwd, pathRecords) {
     if (r.kind === "gitlink" || r.kind === "submodule") {
       return `gitlink/submodule change (${p}) — refuse (ambiguous repo boundary)`;
     }
+  }
+
+  // Modes: name-status alone never tags gitlinks — inspect --raw / index.
+  if (baselineSha) {
+    const modeErr = detectGitlinkOrSymlinkModes(cwd, baselineSha);
+    if (modeErr) return modeErr;
   }
 
   // Untracked directory entries (git may hide contents of nested repos).
@@ -931,7 +1080,6 @@ export function detectNestedRepoBoundary(cwd, pathRecords) {
     for (let i = 1; i < parts.length; i++) {
       untrackedParents.add(parts.slice(0, i).join("/"));
     }
-    // Top-level file: still check nothing. Top-level dir file path "evil/x" → evil
   }
   for (const d of untrackedParents) {
     const gitMarker = path.join(cwd, ...d.split("/"), ".git");
@@ -945,16 +1093,6 @@ export function detectNestedRepoBoundary(cwd, pathRecords) {
     } catch {
       /* ignore */
     }
-  }
-
-  // gitlinks in the index/tree vs baseline via diff-tree filter
-  try {
-    const raw = gitRaw(["status", "--porcelain=v1", "-z"], { cwd });
-    // Look for submodule-ish entries (git status shows "M  path" with special modes elsewhere).
-    // Also catch "?? foo/" patterns already covered.
-    void raw;
-  } catch {
-    /* ignore */
   }
 
   return null;
@@ -1022,7 +1160,7 @@ export function collectChangedPaths(cwd, baselineSha) {
 
     const paths = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 
-    const nestedErr = detectNestedRepoBoundary(cwd, paths);
+    const nestedErr = detectNestedRepoBoundary(cwd, paths, baselineSha);
     if (nestedErr) return { ok: false, error: nestedErr };
 
     return { ok: true, paths };

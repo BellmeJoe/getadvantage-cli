@@ -2699,7 +2699,7 @@ scenario("packed package: cold install catches .next/static + dist secrets; publ
     });
     const tgz = path.join(packDir, readdirPack(packDir));
     assert.ok(existsSync(tgz), `expected tarball in ${packDir}`);
-    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    const listing = listTgz(tgz);
     assert.ok(
       listing.includes("package/checks.mjs") || listing.replace(/\\/g, "/").includes("package/checks.mjs"),
       "tarball must include checks.mjs",
@@ -3350,7 +3350,7 @@ scenario("packed package: tarball includes sarif.mjs; cold install writes parsea
     assert.ok(tgz && existsSync(tgz), `expected a tarball in ${packDir}`);
 
     // Inspect tarball listing for serializer + runtime files
-    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    const listing = listTgz(tgz);
     const must = [
       "package/sarif.mjs",
       "package/action.mjs",
@@ -3416,6 +3416,23 @@ function readdirPack(dir) {
   const names = readdirSync(dir).filter((n) => n.endsWith(".tgz"));
   assert.ok(names.length >= 1, `no .tgz in ${dir}`);
   return names[0];
+}
+
+/**
+ * List a packed .tgz without false failures when GNU tar is on PATH and the
+ * archive path is a Windows drive path (`C:\…`). GNU tar parses `C:` as an
+ * rsh host (`Cannot connect to C: resolve failed`); bsdtar does not.
+ *
+ * Prefer Windows System32 tar.exe (bsdtar) when present. Never pass
+ * `--force-local` unconditionally — System32 bsdtar rejects that flag.
+ */
+function listTgz(tgzAbs) {
+  let bin = "tar";
+  if (process.platform === "win32") {
+    const systemTar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+    if (existsSync(systemTar)) bin = systemTar;
+  }
+  return execFileSync(bin, ["-tzf", tgzAbs], { encoding: "utf8" });
 }
 
 // ---------------------------------------------------------------------------
@@ -5600,7 +5617,7 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
       shell: process.platform === "win32",
     });
     const tgz = path.join(packDir, readdirPack(packDir));
-    const listing = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" });
+    const listing = listTgz(tgz);
     const norm = listing.replace(/\\/g, "/");
     const must = [
       "package/action.yml",
@@ -6311,6 +6328,71 @@ scenario("intent: nested git repo hiding unauthorized file → NO-GO", () => {
   }
 });
 
+scenario("intent: committed gitlink under allow path → NO-GO (not false GO)", () => {
+  // P1: name-status reports gitlinks as ordinary A/M paths; without mode 160000
+  // inspection, a shallow allow like src/auth/* authorizes a collapsed nested
+  // tree that would NO-GO if expanded to regular files.
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Narrow allow — only files under src/auth/*, not a whole nested repo.
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "auth only",
+      allow: ["src/auth/*"],
+      deny: [],
+      require: [],
+      baselineCommit: g(["rev-parse", "HEAD"], repo),
+    });
+
+    // Nested payload lives OUTSIDE the product repo so the only parent-repo
+    // change is a mode-160000 gitlink under the allow path.
+    const nested = path.join(base, "payload-src");
+    initRepo(nested);
+    write(nested, "hidden/evil.js", "export const secret = 'hide-me';\n");
+    write(nested, "outside-scope-payload.js", "export const x = 1;\n");
+    g(["add", "-A"], nested);
+    g(["commit", "-q", "-m", "nested payload"], nested);
+    const nestedSha = g(["rev-parse", "HEAD"], nested);
+
+    // Control: same payload as regular nested files under allow → NO-GO.
+    const control = scaffold(path.join(base, "control"));
+    commitIntent(control, {
+      schemaVersion: 1,
+      goal: "auth only",
+      allow: ["src/auth/*"],
+      deny: [],
+      require: [],
+      baselineCommit: g(["rev-parse", "HEAD"], control),
+    });
+    write(control, "src/auth/payload/hidden.js", "export const secret = 'hide-me';\n");
+    write(control, "src/auth/payload/outside-scope-payload.js", "export const x = 1;\n");
+    const rControl = run(["intent", "check", "--json"], control);
+    assert.equal(rControl.code, 1, `expanded nested files under src/auth/* must NO-GO\n${rControl.stdout}`);
+    const dControl = parseJson(rControl);
+    assert.equal(dControl.verdict, "NO-GO");
+
+    // Attack: gitlink collapses that tree into one allow-matching path.
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `160000,${nestedSha},src/auth/payload`],
+      { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    g(["commit", "-q", "-m", "add gitlink payload under allow"], repo);
+    const modeLine = g(["ls-tree", "HEAD", "src/auth/payload"], repo);
+    assert.match(modeLine, /^160000\s/, `expected gitlink mode, got: ${modeLine}`);
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `gitlink under allow must NO-GO (false GO is P1)\n${r.stdout}\n${r.stderr}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const all = r.stdout + r.stderr + JSON.stringify(doc);
+    assert.match(all, /gitlink|submodule|160000|ambiguous|repo boundary|refuse/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
 scenario("intent: malformed schema, traversal, absolute paths, --base-ref fail closed", () => {
   const base = freshBase();
   try {
@@ -6475,7 +6557,7 @@ scenario("intent: init CLI + packed cold install can init+check real temp git re
     });
     const tgzName = readdirSync(packDir).find((f) => f.endsWith(".tgz"));
     assert.ok(tgzName, "tarball created");
-    const listing = execFileSync("tar", ["-tzf", path.join(packDir, tgzName)], { encoding: "utf8" });
+    const listing = listTgz(path.join(packDir, tgzName));
     assert.ok(listing.replace(/\\/g, "/").includes("package/intent.mjs"), `tarball must include intent.mjs:\n${listing.slice(0, 500)}`);
 
     const cold = path.join(base, "cold");
