@@ -59,13 +59,20 @@ export function git(args, opts = {}) {
 }
 
 /** Like git() but returns stdout UNtrimmed — required for porcelain parsing
- *  where a leading space in the XY status field is meaningful. */
+ *  where a leading space in the XY status field is meaningful.
+ *
+ *  Stderr is captured (not inherited) so a missing-path probe never streams a
+ *  `fatal: path '…' does not exist in '<commit>'` storm into the CLI UI.
+ *  Callers that need the failure reason still get it on the thrown error. */
 export function gitRaw(args, opts = {}) {
   return execFileSync("git", args, {
     encoding: "utf8",
     cwd: opts.cwd ?? process.cwd(),
     // git can emit a lot on a large diff; give it room.
     maxBuffer: 64 * 1024 * 1024,
+    // Capture stderr so missing-blob probes never print raw git fatals.
+    // (Default stdio inherits stderr — that is what caused the dogfood storm.)
+    stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
@@ -126,6 +133,7 @@ export function gitFilesZ(args, opts = {}) {
       encoding: "utf8",
       cwd: opts.cwd ?? process.cwd(),
       maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
     });
     return out.split("\0").filter(Boolean);
   } catch {

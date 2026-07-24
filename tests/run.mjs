@@ -121,6 +121,12 @@
 //                                     env without SDK ≠ supabase detected; no invented
 //                                     routes; monorepo root-only; human/JSON/MCP parity;
 //                                     secret-like values never appear in map/json
+//  48. Dogfood reliability — long-history repo without Intent Contract: no raw
+//                                     git fatal storm, bounded time, intent omitted;
+//                                     route-like strings inside tests/fixtures and
+//                                     embedded string fixtures never surface as live
+//                                     routes; exact-path disclosed policy (not tests/**)
+//                                     can authorize product-owned hostile fixtures
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -7386,6 +7392,201 @@ scenario("packed package: cold map on Vite+React+Supabase fixture has clientOrie
   } finally {
     cleanup(base);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 48. Dogfood reliability — missing Intent, route fixtures, narrow policy
+// ---------------------------------------------------------------------------
+
+scenario("dogfood: long-history repo without Intent Contract — no git fatal storm, bounded, intent omitted", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "long-no-intent");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "long-no-intent", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export const x = 1;\n");
+    commitAll(repo, "chore: initial");
+    // Simulate a long customer history with NO intent.json anywhere.
+    for (let i = 0; i < 80; i++) {
+      write(repo, "app.js", `export const x = ${i};\n`);
+      commitAll(repo, `chore: history ${i}`);
+    }
+    const t0 = Date.now();
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    const elapsed = Date.now() - t0;
+    const combined = `${r.stdout}\n${r.stderr}`;
+    assert.ok(elapsed < 60_000, `check must finish in bounded time, took ${elapsed}ms`);
+    assert.ok(!/fatal:\s*path/i.test(combined), `must not print raw missing-intent git fatals:\n${combined.slice(0, 800)}`);
+    assert.ok(!/does not exist in '/i.test(combined), `must not stream git path-missing noise:\n${combined.slice(0, 800)}`);
+    assert.equal(r.code, 0, `clean long-history repo should GO\n${combined.slice(0, 800)}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const ic = (doc.checks || []).find((c) => /Intent Contract/i.test(c.label));
+    assert.equal(ic, undefined, "no Intent Contract check when not configured");
+    assert.equal(doc.intent, undefined, "no top-level intent receipt when not configured");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("dogfood: route-like strings in tests/fixtures must not surface as live map routes", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "route-fixture-noise");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        { name: "route-fixture-noise", version: "1.0.0", private: true, dependencies: { express: "^4" } },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Real app route only here.
+    write(
+      repo,
+      "server.js",
+      [
+        "const app = require('express')();",
+        "app.get('/health', (req, res) => res.end('ok'));",
+        "",
+      ].join("\n"),
+    );
+    // Hostile: test + fixture trees with route-shaped source (must be ignored).
+    write(
+      repo,
+      "tests/run.mjs",
+      [
+        "export const snippet = [",
+        "  \"app.get('/items', (req, res) => res.json([]));\",",
+        "  \"app.post('/items', (req, res) => res.status(201).end());\",",
+        "].join('\\n');",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "fixtures/sample-server.js",
+      "const app = require('express')();\napp.get('/items', (req, res) => res.json([]));\napp.post('/items', () => {});\n",
+    );
+    // Hostile: product tooling that embeds fixture source as strings (evidence suite shape).
+    write(
+      repo,
+      "ops/evidence-suite.mjs",
+      [
+        "export function build() {",
+        "  return [",
+        "    \"app.get('/items', (req, res) => res.json([]));\",",
+        "    \"app.post('/items', (req, res) => res.status(201).end());\",",
+        "  ].join('\\n');",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: real /health + fixture /items noise");
+
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, `map failed:\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const blob = JSON.stringify(doc);
+    assert.ok(/\/health/.test(blob), `real /health route must appear:\n${blob.slice(0, 600)}`);
+    assert.ok(!/\/items/.test(blob), `fixture /items must NOT appear as live route:\n${blob.slice(0, 1200)}`);
+    assert.ok(!/\/items/.test(r.stderr || ""), `human stderr must not invent /items:\n${r.stderr}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("dogfood: exact-path disclosed policy authorizes product-owned fixture hostiles (not tests/**)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "narrow-policy");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "narrow-policy", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export const ok = 1;\n");
+    // Product-owned hostile fixture file (intentional secret shapes for gate tests).
+    const fixtureKey = "sk_live_" + "n1a2r3r4o5w6p7o8l9i0c1y2fx";
+    write(repo, "tests/run.mjs", `export const HOSTILE = "${fixtureKey}";\n`);
+    // Exact file path only — NEVER tests/** blanket.
+    write(
+      repo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: {
+            ignore: {
+              paths: ["tests/run.mjs"],
+            },
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: hostile fixture + exact-path disclosed policy");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `exact-path policy must allow deliberate dogfood GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const sec = (doc.checks || []).find((c) => /Secret scan/i.test(c.label));
+    assert.ok(sec && sec.status === "pass", "secret scan must pass with disclosed allowlist");
+    const extra = (sec.extra || []).join("\n");
+    assert.ok(/policy: path/i.test(extra), `must disclose path allowlist:\n${extra}`);
+    assert.ok(/tests\/run\.mjs/.test(extra), `must name exact fixture path:\n${extra}`);
+    assert.ok(!extra.includes(fixtureKey), "full fixture secret must never be echoed");
+
+    // Broader tests/** must not be required — prove a different tests/ file still NO-GOs.
+    write(repo, "tests/other-hostile.js", `export const OTHER = "${fixtureKey}";\n`);
+    // Keep policy exact to tests/run.mjs only (already committed).
+    commitAll(repo, "chore: second hostile outside exact path");
+    const r2 = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r2.code, 1, "secret outside exact path must still NO-GO");
+    const doc2 = parseJson(r2);
+    assert.equal(doc2.verdict, "NO-GO");
+    const sec2 = (doc2.checks || []).find((c) => /Secret scan/i.test(c.label));
+    assert.ok(sec2 && sec2.status === "fail");
+    assert.ok(/tests\/other-hostile\.js/.test(JSON.stringify(sec2)), "must cite the non-allowlisted file");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("dogfood: product map on getadvantage-cli does not invent /items from test fixture strings", () => {
+  const pkgRoot = path.join(__dirname, "..");
+  const r = run(["map", "--json"], pkgRoot);
+  assert.equal(r.code, 0, `product map failed:\n${r.stderr}\n${r.stdout}`);
+  const doc = parseJson(r);
+  const blob = JSON.stringify(doc);
+  assert.ok(!/"\/items"/.test(blob) && !/\/items\s+\[/.test(blob), `product map must not invent /items from fixtures:\n${blob.slice(0, 1500)}`);
+  // API lane should not warn about /items specifically.
+  const api = (doc.lanes || []).find((l) => /API surface/i.test(l.label));
+  if (api) {
+    const detail = `${api.detail || ""}\n${(api.extra || []).join("\n")}`;
+    assert.ok(!/\/items/.test(detail), `API surface must not list /items:\n${detail}`);
+  }
+});
+
+scenario("dogfood: product check completes without raw Intent git noise; hostiles stay reviewable NO-GO", () => {
+  const pkgRoot = path.join(__dirname, "..");
+  const t0 = Date.now();
+  const r = run(["check", "--json", "--no-overview", "--no-brief-check"], pkgRoot);
+  const elapsed = Date.now() - t0;
+  const combined = `${r.stdout}\n${r.stderr}`;
+  assert.ok(elapsed < 120_000, `product check must be bounded, took ${elapsed}ms`);
+  assert.ok(!/fatal:\s*path/i.test(combined), `no raw missing-intent fatals:\n${combined.slice(0, 600)}`);
+  assert.ok(!/does not exist in '/i.test(combined), `no git path-missing storm:\n${combined.slice(0, 600)}`);
+  // Intentional product-owned hostiles in tests/run.mjs remain NO-GO (not silenced).
+  assert.equal(r.code, 1, "product tree must still NO-GO on intentional test hostiles");
+  const doc = parseJson(r);
+  assert.equal(doc.verdict, "NO-GO");
+  const sec = (doc.checks || []).find((c) => /Secret scan/i.test(c.label));
+  assert.ok(sec && sec.status === "fail", "secret scan must still fail on tests/run.mjs hostiles");
+  assert.ok(/tests\/run\.mjs/i.test(JSON.stringify(sec)), "NO-GO must cite tests/run.mjs");
+  const ic = (doc.checks || []).find((c) => /Intent Contract/i.test(c.label));
+  assert.equal(ic, undefined, "product without trusted Intent freeze must omit intent check");
 });
 
 // ---------------------------------------------------------------------------

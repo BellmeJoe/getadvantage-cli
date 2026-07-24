@@ -231,15 +231,98 @@ export function apiRowTag(r) {
 // examples, virtualenvs). walkFiles already skips node_modules/.next/dist/build
 // /coverage/.turbo; this adds the test + example + python-env dirs a route scan
 // must also ignore so a fixture/test route never lands on the real map.
+// Deliberately NOT a broad app bypass: only conventional test/fixture/example
+// /venv path segments — never `src/`, `app/`, or whole-package suffixes.
 const ROUTE_SKIP_SEGMENTS = new Set([
   "node_modules", "dist", "build", ".next", ".vercel", ".data", "coverage", ".turbo", ".git",
-  "test", "tests", "__tests__", "__mocks__", "spec", "examples", "example", "fixtures",
+  "test", "tests", "__tests__", "__mocks__", "spec", "specs", "examples", "example",
+  "fixtures", "__fixtures__", "testdata", "test_data", "testing",
   "venv", ".venv", "env", ".env", "site-packages", "__pycache__",
 ]);
 
 /** True if any path segment of `rel` is a dir we must not parse routes from. */
 function underSkippedDir(rel) {
   return rel.split("/").some((seg) => ROUTE_SKIP_SEGMENTS.has(seg));
+}
+
+/**
+ * True when `index` sits inside a JS/TS string or template literal in `text`
+ * (comments should already be stripped). Stops fixture source embedded as
+ * `"app.get('/items', …)"` (tests, evidence suites, generators) from being
+ * reported as a live application route.
+ */
+function isInsideJsString(text, index) {
+  let i = 0;
+  const n = Math.min(index, text.length);
+  while (i < n) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const q = ch;
+      i++;
+      while (i < text.length) {
+        if (i >= index) return true; // still inside this string at match index
+        if (text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (q !== "`" && (text[i] === "\n" || text[i] === "\r")) break;
+        if (text[i] === q) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
+/**
+ * True when `index` sits inside a Python string (incl. triple-quoted) so a
+ * fixture body like 'app.get("/items")' inside a test module is not a route.
+ */
+function isInsidePyString(text, index) {
+  let i = 0;
+  const n = Math.min(index, text.length);
+  while (i < n) {
+    const ch = text[i];
+    if (ch === "'" || ch === '"') {
+      const triple = text.slice(i, i + 3);
+      if (triple === '"""' || triple === "'''") {
+        const q = triple;
+        i += 3;
+        while (i < text.length) {
+          if (i >= index) return true;
+          if (text.slice(i, i + 3) === q) {
+            i += 3;
+            break;
+          }
+          i++;
+        }
+        continue;
+      }
+      const q = ch;
+      i++;
+      while (i < text.length) {
+        if (i >= index) return true;
+        if (text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === "\n" || text[i] === "\r") break;
+        if (text[i] === q) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  return false;
 }
 
 /** A forward window of source starting at `from`, capped at `max` chars and cut
@@ -309,8 +392,10 @@ export function scanExpressRoutes(cwd) {
     let m;
 
     // (1) shorthand verb calls: <ident>.get("/path", …). Path must start "/".
+    //     Skip matches inside string literals (fixture source generators).
     const verbRe = /\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|options|head|all)\s*\(\s*(['"])(\/[^'"]*)\3/g;
     while ((m = verbRe.exec(text)) !== null) {
+      if (isInsideJsString(text, m.index)) continue;
       const method = m[2].toUpperCase();
       const url = m[4];
       const win = argWindow(text, m.index + m[0].length);
@@ -320,11 +405,15 @@ export function scanExpressRoutes(cwd) {
     // (2) router-like verb calls with a NON-literal path → dynamic tally only
     //     (variable / template-literal / concatenated paths we can't resolve).
     const dynRe = /\b(?:app|router|fastify|server|api|route|_?router|v\d+|[A-Za-z_$][\w$]*[Rr]outer)\.(?:get|post|put|patch|delete|options|head|all)\s*\(\s*(?!['"])/g;
-    while ((m = dynRe.exec(text)) !== null) dynamicCount++;
+    while ((m = dynRe.exec(text)) !== null) {
+      if (isInsideJsString(text, m.index)) continue;
+      dynamicCount++;
+    }
 
     // (3) Express verb chains: <ident>.route("/path").get(…).post(…)
     const chainRe = /\.route\s*\(\s*(['"])(\/[^'"]*)\1\s*\)/g;
     while ((m = chainRe.exec(text)) !== null) {
+      if (isInsideJsString(text, m.index)) continue;
       const url = m[2];
       const win = argWindow(text, m.index + m[0].length, 400);
       const methods = [];
@@ -340,6 +429,7 @@ export function scanExpressRoutes(cwd) {
     // (4) Fastify object form: fastify.route({ method: "POST", url: "/path" })
     const objRe = /\.route\s*\(\s*\{/g;
     while ((m = objRe.exec(text)) !== null) {
+      if (isInsideJsString(text, m.index)) continue;
       const win = text.slice(m.index, m.index + 400);
       const urlM = win.match(/\burl\s*:\s*(['"])(\/[^'"]*)\1/);
       if (!urlM) continue;
@@ -454,6 +544,7 @@ export function scanPythonRoutes(cwd) {
     // (1) Flask: @app.route("/path", methods=[...]) / @bp.route("/path")
     const routeRe = /@\s*[A-Za-z_]\w*\.route\s*\(\s*(['"])([^'"]+)\1([^)]*)\)/g;
     while ((m = routeRe.exec(text)) !== null) {
+      if (isInsidePyString(text, m.index)) continue;
       const url = m[2];
       const methods = [];
       const mm = (m[3] || "").match(/methods\s*=\s*\[([^\]]*)\]/);
@@ -464,12 +555,16 @@ export function scanPythonRoutes(cwd) {
     // (2) FastAPI / APIRouter: @app.get("/path") / @router.post("/path")
     const verbRe = /@\s*[A-Za-z_]\w*\.(get|post|put|patch|delete|options|head)\s*\(\s*(['"])([^'"]+)\2/g;
     while ((m = verbRe.exec(text)) !== null) {
+      if (isInsidePyString(text, m.index)) continue;
       pushRow(m[3], [m[1].toUpperCase()], pyGated(text, m.index));
     }
 
     // (3) non-literal decorator paths → dynamic tally.
     const dynRe = /@\s*[A-Za-z_]\w*\.(?:route|get|post|put|patch|delete|options|head)\s*\(\s*(?!['"])/g;
-    while ((m = dynRe.exec(text)) !== null) dynamicCount++;
+    while ((m = dynRe.exec(text)) !== null) {
+      if (isInsidePyString(text, m.index)) continue;
+      dynamicCount++;
+    }
   }
 
   const rows = [...seen.values()].sort(

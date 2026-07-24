@@ -10,11 +10,13 @@
 //     baseline. Authorization is the freeze-commit blob — never the worktree,
 //     never a runtime --base-ref, never a later broadened HEAD blob.
 //   • Unsigned local mode allows ONE Intent Contract lineage per reachable
-//     history: freeze discovery walks all commits reachable from HEAD and uses
-//     the earliest introduction of INTENT_REL. The current HEAD contract is a
-//     presence/tamper signal only — never a trust pointer for which history
-//     slice to search. Deletion, re-addition, or any later mutation of the
-//     intent path after that original freeze is always NO-GO.
+//     history: freeze discovery walks only commits that touch INTENT_REL
+//     (path-filtered, bounded) and uses the earliest introduction as the only
+//     freeze. Absence is a normal not-configured state (no full-history walk,
+//     no raw git fatal storms). The current HEAD contract is a presence/tamper
+//     signal only — never a trust pointer for which history slice to search.
+//     Deletion, re-addition, or any later mutation of the intent path after
+//     that original freeze is always NO-GO.
 //   • `intent init` refuses if INTENT_REL ever existed in HEAD ancestry (no
 //     fake --force trust reset).
 //   • `intent check` diffs EVERY change after baselineCommit: committed,
@@ -421,22 +423,29 @@ function pathsChangedInCommit(cwd, commitSha, parentSha) {
  * refuse a second freeze on the same clean lineage.
  */
 export function intentPathEverInAncestry(cwd, tipRef = "HEAD") {
-  try {
-    const out = gitRaw(["rev-list", "-n", "1", tipRef, "--", INTENT_REL], { cwd }).trim();
-    return !!out;
-  } catch {
-    return false;
-  }
+  // gitSafe: missing path is a normal empty result, never a raw fatal storm.
+  const out = gitSafe(["rev-list", "-n", "1", tipRef, "--", INTENT_REL], { cwd });
+  return !!out;
 }
+
+/** Hard cap on intent-path-touching commits walked for freeze discovery.
+ *  Prevents hang on pathological histories while remaining far above any
+ *  legitimate single-lineage Intent Contract usage. */
+const MAX_INTENT_HISTORY_TOUCHES = 5000;
 
 /**
  * History-first discovery of the original Intent Contract freeze.
  *
- * Walks every commit reachable from headSha (oldest → newest). The first
- * introduction of INTENT_REL is the only possible freeze. Its blob supplies
- * the authorizing contract + baselineCommit. Any later touch (delete, modify,
- * re-add) sets laterContractChange. Does NOT take baseline from the HEAD
- * contract — the current contract never chooses which history slice is searched.
+ * Walks only commits that touch INTENT_REL (oldest → newest via
+ * `rev-list --reverse HEAD -- INTENT_REL`), never the full unbounded history.
+ * Absence of that path is a normal not-configured state (present: false) —
+ * never a raw-git-fatal storm or multi-minute hang on long customer repos.
+ *
+ * The first introduction of INTENT_REL is the only possible freeze. Its blob
+ * supplies the authorizing contract + baselineCommit. Any later touch (delete,
+ * modify, re-add) sets laterContractChange. Does NOT take baseline from the
+ * HEAD contract — the current contract never chooses which history slice is
+ * searched.
  *
  * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean, baselineSha: string }
  *          | { ok: false, error: string, present?: boolean }}
@@ -446,14 +455,26 @@ export function discoverOriginalFreeze(cwd, headSha) {
     return { ok: false, error: "HEAD must be a full 40-hex SHA" };
   }
 
+  // Path-filtered history only. A missing INTENT_REL yields an empty list in
+  // one cheap git call — no per-commit `git show` and no fatal: storms.
   let revList = "";
   try {
-    revList = gitRaw(["rev-list", "--reverse", headSha], { cwd }).trim();
+    revList = gitRaw(
+      [
+        "rev-list",
+        "--reverse",
+        `--max-count=${MAX_INTENT_HISTORY_TOUCHES + 1}`,
+        headSha,
+        "--",
+        INTENT_REL,
+      ],
+      { cwd },
+    ).trim();
   } catch (e) {
     return {
       ok: false,
       present: true,
-      error: `cannot walk reachable history from HEAD: ${e.message || e}`,
+      error: `cannot walk intent-path history from HEAD: ${e.message || e}`,
     };
   }
   const revs = revList
@@ -461,7 +482,20 @@ export function discoverOriginalFreeze(cwd, headSha) {
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   if (revs.length === 0) {
-    return { ok: false, present: false, error: "no commits reachable from HEAD" };
+    return {
+      ok: false,
+      present: false,
+      error: `no freeze commit introducing ${INTENT_REL} in reachable HEAD ancestry`,
+    };
+  }
+  if (revs.length > MAX_INTENT_HISTORY_TOUCHES) {
+    return {
+      ok: false,
+      present: true,
+      error:
+        `${INTENT_REL} touches more than ${MAX_INTENT_HISTORY_TOUCHES} commits in reachable history — ` +
+        `refuse (bound; not a normal Intent Contract lineage)`,
+    };
   }
 
   let freezeSha = null;
@@ -472,6 +506,7 @@ export function discoverOriginalFreeze(cwd, headSha) {
   let laterContractChange = false;
   let sawUnsafeMode = null;
 
+  // Every entry in `revs` already touched INTENT_REL (path-filtered rev-list).
   for (const sha of revs) {
     const parentLine = gitSafe(["rev-list", "--parents", "-n", "1", sha], { cwd });
     if (!parentLine) {
@@ -495,22 +530,8 @@ export function discoverOriginalFreeze(cwd, headSha) {
       continue;
     }
 
-    // Did INTENT_REL change in this commit relative to parents?
-    let intentTouched = false;
-    if (parents.length === 0) {
-      intentTouched = presentHere;
-    } else if (parents.length > 1) {
-      const hereBlob = presentHere ? readGitCommitBlob(cwd, sha, INTENT_REL) : null;
-      for (const p of parents) {
-        const parentBlob = readGitCommitBlob(cwd, p, INTENT_REL);
-        if (parentBlob !== hereBlob) {
-          intentTouched = true;
-          break;
-        }
-      }
-      if (!intentTouched) continue;
-
-      // Merge touching intent: never a valid freeze; after freeze → later change.
+    // Merge that touches intent: never a valid freeze; after freeze → later change.
+    if (parents.length > 1) {
       if (!freezeSha) {
         return {
           ok: false,
@@ -522,17 +543,10 @@ export function discoverOriginalFreeze(cwd, headSha) {
       }
       laterContractChange = true;
       continue;
-    } else {
-      const parent = parents[0];
-      const parentBlob = readGitCommitBlob(cwd, parent, INTENT_REL);
-      const hereBlob = presentHere ? readGitCommitBlob(cwd, sha, INTENT_REL) : null;
-      intentTouched = parentBlob !== hereBlob;
     }
 
-    if (!intentTouched) continue;
-
     if (!presentHere) {
-      // Deletion of contract
+      // Deletion of contract (path still "touched" by this commit).
       if (freezeSha) {
         laterContractChange = true;
         continue;
@@ -544,7 +558,7 @@ export function discoverOriginalFreeze(cwd, headSha) {
       };
     }
 
-    // Present and touched.
+    // Present and path-touched.
     if (!freezeSha) {
       // Original introduction — must be dedicated single-parent freeze.
       if (parents.length !== 1) {
@@ -664,8 +678,9 @@ export function discoverOriginalFreeze(cwd, headSha) {
 /**
  * Locate the dedicated linear freeze for INTENT_REL.
  *
- * History-first: walks all commits reachable from headSha and uses the earliest
- * introduction as the only freeze. When baselineSha is provided (legacy callers),
+ * History-first: path-filtered + bounded walk via discoverOriginalFreeze (only
+ * commits that touch INTENT_REL; never full unbounded history). Earliest
+ * introduction is the only freeze. When baselineSha is provided (legacy callers),
  * the discovered freeze's declared baseline must match it.
  *
  * @returns {{ ok: true, freezeSha: string, blob: string, contract: object, hash: string, laterContractChange: boolean }
@@ -751,12 +766,20 @@ export function loadTrustedIntent(cwd, _opts = {}) {
   }
   const headSha = headRes.sha;
 
+  // Fast not-configured path: no worktree contract and never introduced in
+  // reachable history. This is the common customer state — omit Intent (never
+  // a false "verified"), never walk full history, never stream git fatals.
+  if (!worktreeExists && !intentPathEverInAncestry(cwd, headSha)) {
+    return empty;
+  }
+
   const headMode = intentBlobIsSafeOnRef(cwd, headSha);
   const headHasIntent = headMode.ok;
   const headAbsentClean = !headHasIntent && /is not present/.test(headMode.error || "");
   const headUnsafe = !headHasIntent && !headAbsentClean;
 
   // History-first: original freeze discovery never uses HEAD's baselineCommit.
+  // Path-filtered + bounded (see discoverOriginalFreeze).
   const disc = discoverOriginalFreeze(cwd, headSha);
 
   if (!disc.ok && disc.present === false) {
