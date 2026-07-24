@@ -147,7 +147,7 @@ const CAPABILITIES = [
   {
     id: "client-app-map",
     title: "Client apps read honestly",
-    why: "the default ICP is Vite/React — no backend jargon, honest empty-SPA line",
+    why: "the default ICP is Vite/React — no backend jargon, honest empty-SPA line + client orientation",
     judge(d) {
       initRepo(d);
       write(d, "package.json", '{"name":"spa","version":"1.0.0","dependencies":{"react":"^19"},"devDependencies":{"vite":"^5"}}\n');
@@ -155,8 +155,19 @@ const CAPABILITIES = [
       commit(d);
       const r = run(["map"], d);
       const jargon = /Express\/Fastify|Flask\/FastAPI/.test(r.out);
-      const friendly = /client-side|nothing server-side/i.test(r.out);
-      return { ok: !jargon && friendly, detail: !jargon && friendly ? "de-jargoned, honest" : jargon ? "backend jargon on a React screen" : "no client-app line" };
+      const friendly = /client-side|nothing server-side|route mapping does not apply/i.test(r.out);
+      const orient = /Vite \+ React|client orientation|vite: detected/i.test(r.out);
+      const ok = !jargon && friendly && orient;
+      return {
+        ok,
+        detail: ok
+          ? "de-jargoned, honest SPA + client orientation"
+          : jargon
+            ? "backend jargon on a React screen"
+            : !friendly
+              ? "no client-app empty line"
+              : "missing Vite+React client orientation",
+      };
     },
   },
   {

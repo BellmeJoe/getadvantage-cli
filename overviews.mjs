@@ -26,7 +26,7 @@
 import path from "node:path";
 import { existsSync, readdirSync } from "node:fs";
 import { result, walkFiles, readText, relPath, readJsonFile, pl, c, printResult, section, binName } from "./util.mjs";
-import { detectProject, detectRepoStack, pythonDeclaredDeps } from "./detect.mjs";
+import { detectProject, detectRepoStack, detectClientOrientation, pythonDeclaredDeps } from "./detect.mjs";
 
 // ===========================================================================
 // shared helpers
@@ -653,7 +653,12 @@ function emptyRouteDetail(kind, stack, dynamicCount) {
   }
   if (kind === "node") {
     if (stack && stack.frontend) {
-      return `No server routes${dyn} — this looks like a client-side app, so there's nothing server-side to map. That's expected, not a problem.`;
+      // Explicit: route mapping does not apply to client SPAs (Vite/React ICP).
+      return (
+        `No server API routes in this client app; route mapping does not apply` +
+        `${dyn} — this looks like a client-side app, so there's nothing server-side to map. ` +
+        `That's expected, not a problem.`
+      );
     }
     return `No server routes found${dyn} — this lane reads your server's route definitions; none matched in ${stack ? stack.label : "this project"}.`;
   }
@@ -966,8 +971,44 @@ function languageTally(files) {
 }
 
 /**
+ * Format one client-orientation signal for human map output.
+ * Evidence paths/labels only — never secret values.
+ */
+function formatClientSignal(name, signal) {
+  const ev = Array.isArray(signal.evidence) && signal.evidence.length
+    ? ` (${signal.evidence.join("; ")})`
+    : "";
+  return `${name}: ${signal.status}${ev}`;
+}
+
+/**
+ * Human lines for the client orientation subsection (estate lane).
+ * Shared by CLI map, map --json (via structured field), and MCP map (text).
+ */
+export function clientOrientationLines(co) {
+  if (!co) return [];
+  const lines = [];
+  lines.push(`Client app: ${co.clientApp.label} [${co.clientApp.kind}]`);
+  if (co.signals) {
+    lines.push(formatClientSignal("vite", co.signals.vite));
+    lines.push(formatClientSignal("react", co.signals.react));
+    lines.push(formatClientSignal("supabase", co.signals.supabase));
+  }
+  if (co.build) {
+    const cfg = co.build.config || "(none at repo root)";
+    const entry = co.build.entry || "(none detected at repo root)";
+    lines.push(`build config: ${cfg} · entry: ${entry}`);
+  }
+  if (co.nextCheck) lines.push(`Next check: ${co.nextCheck}`);
+  if (Array.isArray(co.notes)) {
+    for (const n of co.notes) lines.push(`Note: ${n}`);
+  }
+  return lines;
+}
+
+/**
  * Scan the top-level estate → pure data (modules, languages, dependency
- * highlights). Read-only, best-effort.
+ * highlights, client orientation). Read-only, best-effort.
  */
 export function scanEstate(cwd) {
   let entries = [];
@@ -1010,21 +1051,61 @@ export function scanEstate(cwd) {
   }
   const pyDeps = [...pythonDeclaredDeps(cwd).keys()];
 
-  return { modules, looseFiles, languages: languageTally(allFiles), depNames, pyDeps, project };
+  // First-class client orientation (Vite / React / Supabase) — structured data
+  // for JSON consumers; same engine as the human estate subsection.
+  let clientOrientation = null;
+  try {
+    clientOrientation = detectClientOrientation(cwd, project);
+  } catch {
+    clientOrientation = null;
+  }
+
+  return {
+    modules,
+    looseFiles,
+    languages: languageTally(allFiles),
+    depNames,
+    pyDeps,
+    project,
+    clientOrientation,
+  };
 }
 
 /** The estate lane, rendered in the runner's result shape. Never warns — it's
  *  pure orientation. */
 export function overviewEstate(cwd) {
-  const { modules, looseFiles, languages, depNames, pyDeps, project } = scanEstate(cwd);
+  const { modules, looseFiles, languages, depNames, pyDeps, project, clientOrientation } = scanEstate(cwd);
 
   const totalFiles = modules.reduce((n, m) => n + m.files, 0) + looseFiles;
   const topLangs = languages.slice(0, 3).map(([lang, n]) => `${lang} (${n})`);
+  const clientBit =
+    clientOrientation && clientOrientation.clientApp && clientOrientation.clientApp.kind !== "none"
+      ? ` · client: ${clientOrientation.clientApp.label}`
+      : "";
   const detail =
     `${modules.length} top-level module${pl(modules.length)} · ${totalFiles} file${pl(totalFiles)}` +
-    (topLangs.length ? ` · languages: ${topLangs.join(", ")}` : "");
+    (topLangs.length ? ` · languages: ${topLangs.join(", ")}` : "") +
+    clientBit;
 
   const lines = [];
+
+  // Client orientation subsection first when any SPA signal is present or
+  // package.json is broken (not checkable) — always useful for the ICP.
+  if (clientOrientation) {
+    const show =
+      clientOrientation.clientApp.kind !== "none" ||
+      project.packageJsonBroken ||
+      (clientOrientation.signals &&
+        (clientOrientation.signals.vite.status === "detected" ||
+          clientOrientation.signals.react.status === "detected" ||
+          clientOrientation.signals.supabase.status === "detected"));
+    if (show) {
+      lines.push("— client orientation —");
+      lines.push(...clientOrientationLines(clientOrientation));
+      lines.push("— modules —");
+    }
+  }
+
   const CAP = 15;
   for (const m of modules.slice(0, CAP)) {
     lines.push(`${m.dir}/ — ${m.files} file${pl(m.files)}${m.langs.length ? ` (${m.langs.join(", ")})` : ""}`);
@@ -1050,7 +1131,10 @@ export function overviewEstate(cwd) {
     lines.push("No declared dependencies found (package.json / requirements.txt / pyproject.toml).");
   }
 
-  return result("pass", "Project estate", detail, lines);
+  const r = result("pass", "Project estate", detail, lines);
+  // Attach structured data for renderMap / JSON (not printed by printResult).
+  r.clientOrientation = clientOrientation;
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,7 +1154,7 @@ export function renderMap(cwd) {
     if (stack.nextJs) {
       console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your Next.js App Router pages + API routes (app/ + src/app/).`);
     } else if (stack.kind === "node" && stack.frontend) {
-      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — a client-side app; the map looks for any server routes + the services it calls (there may be none to show, and that's fine).`);
+      console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — a client-side app; the map looks for any server routes + the services it calls (there may be none to show, and that's fine). Route mapping does not apply to pure client apps.`);
     } else if (stack.kind === "node") {
       console.log(`  ${c.gray("Detected:")} ${c.bold(stack.label)} — the map reads your server's route definitions (best-effort).`);
     } else if (stack.kind === "python") {
@@ -1082,6 +1166,7 @@ export function renderMap(cwd) {
   }
 
   const lanes = [];
+  let clientOrientation = null;
   for (const [fn, label] of [
     [overviewEstate, "Project estate"],
     [overviewApiSurface, "API surface map"],
@@ -1091,6 +1176,9 @@ export function renderMap(cwd) {
     try {
       const r = fn(cwd, stack);
       lanes.push(r);
+      if (label === "Project estate" && r.clientOrientation) {
+        clientOrientation = r.clientOrientation;
+      }
       printResult(r);
     } catch (e) {
       const r = { status: "warn", label, detail: `Scanner errored: ${e.message || e}`, extra: [] };
@@ -1098,8 +1186,16 @@ export function renderMap(cwd) {
       printResult(r);
     }
   }
+  // Fallback if estate lane skipped orientation attach (should be rare).
+  if (!clientOrientation) {
+    try {
+      clientOrientation = detectClientOrientation(cwd, stack && stack.project);
+    } catch {
+      clientOrientation = null;
+    }
+  }
   console.log(
     `\n${c.dim("A map is orientation, not a verdict — run")} ${c.cyan(`${binName()} ship`)} ${c.dim("for the gate.")}`,
   );
-  return { stack, lanes };
+  return { stack, lanes, clientOrientation };
 }

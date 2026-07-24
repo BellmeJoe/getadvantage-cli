@@ -165,10 +165,207 @@ export function pythonDeclaredDeps(cwd) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Client-app orientation (Vite / React / Supabase) — evidence-only.
+// ---------------------------------------------------------------------------
+// For Lovable/Bolt-style SPA exports the map must open with useful client
+// orientation, not Express jargon or invented server routes. Detection is
+// root-manifest only (nested package.json packages are not claimed as the map
+// root). Statuses: detected | not detected | not checkable.
+// Never invents Supabase RLS/auth/security verdicts from SDK or VITE_SUPABASE_*.
+
+const VITE_CONFIG_CANDIDATES = [
+  "vite.config.ts",
+  "vite.config.mts",
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.cjs",
+  "vite.config.cts",
+];
+
+const ENTRY_CANDIDATES = [
+  "index.html",
+  "src/main.tsx",
+  "src/main.ts",
+  "src/main.jsx",
+  "src/main.js",
+  "src/index.tsx",
+  "src/index.ts",
+  "src/index.jsx",
+  "src/index.js",
+  "main.tsx",
+  "main.jsx",
+  "main.ts",
+  "main.js",
+];
+
+/**
+ * Evidence-only Vite / React / Supabase client orientation for the estate map.
+ * Root package.json + root config/entry files only — nested monorepo packages
+ * are listed in the estate inventory but are not claimed as the map root.
+ *
+ * @param {string} cwd  repo root
+ * @param {object} [project]  optional detectProject result (avoids re-parse)
+ * @returns {{
+ *   clientApp: { kind: string, label: string },
+ *   signals: {
+ *     vite: { status: string, evidence: string[] },
+ *     react: { status: string, evidence: string[] },
+ *     supabase: { status: string, evidence: string[] },
+ *   },
+ *   build: { config: string|null, entry: string|null },
+ *   nextCheck: string,
+ *   notes: string[],
+ * }}
+ */
+export function detectClientOrientation(cwd, project = null) {
+  const proj = project || detectProject(cwd);
+  const hasFile = (rel) => existsSync(path.join(cwd, rel));
+
+  // not checkable: package.json exists but is unparseable — we cannot trust deps.
+  if (proj.packageJsonBroken) {
+    return {
+      clientApp: { kind: "not-checkable", label: "client stack not checkable (package.json unreadable)" },
+      signals: {
+        vite: { status: "not checkable", evidence: ["package.json (exists but could not be parsed)"] },
+        react: { status: "not checkable", evidence: ["package.json (exists but could not be parsed)"] },
+        supabase: { status: "not checkable", evidence: ["package.json (exists but could not be parsed)"] },
+      },
+      build: { config: null, entry: null },
+      nextCheck: "Fix package.json so it parses as JSON, then re-run getadvantage map.",
+      notes: [
+        "Client orientation requires a readable root package.json; nested packages are not treated as the map root.",
+        "No server routes, Supabase RLS, auth posture, or deployment claims are inferred from this scan.",
+      ],
+    };
+  }
+
+  const deps = proj.deps;
+  const hasPkg = proj.hasPackageJson;
+
+  // ---- Vite signal (root only) ----
+  const viteEvidence = [];
+  if (hasPkg && deps.has("vite")) viteEvidence.push("package.json (dependency: vite)");
+  let viteConfig = null;
+  for (const rel of VITE_CONFIG_CANDIDATES) {
+    if (hasFile(rel)) {
+      viteConfig = rel;
+      viteEvidence.push(rel);
+      break;
+    }
+  }
+  // index.html is a weak Vite/SPA hint only when Vite is already indicated by
+  // dep or config — alone it is not enough to claim Vite (static HTML exists
+  // everywhere). Still useful as entry evidence below.
+  let viteStatus;
+  if (!hasPkg && !viteConfig) {
+    viteStatus = hasFile("package.json") ? "not checkable" : "not detected";
+  } else if (viteEvidence.length > 0) {
+    viteStatus = "detected";
+  } else {
+    viteStatus = "not detected";
+  }
+
+  // ---- React signal (root only) ----
+  const reactEvidence = [];
+  if (hasPkg && deps.has("react")) reactEvidence.push("package.json (dependency: react)");
+  if (hasPkg && deps.has("react-dom")) reactEvidence.push("package.json (dependency: react-dom)");
+  // Dedup while preserving order
+  const reactEvUnique = [...new Set(reactEvidence)];
+  let reactStatus;
+  if (!hasPkg) {
+    reactStatus = hasFile("package.json") ? "not checkable" : "not detected";
+  } else if (reactEvUnique.length > 0) {
+    reactStatus = "detected";
+  } else {
+    reactStatus = "not detected";
+  }
+
+  // ---- Supabase signal (SDK only — env names alone never count as detected) ----
+  // VITE_SUPABASE_* / SUPABASE_* in .env prove nothing about SDK use, RLS, or
+  // auth. We deliberately do not read .env values into the map.
+  const supabaseEvidence = [];
+  if (hasPkg && deps.has("@supabase/supabase-js")) {
+    supabaseEvidence.push("package.json (dependency: @supabase/supabase-js)");
+  }
+  let supabaseStatus;
+  if (!hasPkg) {
+    supabaseStatus = hasFile("package.json") ? "not checkable" : "not detected";
+  } else if (supabaseEvidence.length > 0) {
+    supabaseStatus = "detected";
+  } else {
+    supabaseStatus = "not detected";
+  }
+
+  // ---- Build entry evidence (paths only; never file contents / secrets) ----
+  let entry = null;
+  for (const rel of ENTRY_CANDIDATES) {
+    if (hasFile(rel)) {
+      entry = rel;
+      break;
+    }
+  }
+
+  const viteOk = viteStatus === "detected";
+  const reactOk = reactStatus === "detected";
+  const supabaseOk = supabaseStatus === "detected";
+
+  let kind = "none";
+  let label = "no client SPA stack detected at repo root";
+  if (viteOk && reactOk) {
+    kind = "vite-react";
+    label = "Vite + React project";
+  } else if (viteOk) {
+    kind = "vite";
+    label = "Vite project";
+  } else if (reactOk) {
+    kind = "react";
+    label = "React project";
+  }
+
+  // Honest next check: one concrete step that helps the builder; never a
+  // security seal, RLS verdict, or invented route claim.
+  let nextCheck;
+  if (kind === "none" && !hasPkg) {
+    nextCheck = "Add a root package.json (or run map from the app package root), then re-run getadvantage map.";
+  } else if (viteOk) {
+    nextCheck = "Run getadvantage ship (or check --build) to verify the production build script succeeds.";
+  } else if (reactOk) {
+    nextCheck = "Confirm the root package.json build script, then run getadvantage ship (or check --build).";
+  } else {
+    nextCheck = "Run getadvantage ship for the GO / NO-GO gate (map is orientation only).";
+  }
+
+  const notes = [
+    "Client orientation is evidence-only from the repo root (package.json deps + config/entry paths).",
+    "Nested package.json packages are not claimed as the map root.",
+    "Route mapping does not invent server/API routes for client apps.",
+    "Supabase SDK presence is not an RLS, auth, or security verdict; VITE_SUPABASE_* / secret prefixes are never exemptions.",
+  ];
+  if (supabaseOk) {
+    notes.push("Supabase: SDK declared only — no policy/migration/auth posture is inferred by this map.");
+  }
+
+  return {
+    clientApp: { kind, label },
+    signals: {
+      vite: { status: viteStatus, evidence: viteEvidence },
+      react: { status: reactStatus, evidence: reactEvUnique },
+      supabase: { status: supabaseStatus, evidence: supabaseEvidence },
+    },
+    build: {
+      config: viteConfig,
+      entry,
+    },
+    nextCheck,
+    notes,
+  };
+}
+
 /**
  * Detect the repo's overall stack for the map's honest scope line.
  * @returns {{ kind: "next"|"node"|"python"|"go"|"rust"|"ruby"|"generic",
- *             label: string, nextJs: boolean, project: object }}
+ *             label: string, nextJs: boolean, frontend?: boolean, project: object }}
  */
 export function detectRepoStack(cwd) {
   const project = detectProject(cwd);
@@ -181,16 +378,35 @@ export function detectRepoStack(cwd) {
     }
     let label = "Node project";
     let frontend = false; // a client-side app (no server framework) → nothing server-side to map
+    const hasServerFw = deps.has("express") || deps.has("fastify") || deps.has("koa");
     if (deps.has("express")) label = "Express project";
     else if (deps.has("fastify")) label = "Fastify project";
     else if (deps.has("koa")) label = "Koa project";
-    else if (deps.has("react")) { label = "React project"; frontend = true; }
-    else if (deps.has("vue")) { label = "Vue project"; frontend = true; }
-    else if (deps.has("svelte")) { label = "Svelte project"; frontend = true; }
-    else if (deps.has("vite")) { label = "Vite project"; frontend = true; }
-    else if (project.packageJsonBroken) label = "Node project (package.json exists but could not be parsed)";
+    else if (deps.has("vite") && deps.has("react")) {
+      // Dominant ICP (Lovable/Bolt-style): name both tools when both are present.
+      label = "Vite + React project";
+      frontend = true;
+    } else if (deps.has("react")) {
+      label = "React project";
+      frontend = true;
+    } else if (deps.has("vue")) {
+      label = "Vue project";
+      frontend = true;
+    } else if (deps.has("svelte")) {
+      label = "Svelte project";
+      frontend = true;
+    } else if (deps.has("vite")) {
+      label = "Vite project";
+      frontend = true;
+    } else if (project.packageJsonBroken) {
+      label = "Node project (package.json exists but could not be parsed)";
+    }
     // A frontend build tool alongside a UI lib still means client-only if no server framework is present.
-    if (!frontend && deps.has("vite") && !deps.has("express") && !deps.has("fastify") && !deps.has("koa")) {
+    if (!frontend && deps.has("vite") && !hasServerFw) {
+      frontend = true;
+    }
+    // React (or other SPA lib) + Vite without a server framework → client-only.
+    if (!frontend && !hasServerFw && (deps.has("react") || deps.has("vue") || deps.has("svelte"))) {
       frontend = true;
     }
     return { kind: "node", label, nextJs: false, frontend, project };

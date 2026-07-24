@@ -69,6 +69,9 @@ lane ships or is killed. Only one implementation lane may be open.
    not proven.*
 5. **Vite + React + Supabase understanding** — useful map and check output on the
    dominant AI-app export path rather than a blank or backend-centric result.
+   **Status (candidate):** map emits evidence-only `clientOrientation`
+   (vite/react/supabase statuses + paths, build entry, nextCheck, honesty notes);
+   SPA empty lane says route mapping does not apply; not LIVE until audit/release.
 6. **Supabase RLS and ungated mutation checks** — static checks over migrations,
    policies, and edge functions; distinguish proven failure, warning, and
    uncheckable state.

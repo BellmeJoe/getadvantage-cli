@@ -38,7 +38,7 @@ independently reproduced 1:1 against the live npm package.
 | **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
 | **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; `intent init` / `intent check`; main `check` integration | **Released** (npm + tag v0.10.0 + floating v1, 2026-07-23; cold published verified) |
-| 0.9.x | ICP stack-fit: Vite+React+Supabase map (deferred by founder priority behind Intent Contract) | **Deferred backlog** |
+| 0.9.x | ICP stack-fit: Vite+React+Supabase **client orientation map** (evidence-only; candidate on 0.10.0) | **Candidate** (uncommitted / pre-audit — not LIVE) |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
@@ -237,15 +237,23 @@ existing repo. Also closes the `gate-placeholder-false-positive` major.
 The differentiator: the first gate that understands the failure modes of
 AI-*built* apps — and finally runs on what the ICP actually ships.
 
-- [ ] **Vite+React(+Supabase) stack support for the estate/route map** — add #2.
-  The ICP mostly ships Vite+React+Supabase (Lovable/Bolt), not Next.js; today
-  the map returns nothing for a Lovable export → dead funnel. SvelteKit/Nuxt/
-  Astro after; Django/Rails/Go deliberately not (no ICP evidence). **L**
+- [x] **Vite+React(+Supabase) client orientation on the estate/route map** — add #2
+  (bounded). Evidence-only detection at repo root: signals
+  `vite` / `react` / `supabase` each `{ status: detected|not detected|not checkable,
+  evidence[] }`, plus `clientApp`, `build.{config,entry}`, `nextCheck`, honesty
+  `notes`. Stack label **Vite + React project** when both deps present. Client
+  SPAs get **route mapping does not apply** (no invented Express routes). Supabase
+  SDK presence is **not** an RLS/auth/security verdict; `VITE_SUPABASE_*` env
+  alone does not count as detected; secret values never appear in map/json.
+  Nested monorepo packages are not claimed as the map root. Shared engine:
+  `detectClientOrientation` → `scanEstate` / `renderMap` (CLI map, `map --json`,
+  MCP map). **Candidate** on package **0.10.0** until independent audit + LIVE
+  gate. Residual: SvelteKit/Nuxt/Astro; deep route graphs for SPA routers.
 - [ ] **Supabase RLS + ungated-endpoint check** (static: migrations SQL + edge
   functions) — add #3. The documented killer failure mode: CVE-2025-48757 (RLS
   misconfig in 170+ Lovable apps), 172/1,072 apps allowed unauthenticated
-  deletes. Statically checkable, honestly labelled. **M** (needs Vite/Supabase
-  detection)
+  deletes. Statically checkable, honestly labelled. **M** (client orientation
+  detection implemented in candidate; RLS remains a separate check lane)
 - [ ] **Paste-ready fix per finding** (what/where/why/next) — add #7. The core
   wedge vs. gitleaks/trufflehog/semgrep: they report for security pros; nobody
   explains the patch to a non-security founder. This is getAdvantage DNA

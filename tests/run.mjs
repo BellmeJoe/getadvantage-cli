@@ -116,6 +116,11 @@
 //                                     worktree broaden cannot self-authorize;
 //                                     malformed/traversal fail closed; packed cold
 //                                     init+check; main check omits without contract
+//  47. Vite+React+Supabase map (0.9.x) — client orientation evidence-only: Vite+React
+//                                     +Supabase; React w/o Vite; Vite w/o React;
+//                                     env without SDK ≠ supabase detected; no invented
+//                                     routes; monorepo root-only; human/JSON/MCP parity;
+//                                     secret-like values never appear in map/json
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -6858,6 +6863,526 @@ scenario("intent: normal first freeze + authorized committed work remains GO", (
     assert.equal(doc.intent.baseline.sha, baselineCommit);
     assert.equal(doc.intent.laterContractChange, false);
     assert.equal((doc.intent.violations || []).length, 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 47. Vite + React + Supabase client orientation map (0.9.x lane)
+//     Evidence-only; no invented routes; no RLS/security verdict; no secret leak.
+// ---------------------------------------------------------------------------
+
+/** Assert map/json never echoes secret-shaped values from the fixture. */
+function assertMapDoesNotLeakSecrets(joined, secrets) {
+  for (const s of secrets) {
+    assert.ok(!joined.includes(s), `map output must never contain secret value: ${s.slice(0, 12)}…`);
+  }
+}
+
+/** Stable shape checks for clientOrientation JSON. */
+function assertClientOrientationShape(co) {
+  assert.ok(co && typeof co === "object", "clientOrientation must be an object");
+  assert.ok(co.clientApp && typeof co.clientApp.kind === "string" && typeof co.clientApp.label === "string");
+  assert.ok(co.signals && co.signals.vite && co.signals.react && co.signals.supabase);
+  for (const key of ["vite", "react", "supabase"]) {
+    const sig = co.signals[key];
+    assert.ok(["detected", "not detected", "not checkable"].includes(sig.status),
+      `${key}.status must be detected|not detected|not checkable, got ${sig.status}`);
+    assert.ok(Array.isArray(sig.evidence), `${key}.evidence must be an array`);
+  }
+  assert.ok(co.build && ("config" in co.build) && ("entry" in co.build));
+  assert.equal(typeof co.nextCheck, "string");
+  assert.ok(Array.isArray(co.notes));
+}
+
+scenario("map: Vite+React+Supabase Lovable-style — client orientation, no invented routes, JSON statuses", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "lovable");
+    initRepo(repo);
+    // Hostile: realistic-looking secrets in .env — map must never echo them.
+    const secretUrl = "https://xyzproject.supabase.co";
+    const secretKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.fake_payload_for_map_leak_test_only";
+    const skLive = "sk_live_MAPLEAKTEST00000000000001";
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "lovable-export",
+          version: "0.0.1",
+          private: true,
+          type: "module",
+          scripts: { build: "vite build", dev: "vite" },
+          dependencies: {
+            react: "^18.3.1",
+            "react-dom": "^18.3.1",
+            "@supabase/supabase-js": "^2.45.0",
+          },
+          devDependencies: { vite: "^5.4.0", "@vitejs/plugin-react": "^4.3.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "vite.config.ts", 'import { defineConfig } from "vite";\nexport default defineConfig({});\n');
+    write(repo, "index.html", '<div id="root"></div><script type="module" src="/src/main.tsx"></script>\n');
+    write(repo, "src/main.tsx", 'import React from "react";\nexport default function App(){ return null; }\n');
+    write(
+      repo,
+      ".env",
+      `VITE_SUPABASE_URL=${secretUrl}\nVITE_SUPABASE_ANON_KEY=${secretKey}\nSTRIPE_SECRET=${skLive}\n`,
+    );
+    write(repo, ".gitignore", "node_modules\n.env\ndist\n");
+    commitAll(repo, "chore: lovable-style vite react supabase");
+
+    // Human map
+    const human = run(["map"], repo);
+    assert.equal(human.code, 0, human.stderr);
+    const hout = human.stdout + human.stderr;
+    assert.ok(/Vite \+ React project/.test(hout), `stack label must name Vite + React:\n${hout}`);
+    assert.ok(/client orientation|Client app:/i.test(hout), `client orientation subsection:\n${hout}`);
+    assert.ok(/vite: detected/i.test(hout) && /react: detected/i.test(hout) && /supabase: detected/i.test(hout),
+      `all three signals detected:\n${hout}`);
+    assert.ok(/route mapping does not apply|nothing server-side/i.test(hout),
+      `frontend empty route detail:\n${hout}`);
+    assert.ok(!/Express\/Fastify|Flask\/FastAPI/.test(hout), "no backend jargon on SPA");
+    // Must NOT invent server routes
+    assert.ok(!/\/api\/(users|items|pay)/.test(hout), "must not invent sample API routes");
+    assert.ok(!/No Express\/Fastify routes found/.test(hout), "legacy Express empty copy banned");
+    assertMapDoesNotLeakSecrets(hout, [secretUrl, secretKey, skLive]);
+
+    // JSON map
+    const jr = run(["map", "--json"], repo);
+    assert.equal(jr.code, 0, jr.stderr);
+    const doc = parseJson(jr);
+    assert.equal(doc.command, "map");
+    assert.ok(doc.stack && doc.stack.label === "Vite + React project", JSON.stringify(doc.stack));
+    assert.equal(doc.stack.frontend, true);
+    assertClientOrientationShape(doc.clientOrientation);
+    const co = doc.clientOrientation;
+    assert.equal(co.clientApp.kind, "vite-react");
+    assert.equal(co.clientApp.label, "Vite + React project");
+    assert.equal(co.signals.vite.status, "detected");
+    assert.equal(co.signals.react.status, "detected");
+    assert.equal(co.signals.supabase.status, "detected");
+    assert.ok(co.signals.vite.evidence.some((e) => /package\.json|vite\.config/.test(e)), co.signals.vite.evidence);
+    assert.ok(co.signals.react.evidence.some((e) => /package\.json/.test(e)), co.signals.react.evidence);
+    assert.ok(co.signals.supabase.evidence.some((e) => /@supabase\/supabase-js/.test(e)), co.signals.supabase.evidence);
+    assert.equal(co.build.config, "vite.config.ts");
+    assert.ok(co.build.entry === "index.html" || /main\.(tsx|ts|jsx|js)/.test(co.build.entry || ""), co.build.entry);
+    assert.ok(typeof co.nextCheck === "string" && co.nextCheck.length > 10, co.nextCheck);
+    assert.ok(co.notes.some((n) => /RLS|auth|security|not an/i.test(n)), "honesty note about Supabase");
+    // API lane must not invent routes
+    const apiLane = (doc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(apiLane, "API surface lane present");
+    assert.ok(/route mapping does not apply|nothing server-side/i.test(apiLane.detail), apiLane.detail);
+    assert.ok(!(apiLane.extra || []).some((line) => /\[\s*GET|POST|PUT|DELETE\s*\]/.test(line)),
+      "no invented method table rows");
+    const joined = JSON.stringify(doc) + jr.stderr;
+    assertMapDoesNotLeakSecrets(joined, [secretUrl, secretKey, skLive]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: React without Vite — react detected, vite not detected; stack is React project", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base, {
+      pkg: {
+        dependencies: { react: "^18.0.0", "react-dom": "^18.0.0" },
+        scripts: { build: "echo build" },
+      },
+    });
+    write(repo, "src/App.jsx", "export default function App(){return null}\n");
+    commitAll(repo, "chore: react only");
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assert.equal(doc.stack.label, "React project");
+    assert.equal(doc.stack.frontend, true);
+    assertClientOrientationShape(doc.clientOrientation);
+    assert.equal(doc.clientOrientation.clientApp.kind, "react");
+    assert.equal(doc.clientOrientation.signals.react.status, "detected");
+    assert.equal(doc.clientOrientation.signals.vite.status, "not detected");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not detected");
+    assert.equal(doc.clientOrientation.build.config, null);
+    const human = run(["map"], repo);
+    assert.ok(/React project/.test(human.stdout), human.stdout);
+    assert.ok(/route mapping does not apply|nothing server-side/i.test(human.stdout + human.stderr));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: Vite without React — vite detected, react not detected; stack is Vite project", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "vite-only");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "vite-only",
+          version: "1.0.0",
+          private: true,
+          scripts: { build: "vite build" },
+          devDependencies: { vite: "^5.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "vite.config.js", "export default {};\n");
+    write(repo, "index.html", "<div id=app></div>\n");
+    write(repo, "src/main.js", "console.log('hi');\n");
+    commitAll(repo, "chore: vite only");
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assert.equal(doc.stack.label, "Vite project");
+    assert.equal(doc.stack.frontend, true);
+    assertClientOrientationShape(doc.clientOrientation);
+    assert.equal(doc.clientOrientation.clientApp.kind, "vite");
+    assert.equal(doc.clientOrientation.signals.vite.status, "detected");
+    assert.equal(doc.clientOrientation.signals.react.status, "not detected");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not detected");
+    assert.equal(doc.clientOrientation.build.config, "vite.config.js");
+    assert.equal(doc.clientOrientation.build.entry, "index.html");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: VITE_SUPABASE_* env without SDK → supabase not detected (no invented use)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "env-only");
+    initRepo(repo);
+    const secretVal = "sb_secret_ENV_ONLY_MUST_NOT_LEAK_0001";
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "env-only-spa",
+          version: "1.0.0",
+          private: true,
+          dependencies: { react: "^18.0.0" },
+          devDependencies: { vite: "^5.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "vite.config.ts", "export default {};\n");
+    write(repo, "index.html", "<div id=root></div>\n");
+    write(
+      repo,
+      ".env",
+      `VITE_SUPABASE_URL=https://envonly.supabase.co\nVITE_SUPABASE_ANON_KEY=${secretVal}\n`,
+    );
+    write(repo, ".env.local", `SUPABASE_SERVICE_ROLE_KEY=${secretVal}_svc\n`);
+    commitAll(repo, "chore: env without supabase sdk");
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assertClientOrientationShape(doc.clientOrientation);
+    assert.equal(doc.clientOrientation.signals.vite.status, "detected");
+    assert.equal(doc.clientOrientation.signals.react.status, "detected");
+    // Env alone must NOT claim Supabase detected
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not detected");
+    assert.equal(doc.clientOrientation.signals.supabase.evidence.length, 0);
+    // No RLS / security verdict language as a pass claim
+    const joined = JSON.stringify(doc) + r.stderr;
+    assert.ok(!/RLS (enabled|pass|secure|ok)/i.test(joined), "must not invent RLS verdict");
+    assertMapDoesNotLeakSecrets(joined, [secretVal, `${secretVal}_svc`, "https://envonly.supabase.co"]);
+    // Integrations lane may mention nothing about supabase, or only if source scan finds it —
+    // without the dep and without source imports, should not claim Supabase SDK.
+    const integ = (doc.lanes || []).find((l) => /integrations/i.test(l.label));
+    if (integ) {
+      assert.ok(!/Supabase \(SDK\)/.test(integ.detail + (integ.extra || []).join("\n")),
+        "env-only must not surface Supabase SDK integration");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: monorepo nested package.json is not claimed as map root client app", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mono");
+    initRepo(repo);
+    // Root: plain workspace shell — no vite/react
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "mono-root",
+          version: "1.0.0",
+          private: true,
+          workspaces: ["apps/*"],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Nested app has the full SPA stack — must NOT be attributed to the map root.
+    write(
+      repo,
+      "apps/web/package.json",
+      JSON.stringify(
+        {
+          name: "web",
+          version: "1.0.0",
+          private: true,
+          dependencies: {
+            react: "^18.0.0",
+            "@supabase/supabase-js": "^2.0.0",
+          },
+          devDependencies: { vite: "^5.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "apps/web/vite.config.ts", "export default {};\n");
+    write(repo, "apps/web/index.html", "<div id=root></div>\n");
+    write(repo, "apps/web/src/main.tsx", "export default null;\n");
+    write(repo, "packages/shared/index.js", "export const x = 1;\n");
+    commitAll(repo, "chore: monorepo with nested vite app");
+
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assertClientOrientationShape(doc.clientOrientation);
+    // Root has no vite/react/supabase deps → none of them detected at map root
+    assert.equal(doc.clientOrientation.signals.vite.status, "not detected");
+    assert.equal(doc.clientOrientation.signals.react.status, "not detected");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not detected");
+    assert.equal(doc.clientOrientation.clientApp.kind, "none");
+    assert.equal(doc.clientOrientation.build.config, null);
+    // Estate may list apps/ as a module, but stack must not claim Vite + React at root
+    assert.ok(doc.stack.label !== "Vite + React project", doc.stack.label);
+    assert.ok(
+      doc.clientOrientation.notes.some((n) => /nested|map root|root/i.test(n)),
+      "notes should mention root-only / nested honesty",
+    );
+    // Nested paths must not appear as if they were root evidence of detection
+    for (const sig of Object.values(doc.clientOrientation.signals)) {
+      for (const e of sig.evidence || []) {
+        assert.ok(!/apps[\\/]web/.test(e), `nested path must not be root evidence: ${e}`);
+      }
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: human / JSON / MCP parity on Vite+React SPA; no secret leakage", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "parity");
+    initRepo(repo);
+    const leak = "adv_live_mapparityleaktest00000001";
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "parity-spa",
+          version: "1.0.0",
+          private: true,
+          dependencies: { react: "^19.0.0", "react-dom": "^19.0.0" },
+          devDependencies: { vite: "^5.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "vite.config.mjs", "export default {};\n");
+    write(repo, "index.html", "<div id=root></div>\n");
+    write(repo, "src/main.jsx", "export default () => null;\n");
+    write(repo, "notes.txt", `do-not-echo ${leak}\n`);
+    commitAll(repo, "chore: parity spa");
+
+    const human = run(["map"], repo);
+    assert.equal(human.code, 0);
+    const hout = human.stdout + human.stderr;
+    assert.ok(/Vite \+ React project/.test(hout), hout);
+    assert.ok(/vite: detected/i.test(hout) && /react: detected/i.test(hout), hout);
+    assert.ok(/supabase: not detected/i.test(hout), hout);
+    assert.ok(/route mapping does not apply/i.test(hout), hout);
+    assertMapDoesNotLeakSecrets(hout, [leak]);
+
+    const jr = run(["map", "--json"], repo);
+    const doc = parseJson(jr);
+    assert.equal(doc.clientOrientation.clientApp.kind, "vite-react");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not detected");
+    assertMapDoesNotLeakSecrets(JSON.stringify(doc), [leak]);
+
+    // MCP map tool — same engine text
+    const lines =
+      [
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+        JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "map", arguments: { cwd: repo } } }),
+      ].join("\n") + "\n";
+    const mcp = spawnSync(process.execPath, [INDEX, "mcp"], {
+      cwd: repo,
+      input: lines,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+      env: buildEnv(),
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const replies = mcp.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const mapReply = replies.find((m) => m.id === 2);
+    assert.ok(mapReply && mapReply.result && mapReply.result.content, "mcp map reply");
+    const mapText = mapReply.result.content[0].text;
+    assert.ok(/Vite \+ React project/.test(mapText), mapText);
+    assert.ok(/vite: detected/i.test(mapText) && /client orientation|Client app:/i.test(mapText), mapText);
+    assert.ok(/route mapping does not apply|nothing server-side/i.test(mapText), mapText);
+    assertMapDoesNotLeakSecrets(mapText, [leak]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: Express still parses real routes; clientOrientation does not force frontend", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "express");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        { name: "api", version: "1.0.0", private: true, dependencies: { express: "^4.19.0" } },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(
+      repo,
+      "server.js",
+      [
+        "const express = require('express');",
+        "const app = express();",
+        "app.get('/health', (req, res) => res.send('ok'));",
+        "app.post('/api/pay', (req, res) => res.json({ ok: true }));",
+        "app.listen(3000);",
+      ].join("\n") + "\n",
+    );
+    commitAll(repo, "chore: express");
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assert.equal(doc.stack.label, "Express project");
+    assert.equal(!!doc.stack.frontend, false);
+    assertClientOrientationShape(doc.clientOrientation);
+    assert.equal(doc.clientOrientation.clientApp.kind, "none");
+    const api = (doc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(api, "api lane");
+    const blob = api.detail + "\n" + (api.extra || []).join("\n");
+    assert.ok(/\/health/.test(blob) && /\/api\/pay/.test(blob), blob);
+    assert.ok(!/route mapping does not apply/i.test(blob), "Express must not get SPA empty copy");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("map: broken package.json → client signals not checkable", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "broken-pkg");
+    initRepo(repo);
+    write(repo, "package.json", "{ name: not-json, trailing comma, }\n");
+    write(repo, "readme.md", "broken\n");
+    commitAll(repo, "chore: broken package.json");
+    const r = run(["map", "--json"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assertClientOrientationShape(doc.clientOrientation);
+    assert.equal(doc.clientOrientation.clientApp.kind, "not-checkable");
+    assert.equal(doc.clientOrientation.signals.vite.status, "not checkable");
+    assert.equal(doc.clientOrientation.signals.react.status, "not checkable");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "not checkable");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("packed package: cold map on Vite+React+Supabase fixture has clientOrientation + no secret leak", () => {
+  const base = freshBase();
+  try {
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    const pkgRoot = path.join(__dirname, "..");
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgz = readdirSync(packDir).find((f) => f.endsWith(".tgz"));
+    assert.ok(tgz, "tarball expected");
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--no-save", "--prefix", cold, path.join(packDir, tgz)], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const bin = path.join(cold, "node_modules", "getadvantage", "index.mjs");
+    assert.ok(existsSync(bin), "packed index.mjs");
+
+    const sample = path.join(base, "sample");
+    initRepo(sample);
+    const secret = "sk_live_COLDPACKMAP00000000000001";
+    write(
+      sample,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "cold-spa",
+          version: "1.0.0",
+          private: true,
+          dependencies: { react: "^18.0.0", "@supabase/supabase-js": "^2.0.0" },
+          devDependencies: { vite: "^5.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(sample, "vite.config.ts", "export default {};\n");
+    write(sample, "index.html", "<div id=root></div>\n");
+    write(sample, "src/main.tsx", "export default null;\n");
+    write(sample, ".env", `VITE_SUPABASE_ANON_KEY=${secret}\n`);
+    commitAll(sample, "chore: cold spa");
+
+    const r = spawnSync(process.execPath, [bin, "map", "--json"], {
+      cwd: sample,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+      env: buildEnv(),
+    });
+    assert.equal(r.status, 0, `cold map failed:\n${r.stderr}\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.command, "map");
+    assert.ok(doc.clientOrientation, "cold packed map must emit clientOrientation");
+    assert.equal(doc.clientOrientation.clientApp.kind, "vite-react");
+    assert.equal(doc.clientOrientation.signals.supabase.status, "detected");
+    assert.equal(doc.clientOrientation.signals.vite.status, "detected");
+    assertMapDoesNotLeakSecrets(JSON.stringify(doc) + (r.stderr || ""), [secret]);
   } finally {
     cleanup(base);
   }

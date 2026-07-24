@@ -75,7 +75,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Feature | User-facing line | Command |
 |---------|------------------|---------|
-| **Map** | What does this app have? Routes, integrations, schedules — orientation, not a verdict. Client apps get plain language (no Express jargon on a Vite SPA). | `npx getadvantage map` · MCP tool `map` |
+| **Map** | What does this app have? Routes, integrations, schedules — orientation, not a verdict. Client apps get plain language (no Express jargon on a Vite SPA). **Candidate only (not LIVE on published 0.10.0; do not lead ads until release gate):** estate **Vite/React/Supabase client orientation** (evidence-only statuses/paths); SPA “route mapping does not apply”; no invented Express routes; Supabase SDK ≠ RLS seal. | `npx getadvantage map` · `map --json` · MCP tool `map` |
 | **Architecture** | Where is the code accreting? Advisory only — never blocks ship. | `npx getadvantage architecture` · MCP tool `architecture` |
 
 ### C. Agent / multi-model workflow — advertise to builders (demo-led)
@@ -192,6 +192,7 @@ Roadmap 0.9 (Vite/Supabase ICP failure modes) is the **wedge expansion**; 0.8.x 
 | Dirty tree blocks | `dirty-tree` |
 | Outside git not a dead end | `outside-git-rescue` |
 | Vite/React map honest | `client-app-map` |
+| Vite+React+Supabase client orientation (candidate) | Integration tests in `tests/run.mjs` §47 + cold packed map; evidence `client-app-map` |
 | Express routes mapped | `server-map-coherent` |
 
 If evidence is red, **do not post**.
@@ -203,7 +204,7 @@ If evidence is red, **do not post**.
 | Surface | What it does |
 |---------|----------------|
 | `check` / `ship` | Dirty tree, secrets, tracked .env, manifest integrity, typecheck (local tsc only — never npx tsc), optional build, schema-bump warn, overview maps |
-| `map` | Estate + API surface + integrations + schedules; stack-aware (Next/Express/Flask/FastAPI/client) |
+| `map` | Estate + API surface + integrations + schedules; stack-aware (Next/Express/Flask/FastAPI/client). **Candidate (not LIVE on published 0.10.0):** Vite/React/Supabase client orientation + `map --json` `clientOrientation` — do not advertise as shipped until release gate |
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |

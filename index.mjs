@@ -301,17 +301,25 @@ ${c.bold("Usage")}
   ${bin} map
 
 ${c.bold("Lanes")}
-  ${c.cyan("Project estate")}          Top-level modules (dirs + file counts + languages) and
-                          dependency highlights — works on ANY stack.
+  ${c.cyan("Project estate")}          Top-level modules (dirs + file counts + languages),
+                          dependency highlights, and ${c.bold("client orientation")} (Vite / React /
+                          Supabase evidence at the repo root: detected | not detected |
+                          not checkable + paths). Works on ANY stack.
   ${c.cyan("API surface map")}         Route table + methods + whether each looks auth-gated, with a
                           ${c.bold("⚠")} on a mutating route with no obvious gate. Parses ${c.bold("Next.js")} App
                           Router, ${c.bold("Express/Fastify")}, and ${c.bold("Flask/FastAPI")} (best-effort regex);
-                          other stacks get the estate view and an honest scope note.
+                          client SPAs get an honest "route mapping does not apply" line —
+                          never invented Express routes.
   ${c.cyan("Agents & integrations")}   LLM / 3rd-party services detected from DECLARED
                           dependencies (package.json, requirements.txt, pyproject.toml)
-                          plus app/ source, with the env keys behind them.
+                          plus app/ source, with the env keys behind them. Supabase SDK
+                          presence is not an RLS/auth/security verdict.
   ${c.cyan("Schedules & jobs")}        vercel.json crons + app/api/cron/* routes and whether
                           each is gated (CRON_SECRET).
+
+${c.bold("JSON")} (${c.cyan(`${bin} map --json`)})
+  Adds machine fields: stack, clientOrientation { clientApp, signals, build,
+  nextCheck, notes }, lanes. Evidence paths only — never secret values.
 
 A map is orientation, not a gate — run ${c.cyan(`${bin} ship`)} for the GO / NO-GO.
 `);
@@ -495,13 +503,21 @@ async function main() {
   if (cmd === "map") {
     const restore = flags.json ? routeHumanOutputToStderr() : null;
     header();
-    const { stack, lanes } = renderMap(cwd);
+    const { stack, lanes, clientOrientation } = renderMap(cwd);
     if (restore) {
       emitJson(restore, {
         command: "map",
         stack: stack
-          ? { kind: stack.kind, label: stack.label, nextJs: !!stack.nextJs }
+          ? {
+              kind: stack.kind,
+              label: stack.label,
+              nextJs: !!stack.nextJs,
+              frontend: !!stack.frontend,
+            }
           : null,
+        // First-class client orientation (Vite/React/Supabase evidence-only).
+        // Same structured fields as scanEstate — never includes secret values.
+        clientOrientation: clientOrientation || null,
         lanes: lanes.map((r) => ({
           status: r.status,
           label: r.label,

@@ -168,7 +168,7 @@ const TOOLS = [
   {
     name: "map",
     description:
-      "A read-only map of what the app has: project estate (modules, languages, dependencies), API surface (every route with methods + auth posture, ⚠ on mutating routes with no obvious gate), agents & LLM integrations with their backing env keys, and schedules/crons. Orientation, never a verdict; mutates nothing. Run this to X-ray an unfamiliar repo mid-session. Same engine as the CLI `map` command.",
+      "A read-only map of what the app has: project estate (modules, languages, dependencies, plus Vite/React/Supabase client orientation — evidence-only, not an RLS/security verdict), API surface (every route with methods + auth posture, ⚠ on mutating routes with no obvious gate; client SPAs get route-mapping-does-not-apply, never invented Express routes), agents & LLM integrations with their backing env keys, and schedules/crons. Orientation, never a verdict; mutates nothing. Run this to X-ray an unfamiliar repo mid-session. Same engine as the CLI `map` command.",
     inputSchema: { type: "object", properties: { ...CWD_PROP }, additionalProperties: false },
   },
   {
