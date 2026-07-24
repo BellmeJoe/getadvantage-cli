@@ -38,7 +38,7 @@ independently reproduced 1:1 against the live npm package.
 | **0.9.0** | First-party GitHub Action + update-in-place PR summary | **Released** (npm + tag v0.9.0, 2026-07-21) |
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
 | **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; `intent init` / `intent check`; main `check` integration | **Released** (npm + tag v0.10.0 + floating v1, 2026-07-23; cold published verified) |
-| 0.9.x | ICP stack-fit: Vite+React+Supabase **client orientation map** (evidence-only; candidate on 0.10.0) | **Candidate** (uncommitted / pre-audit — not LIVE) |
+| 0.9.x | ICP stack-fit: Vite+React+Supabase **client orientation map** (evidence-only; candidate on 0.10.0) | **Candidate** (`11e41e4` / pre-audit — not LIVE) |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
