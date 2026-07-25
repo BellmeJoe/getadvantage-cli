@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.10.1 LIVE** (after cold published verify)
+# Social / advertising pack — getadvantage **0.10.1 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -9,8 +9,9 @@
 > **Live:** **getadvantage@0.10.1** (2026-07-25). Independent **REVIEW_GO** on
 > product fingerprint `4001a58` (Vite/React/Supabase client orientation + dogfood
 > reliability); serial gate 110/110 tests · 8/8 evidence · dogfood triad PASS ·
-> 0 open P1/P2. Registry `gitHead` / tags `v0.10.1` + floating `v1` + GitHub
-> Release + cold published path filled after publish. Prefer leading with the
+> 0 open P1/P2. Registry `gitHead` = `7592004` (release commit), tags `v0.10.1` +
+> floating `v1`, GitHub Release, cold published package verified (version + map
+> `clientOrientation` on Vite+React+Supabase fixture). Prefer leading with the
 > eight core GO/NO-GO claims below; Intent remains the trust-layer follow-on —
 > always *scope verified; semantic correctness not proven*.
 >
@@ -36,7 +37,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | **Install** | `npx getadvantage` or `npx getadvantage@0.10.1` (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.10.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.1) · Action `@v1` / `@v0.10.1` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **110/110** tests @ 0.10.1 · product fingerprint `4001a58` · registry `gitHead` filled after publish |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **110/110** tests @ 0.10.1 · product fingerprint `4001a58` · cold published path verified (2026-07-25) · registry `gitHead` `7592004` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---

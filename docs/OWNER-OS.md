@@ -10,18 +10,17 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.10.1** (after this release publish) | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | **0.10.1** | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.10.1** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | **0.10.1** (matches npm) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
 | Tests grün? | **110/110** erwartet (map client orientation + dogfood reliability + Intent + prior) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **Live npm is 0.10.1** after publish (was 0.10.0 / `705986c` until this release).
-> Vite/React/Supabase map client orientation + dogfood reliability (product
-> fingerprint `4001a58`); Intent Contract still LIVE; secret scan covers
-> committed `.next/static/**`; first-party Action `@v1` / `@v0.10.1`. Registry
-> `gitHead` filled after publish. Rollback: **0.10.0** / `v0.10.0`, **0.9.1** /
-> `v0.9.1`, **0.9.0** / `v0.9.0`, **0.8.4** / `v0.8.4`.
+> **Live npm is 0.10.1.** Vite/React/Supabase map client orientation + dogfood
+> reliability (product fingerprint `4001a58`); Intent Contract still LIVE;
+> secret scan covers committed `.next/static/**`; first-party Action `@v1` /
+> `@v0.10.1`. Registry `gitHead` `7592004`. Rollback: **0.10.0** / `v0.10.0`,
+> **0.9.1** / `v0.9.1`, **0.9.0** / `v0.9.0`, **0.8.4** / `v0.8.4`.
 
 ---
 
