@@ -247,8 +247,8 @@ AI-*built* apps — and finally runs on what the ICP actually ships.
   alone does not count as detected; secret values never appear in map/json.
   Nested monorepo packages are not claimed as the map root. Shared engine:
   `detectClientOrientation` → `scanEstate` / `renderMap` (CLI map, `map --json`,
-  MCP map). **Candidate** on package **0.10.0** until independent audit + LIVE
-  gate. Residual: SvelteKit/Nuxt/Astro; deep route graphs for SPA routers.
+  MCP map). **LIVE 0.10.1** (product fingerprint `4001a58`; release `7592004`).
+  Residual: SvelteKit/Nuxt/Astro; deep route graphs for SPA routers.
 - [ ] **Supabase RLS + ungated-endpoint check** (static: migrations SQL + edge
   functions) — add #3. The documented killer failure mode: CVE-2025-48757 (RLS
   misconfig in 170+ Lovable apps), 172/1,072 apps allowed unauthenticated

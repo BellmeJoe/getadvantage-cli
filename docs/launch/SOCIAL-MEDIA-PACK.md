@@ -192,7 +192,7 @@ Roadmap 0.9 (Vite/Supabase ICP failure modes) is the **wedge expansion**; 0.8.x 
 | Dirty tree blocks | `dirty-tree` |
 | Outside git not a dead end | `outside-git-rescue` |
 | Vite/React map honest | `client-app-map` |
-| Vite+React+Supabase client orientation (candidate) | Integration tests in `tests/run.mjs` §47 + cold packed map; evidence `client-app-map` |
+| Vite+React+Supabase client orientation (**LIVE 0.10.1**) | Integration tests in `tests/run.mjs` §47 + cold packed map; evidence `client-app-map` |
 | Express routes mapped | `server-map-coherent` |
 
 If evidence is red, **do not post**.
@@ -204,13 +204,13 @@ If evidence is red, **do not post**.
 | Surface | What it does |
 |---------|----------------|
 | `check` / `ship` | Dirty tree, secrets, tracked .env, manifest integrity, typecheck (local tsc only — never npx tsc), optional build, schema-bump warn, overview maps |
-| `map` | Estate + API surface + integrations + schedules; stack-aware (Next/Express/Flask/FastAPI/client). **Candidate (not LIVE on published 0.10.0):** Vite/React/Supabase client orientation + `map --json` `clientOrientation` — do not advertise as shipped until release gate |
+| `map` | Estate + API surface + integrations + schedules; stack-aware (Next/Express/Flask/FastAPI/client). **LIVE 0.10.1:** Vite/React/Supabase client orientation + `map --json` `clientOrientation` (evidence-only; SPA route mapping does not apply; Supabase SDK ≠ RLS seal) |
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.10.0`) + SARIF upload path (**live 0.10.0**) |
+| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.10.1`) + SARIF upload path (**live 0.10.1**) |
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
-| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.10.0** · `@v1` / `@v0.10.0`) |
+| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.10.1** · `@v1` / `@v0.10.1`) |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.
