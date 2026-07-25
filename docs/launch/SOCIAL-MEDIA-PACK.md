@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.10.0 LIVE**
+# Social / advertising pack — getadvantage **0.10.1 LIVE** (after cold published verify)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,23 +6,22 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Live:** **getadvantage@0.10.0** (2026-07-23). Independent **REVIEW_GO** on
-> fingerprint `b4a1612` plus release-gate fix (gitlink fail-closed); gated Actions
-> publish (tests + evidence + Materialize + `uses: ./` fixture self-gate green
-> before npm), registry `gitHead` = `705986c` (release commit), tags `v0.10.0` +
-> floating `v1`, GitHub Release, cold published package verified (version + Intent
-> init/check GO + outside-allow NO-GO + core secret path). Prefer leading with
-> the eight core GO/NO-GO claims below; Intent is the trust-layer follow-on —
+> **Live:** **getadvantage@0.10.1** (2026-07-25). Independent **REVIEW_GO** on
+> product fingerprint `4001a58` (Vite/React/Supabase client orientation + dogfood
+> reliability); serial gate 110/110 tests · 8/8 evidence · dogfood triad PASS ·
+> 0 open P1/P2. Registry `gitHead` / tags `v0.10.1` + floating `v1` + GitHub
+> Release + cold published path filled after publish. Prefer leading with the
+> eight core GO/NO-GO claims below; Intent remains the trust-layer follow-on —
 > always *scope verified; semantic correctness not proven*.
 >
-> **Also live in 0.10.0:** Intent Contract (`intent init` / `intent check`; part
-> of `check` when freeze trusted); first-party GitHub Action + PR summary
-> (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.10.0`); secret scan of committed
-> `.next/static/**` client bundles (non-static `.next` still skipped honestly);
-> public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not exemptions; SARIF 2.1 via
-> `check --sarif` and the Action path. Not a security guarantee — same gate as
-> local `check`, exported for the PR surface. Rollback: **getadvantage@0.9.1** /
-> tag `v0.9.1`, **0.9.0** / `v0.9.0`, or **0.8.4** / `v0.8.4`.
+> **Also live in 0.10.1:** Vite/React/Supabase **client orientation** on `map` /
+> `map --json` / MCP map (evidence-only statuses/paths; SPA “route mapping does
+> not apply”; Supabase SDK ≠ RLS seal); quiet missing-Intent freeze discovery;
+> Intent Contract (`intent init` / `intent check`); first-party GitHub Action +
+> PR summary (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.10.1`); secret scan of
+> committed `.next/static/**`; public prefixes not exemptions; SARIF 2.1. Not a
+> security guarantee. Rollback: **getadvantage@0.10.0** / tag `v0.10.0`,
+> **0.9.1** / `v0.9.1`, **0.9.0** / `v0.9.0`, or **0.8.4** / `v0.8.4`.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -32,12 +31,12 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.10.0` |
-| **Checkout** | Live **0.10.0** (Intent Contract + client-bundle `.next/static` scan + first-party Action + SARIF) |
-| **Install** | `npx getadvantage` or `npx getadvantage@0.10.0` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.10.0](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.0) · Action `@v1` / `@v0.10.0` |
+| **npm (live)** | `getadvantage@0.10.1` |
+| **Checkout** | Live **0.10.1** (map client orientation + Intent Contract + client-bundle scan + Action + SARIF) |
+| **Install** | `npx getadvantage` or `npx getadvantage@0.10.1` (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.10.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.1) · Action `@v1` / `@v0.10.1` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **96/96** tests @ 0.10.0 · cold published path verified (2026-07-23) · registry `gitHead` `705986c` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · **110/110** tests @ 0.10.1 · product fingerprint `4001a58` · registry `gitHead` filled after publish |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -65,7 +64,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 | Feature | User-facing line | Command / surface | Proof |
 |---------|------------------|-------------------|--------|
 | **Pre-deploy GO/NO-GO** | Safe to ship? Yes or no. Exit 0 / 1. | `npx getadvantage check` · alias `ship` (+build) | Evidence: clean-go, catches-the-leak, … |
-| **Secret scan** | Catches committed keys — including inside **sourcemaps/dist** and committed **`.next/static`** browser assets (**LIVE 0.9.1+**). Public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not treated as proof a private value is safe. Never prints the full secret. Not a security seal. | part of `check` | Evidence: catches-the-leak, build-output-leak · shipped tests: `.next/static` + Vite dist hostiles · cold `getadvantage@0.10.0` |
+| **Secret scan** | Catches committed keys — including inside **sourcemaps/dist** and committed **`.next/static`** browser assets (**LIVE 0.9.1+**). Public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not treated as proof a private value is safe. Never prints the full secret. Not a security seal. | part of `check` | Evidence: catches-the-leak, build-output-leak · shipped tests: `.next/static` + Vite dist hostiles · cold `getadvantage@0.10.1` |
 | **Tracked `.env`** | A committed `.env` is a leak by itself. | part of `check` | Evidence: tracked-env |
 | **Dirty-tree guard** | Stops “I deployed my uncommitted mess” (vercel --prod ships the working tree). | part of `check` | Evidence: dirty-tree |
 | **Honest skips** | No TypeScript? No fake typecheck fail. Not checkable ≠ silent GO on manifests. | part of `check` | Honesty principle + tests |
@@ -75,7 +74,7 @@ their named current test or source. Anything marked *roadmap* is not live.
 
 | Feature | User-facing line | Command |
 |---------|------------------|---------|
-| **Map** | What does this app have? Routes, integrations, schedules — orientation, not a verdict. Client apps get plain language (no Express jargon on a Vite SPA). **Candidate only (not LIVE on published 0.10.0; do not lead ads until release gate):** estate **Vite/React/Supabase client orientation** (evidence-only statuses/paths); SPA “route mapping does not apply”; no invented Express routes; Supabase SDK ≠ RLS seal. | `npx getadvantage map` · `map --json` · MCP tool `map` |
+| **Map** | What does this app have? Routes, integrations, schedules — orientation, not a verdict. Client apps get plain language (no Express jargon on a Vite SPA). **LIVE 0.10.1:** estate **Vite/React/Supabase client orientation** (evidence-only statuses/paths); SPA “route mapping does not apply”; no invented Express routes from test/fixture/string literals; Supabase SDK ≠ RLS seal. | `npx getadvantage map` · `map --json` · MCP tool `map` |
 | **Architecture** | Where is the code accreting? Advisory only — never blocks ship. | `npx getadvantage architecture` · MCP tool `architecture` |
 
 ### C. Agent / multi-model workflow — advertise to builders (demo-led)
@@ -86,20 +85,20 @@ their named current test or source. Anything marked *roadmap* is not live.
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
 | **CI** | Same gate on every PR. SARIF upload to code scanning on public repos (private needs Code Security + `actions: read`). Not a security seal. | `github-action` · `check --sarif` · publish pipeline runs tests + evidence |
-| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.10.0`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.10.0** · tags `v1`/`v0.10.0` |
+| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.10.1`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.10.1** · tags `v1`/`v0.10.1` |
 
 ### D. Trust layer — advertise to builders who run agents (honest scope)
 
 | Feature | User-facing line | Command / surface | Proof |
 |---------|------------------|-------------------|--------|
-| **Intent Contract** (**LIVE 0.10.0**) | Pin baseline + dedicated freeze **before** the agent starts; after work (including commits), prove every **non-ignored** change after baseline stayed inside the freeze envelope. GO/NO-GO + `contractHash` + `receiptHash`. Nested git + gitlink fail-closed. Local trust only. *Scope verified; semantic correctness not proven.* | `intent init` · `intent check` · part of `check` when freeze trusted | Cold `npx getadvantage@0.10.0` init+check GO / outside-allow NO-GO · tests 96/96 · registry `gitHead` `705986c` |
+| **Intent Contract** (**LIVE 0.10.0+**) | Pin baseline + dedicated freeze **before** the agent starts; after work (including commits), prove every **non-ignored** change after baseline stayed inside the freeze envelope. GO/NO-GO + `contractHash` + `receiptHash`. Nested git + gitlink fail-closed. Quiet when Intent is not configured (no git fatal storm). Local trust only. *Scope verified; semantic correctness not proven.* | `intent init` · `intent check` · part of `check` when freeze trusted | Cold path on published package · tests 110/110 @ 0.10.1 · prior cold `getadvantage@0.10.0` init+check GO / outside-allow NO-GO |
 
 **LIVE one-liner (builders / agent workflow):**
 ```
 Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
 Commit only intent.json (dedicated freeze). After: intent check → every
 post-baseline change inside the human envelope? Scope only — not semantics.
-(getadvantage@0.10.0 · LIVE)
+(getadvantage@0.10.1 · LIVE)
 ```
 
 ### E. Do **not** lead with (true but wrong first sentence)

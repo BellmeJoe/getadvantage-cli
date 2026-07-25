@@ -6,7 +6,7 @@
 # Tag architecture (documented — not a founder choice):
 #   - Floating git tag `v1` = Action product major (moves on each shipped
 #     action-compatible release after independent REVIEW_GO).
-#   - Exact release tags `v0.9.0`, `v0.9.1`, `v0.10.0`, … remain the npm/source pins.
+#   - Exact release tags `v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, … remain the npm/source pins.
 #   - npm installs use package versions / dist-tags, never the floating `v1`
 #     git tag. When the package reaches 1.x, `v1` continues to mean "latest
 #     1.x Action surface" (same pattern as actions/checkout@v4).

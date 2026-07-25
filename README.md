@@ -99,7 +99,7 @@ run getAdvantage.
 |---|---|
 | `getadvantage ship` | The full gate, including the production build: is this safe to ship? Exit `0` on **GO**, `1` on **NO-GO**. Same as `check --build` — the name you remember. |
 | `getadvantage check` | Read-only pre-deploy checks → exit `0` on **GO**, `1` on **NO-GO**. Add `--build` for a full build. Default when you run `getadvantage` with no subcommand. |
-| `getadvantage map` | A read-only map of what your app has: project estate (including **Vite / React / Supabase client orientation** — evidence-only statuses and paths; **candidate** on this tree, not yet on published **0.10.0**), API surface (what is gated, what mutates — with a `⚠` on any mutating route that has no obvious gate), agents & integrations, schedules & jobs. Route mapping covers **Next.js** App Router, **Express/Fastify**, and **Flask/FastAPI** (best-effort regex parsing — no code is run); client SPAs get an honest “route mapping does not apply” line — never invented Express routes. Supabase SDK detection is not an RLS/auth verdict. Orientation, never a verdict — always exits `0`. |
+| `getadvantage map` | A read-only map of what your app has: project estate (including **Vite / React / Supabase client orientation** — evidence-only statuses and paths; **LIVE 0.10.1**), API surface (what is gated, what mutates — with a `⚠` on any mutating route that has no obvious gate), agents & integrations, schedules & jobs. Route mapping covers **Next.js** App Router, **Express/Fastify**, and **Flask/FastAPI** (best-effort regex parsing — no code is run); client SPAs get an honest “route mapping does not apply” line — never invented Express routes. Supabase SDK detection is not an RLS/auth verdict. Orientation, never a verdict — always exits `0`. |
 | `getadvantage brief` | Generate / refresh `PROJECT-BRIEF.md` — the **COLD** layer (what the project *is*). Hand-written notes between the `getadvantage:brief:notes` markers are preserved across regenerations. `--check` warns if it's stale; it never blocks. |
 | `getadvantage handoff` | Refresh the brief **and** write `HANDOFF.md` — the **HOT** layer (where you *left off*). Your notes are preserved across refreshes; it never overwrites a `HANDOFF.md` it didn't create. |
 | `getadvantage init` | Wire the brain into your agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `.clinerules`) so `PROJECT-BRIEF.md` + `HANDOFF.md` load automatically at session start. |
@@ -396,7 +396,7 @@ Or paste the consumer step yourself after checkout:
 
 **Tag architecture:** floating git tag `v1` is the Action API major (moved on each
 shipped action-compatible release). Exact source/npm release tags remain
-`v0.9.0`, `v0.9.1`, `v0.10.0`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.10.0` when you
+`v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.10.1` when you
 need bit-for-bit reproducibility. npm installs use package versions / dist-tags,
 not the floating `v1` git tag.
 
