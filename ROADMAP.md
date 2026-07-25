@@ -252,8 +252,14 @@ AI-*built* apps — and finally runs on what the ICP actually ships.
 - [ ] **Supabase RLS + ungated-endpoint check** (static: migrations SQL + edge
   functions) — add #3. The documented killer failure mode: CVE-2025-48757 (RLS
   misconfig in 170+ Lovable apps), 172/1,072 apps allowed unauthenticated
-  deletes. Statically checkable, honestly labelled. **M** (client orientation
-  detection implemented in candidate; RLS remains a separate check lane)
+  deletes. Statically checkable, honestly labelled. **M**
+  **Candidate in progress (2026-07-25, REVIEW_PENDING):** policy-state table
+  model — track ENABLE/DISABLE RLS + CREATE POLICY per table across migrations
+  ordered by path name; NO-GO only on final static state that is clearly unsafe
+  (RLS off or write policy `USING`/`WITH CHECK` true for client roles). Edge
+  Function mutations secondary (high bar; service-role not public; dynamic →
+  warn). `checkSupabaseRls` + tests + SARIF `supabase/*`. No version bump / not
+  LIVE until independent REVIEW_GO + publish contract.
 - [ ] **Paste-ready fix per finding** (what/where/why/next) — add #7. The core
   wedge vs. gitleaks/trufflehog/semgrep: they report for security pros; nobody
   explains the patch to a non-security founder. This is getAdvantage DNA

@@ -33,10 +33,12 @@ function levelForStatus(status) {
 export function isSecurityRule(ruleId, finding, checkLabel) {
   const id = String(ruleId || "");
   if (id.startsWith("secret/")) return true;
+  if (id.startsWith("supabase/")) return true;
   if (id === "check/tracked-env-file" || id.startsWith("check/tracked-env")) return true;
   if (finding?.patternId) return true;
   const label = String(checkLabel || "").toLowerCase();
   if (/^secret\b/.test(label) || /tracked\s*\.env/.test(label)) return true;
+  if (/supabase\s*rls|ungated\s*mutation/i.test(label)) return true;
   return false;
 }
 

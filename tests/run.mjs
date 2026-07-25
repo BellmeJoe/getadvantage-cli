@@ -127,6 +127,14 @@
 //                                     embedded string fixtures never surface as live
 //                                     routes; exact-path disclosed policy (not tests/**)
 //                                     can authorize product-owned hostile fixtures
+//  49. Supabase RLS / ungated mutations (0.10.x) — policy-state table model:
+//                                     public.todos RLS disabled → NO-GO + location +
+//                                     paste-ready remediation; USING/WITH CHECK true
+//                                     write policy → NO-GO; ENABLE + restrictive
+//                                     authenticated policy → GO; comments/strings/
+//                                     test fixtures ignored; service-role edge path
+//                                     not public; dynamic wrapper → WARN not GO;
+//                                     no Supabase evidence → skip; packed cold path
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -7587,6 +7595,381 @@ scenario("dogfood: product check completes without raw Intent git noise; hostile
   assert.ok(/tests\/run\.mjs/i.test(JSON.stringify(sec)), "NO-GO must cite tests/run.mjs");
   const ic = (doc.checks || []).find((c) => /Intent Contract/i.test(c.label));
   assert.equal(ic, undefined, "product without trusted Intent freeze must omit intent check");
+});
+
+// ---------------------------------------------------------------------------
+// 49. Supabase RLS / ungated mutations — policy-state table model (0.10.x)
+// ---------------------------------------------------------------------------
+
+function findRlsCheck(doc) {
+  return (doc.checks || []).find((c) => /Supabase RLS/i.test(c.label));
+}
+
+scenario("supabase-rls: public.todos with RLS disabled → NO-GO + location + paste-ready remediation", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-off");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-off", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "-- create todos without RLS",
+        "CREATE TABLE public.todos (",
+        "  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id uuid,",
+        "  title text",
+        ");",
+        "ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: todos rls off");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `RLS disabled must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", `expected RLS fail, got ${JSON.stringify(rls)}`);
+    const blob = JSON.stringify(rls);
+    assert.ok(/supabase\/migrations\/20240101000000_init\.sql/.test(blob), `must cite migration file:\n${blob}`);
+    assert.ok(/public\.todos|todos/i.test(blob), `must name table:\n${blob}`);
+    assert.ok(/ENABLE ROW LEVEL SECURITY/i.test(blob), `must include paste-ready ENABLE remediation:\n${blob}`);
+    assert.ok(
+      Array.isArray(rls.findings) && rls.findings.some((f) => f.ruleId === "supabase/rls-disabled"),
+      `ruleId supabase/rls-disabled expected:\n${blob}`,
+    );
+    assert.ok(
+      rls.findings.some((f) => typeof f.startLine === "number" && f.startLine >= 1),
+      `must include startLine:\n${blob}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: permissive USING (true) write policy → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-open-policy");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-open", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_create.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid, title text);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_open_policy.sql",
+      [
+        '-- open write (classic AI-app hole)',
+        'CREATE POLICY "allow all writes"',
+        "  ON public.todos",
+        "  FOR ALL",
+        "  TO anon, authenticated",
+        "  USING (true)",
+        "  WITH CHECK (true);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: open policy");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `permissive write policy must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    const blob = JSON.stringify(rls);
+    assert.ok(/20240102000000_open_policy\.sql/.test(blob), `must cite policy migration:\n${blob}`);
+    assert.ok(
+      rls.findings.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `ruleId supabase/permissive-write-policy expected:\n${blob}`,
+    );
+    assert.ok(/USING \(true\)|WITH CHECK \(true\)|auth\.uid\(\)/i.test(blob), `remediation must be usable:\n${blob}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: ENABLE RLS + restrictive authenticated policy → GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-ok");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-ok", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_secure.sql",
+      [
+        "CREATE TABLE public.todos (",
+        "  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),",
+        "  user_id uuid NOT NULL,",
+        "  title text",
+        ");",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner_all"',
+        "  ON public.todos",
+        "  FOR ALL",
+        "  TO authenticated",
+        "  USING (auth.uid() = user_id)",
+        "  WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: secure todos");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `restrictive RLS must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
+    assert.ok(!rls.findings || rls.findings.length === 0, "no findings on secure migration");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: comments, strings, and test fixtures do NOT create findings", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-noise");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-noise", version: "1.0.0", private: true }, null, 2) + "\n");
+    // Real migration is secure.
+    write(
+      repo,
+      "supabase/migrations/20240101000000_ok.sql",
+      [
+        "CREATE TABLE public.notes (id uuid PRIMARY KEY, user_id uuid, body text);",
+        "ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "notes_owner" ON public.notes FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "-- commented trap: ALTER TABLE public.notes DISABLE ROW LEVEL SECURITY;",
+        "/* CREATE POLICY \"open\" ON public.notes FOR ALL USING (true) WITH CHECK (true); */",
+        "",
+      ].join("\n"),
+    );
+    // Fixture path must be ignored even if it looks like a migration.
+    write(
+      repo,
+      "tests/fixtures/supabase/migrations/999_open.sql",
+      "CREATE TABLE public.todos (id int);\nALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;\n",
+    );
+    // String-like doc outside supabase layout.
+    write(
+      repo,
+      "docs/rls-examples.md",
+      "Example: `CREATE POLICY open ON public.todos FOR ALL USING (true)` — docs only.\n",
+    );
+    commitAll(repo, "chore: noise only");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `comments/fixtures must not NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: service-role edge path is NOT claimed public; dynamic wrapper → WARN not GO-safe", () => {
+  const base = freshBase();
+  try {
+    // (a) service-role only: no fail as public
+    const repoSrv = path.join(base, "edge-service");
+    initRepo(repoSrv);
+    write(repoSrv, "package.json", JSON.stringify({ name: "edge-service", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repoSrv,
+      "supabase/migrations/20240101000000_ok.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repoSrv,
+      "supabase/functions/admin-purge/index.ts",
+      [
+        "import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';",
+        "const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);",
+        "Deno.serve(async () => {",
+        "  await supabase.from('todos').delete().neq('id', '00000000-0000-0000-0000-000000000000');",
+        "  return new Response('ok');",
+        "});",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repoSrv, "chore: service role edge");
+    const rSrv = run(["check", "--json", "--no-overview", "--no-brief-check"], repoSrv);
+    assert.equal(rSrv.code, 0, `service-role must not false-public NO-GO\n${rSrv.stderr}\n${rSrv.stdout}`);
+    const docSrv = parseJson(rSrv);
+    assert.equal(docSrv.verdict, "GO");
+    const rlsSrv = findRlsCheck(docSrv);
+    assert.ok(rlsSrv && rlsSrv.status === "pass", JSON.stringify(rlsSrv));
+    assert.ok(
+      !JSON.stringify(rlsSrv).includes("public access") || rlsSrv.status === "pass",
+      "must not claim service-role as public access",
+    );
+
+    // (b) dynamic wrapper without migrations → warn / not-checkable, never pass claiming security
+    const repoDyn = path.join(base, "edge-dynamic");
+    initRepo(repoDyn);
+    write(repoDyn, "package.json", JSON.stringify({ name: "edge-dyn", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repoDyn,
+      "supabase/functions/mutate/index.ts",
+      [
+        "import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';",
+        "const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!);",
+        "export async function mutate(tableName: string, row: unknown) {",
+        "  return supabase.from(tableName).insert(row);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repoDyn, "chore: dynamic edge");
+    const rDyn = run(["check", "--json", "--no-overview", "--no-brief-check"], repoDyn);
+    // warn keeps GO exit 0, but status must not be pass claiming safety
+    const docDyn = parseJson(rDyn);
+    const rlsDyn = findRlsCheck(docDyn);
+    assert.ok(rlsDyn, "RLS check must run when edge functions present");
+    assert.ok(
+      rlsDyn.status === "warn" || rlsDyn.status === "fail",
+      `dynamic wrapper must be warn/fail, never pass: ${JSON.stringify(rlsDyn)}`,
+    );
+    assert.notEqual(rlsDyn.status, "pass", "not checkable ≠ GO pass");
+    const dynBlob = JSON.stringify(rlsDyn);
+    assert.ok(
+      /not checkable|not statically checkable|dynamic/i.test(dynBlob),
+      `must disclose incomplete evidence:\n${dynBlob}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: no Supabase evidence → honest skip; cross-file final state DISABLE after ENABLE → NO-GO", () => {
+  const base = freshBase();
+  try {
+    // skip when absent
+    const repoNone = path.join(base, "no-sb");
+    initRepo(repoNone);
+    write(repoNone, "package.json", JSON.stringify({ name: "no-sb", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repoNone, "app.js", "export const ok = 1;\n");
+    commitAll(repoNone, "chore: plain");
+    const rNone = run(["check", "--json", "--no-overview", "--no-brief-check"], repoNone);
+    assert.equal(rNone.code, 0, rNone.stderr);
+    const docNone = parseJson(rNone);
+    const rlsNone = findRlsCheck(docNone);
+    assert.ok(rlsNone && rlsNone.status === "skip", `absent evidence must skip: ${JSON.stringify(rlsNone)}`);
+    assert.ok(/no Supabase|Skipped/i.test(rlsNone.detail), rlsNone.detail);
+
+    // cross-file: later migration disables RLS → final state unsafe
+    const repoX = path.join(base, "cross-file");
+    initRepo(repoX);
+    write(repoX, "package.json", JSON.stringify({ name: "cross", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repoX,
+      "supabase/migrations/20240101000000_enable.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repoX,
+      "supabase/migrations/20240115000000_oops_disable.sql",
+      "ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;\n",
+    );
+    commitAll(repoX, "chore: later disable");
+    const rX = run(["check", "--json", "--no-overview", "--no-brief-check"], repoX);
+    assert.equal(rX.code, 1, `later DISABLE must NO-GO\n${rX.stderr}\n${rX.stdout}`);
+    const docX = parseJson(rX);
+    assert.equal(docX.verdict, "NO-GO");
+    const rlsX = findRlsCheck(docX);
+    assert.ok(rlsX && rlsX.status === "fail");
+    assert.ok(/20240115000000_oops_disable\.sql/.test(JSON.stringify(rlsX)), "must cite later migration");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: packed cold path — RLS-disabled fixture NO-GO with remediation", () => {
+  const base = freshBase();
+  try {
+    const packDir = path.join(base, "pack");
+    mkdirSync(packDir, { recursive: true });
+    const pkgRoot = path.join(__dirname, "..");
+    execFileSync("npm", ["pack", pkgRoot, "--pack-destination", packDir], {
+      cwd: packDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const tgz = readdirSync(packDir).find((f) => f.endsWith(".tgz"));
+    assert.ok(tgz, "tarball expected");
+    const cold = path.join(base, "cold");
+    mkdirSync(cold, { recursive: true });
+    execFileSync("npm", ["install", "--no-save", "--prefix", cold, path.join(packDir, tgz)], {
+      cwd: cold,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32",
+    });
+    const bin = path.join(cold, "node_modules", "getadvantage", "index.mjs");
+    assert.ok(existsSync(bin), "packed index.mjs");
+
+    const sample = path.join(base, "sample");
+    initRepo(sample);
+    write(sample, "package.json", JSON.stringify({ name: "cold-rls", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      sample,
+      "supabase/migrations/20240601000000_todos.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, title text);",
+        "ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(sample, "chore: cold rls off");
+
+    const r = spawnSync(process.execPath, [bin, "check", "--json", "--no-overview", "--no-brief-check"], {
+      cwd: sample,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+      env: buildEnv(),
+    });
+    assert.equal(r.status, 1, `cold packed must NO-GO on RLS off:\n${r.stderr}\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    const blob = JSON.stringify(rls);
+    assert.ok(/20240601000000_todos\.sql/.test(blob), blob);
+    assert.ok(/ENABLE ROW LEVEL SECURITY/i.test(blob), `cold remediation:\n${blob}`);
+    assert.ok(rls.findings?.some((f) => String(f.ruleId).startsWith("supabase/")), "supabase/* ruleId");
+  } finally {
+    cleanup(base);
+  }
 });
 
 // ---------------------------------------------------------------------------

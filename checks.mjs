@@ -937,3 +937,834 @@ export function checkSchemaBump(cwd, baseRef = "main", project = null) {
 
   return result("pass", "Schema-bump check", `${DB_PATH} changed but no DDL-shaped statements were touched.`);
 }
+
+// ===========================================================================
+// e. SUPABASE RLS / UNGATED MUTATIONS (static policy-state model)
+// ===========================================================================
+// Local-only static check over Supabase migration SQL (+ optional Edge
+// Function sources). Tracks ENABLE/DISABLE RLS and CREATE POLICY per table
+// across migration files ordered by path name, then evaluates the FINAL
+// static state.
+//
+// Proven risk (NO-GO / fail):
+//   • public schema table with final RLS disabled (or never enabled after
+//     CREATE TABLE) — classic AI-app public write surface via PostgREST
+//   • CREATE POLICY with USING (true) / WITH CHECK (true) on write commands
+//     (INSERT/UPDATE/DELETE/ALL) for public/anon/authenticated (or open TO)
+//
+// Incomplete / dynamic / malformed → warn or skip, NEVER pass claiming security.
+// No Supabase migration/function evidence → honest skip (not a green seal).
+// Does NOT execute SQL, call Supabase, or prove end-to-end authorization.
+// Comments stripped; test/fixture path patterns ignored.
+
+const SUPABASE_RLS_LABEL = "Supabase RLS / ungated mutations";
+
+/** Paths that look like test/fixture samples — never produce findings. */
+function isSupabaseFixturePath(rel) {
+  const p = String(rel || "").replace(/\\/g, "/").toLowerCase();
+  if (
+    /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|mocks?|__mocks__|samples?|testdata|goldens?)(\/|$)/.test(p)
+  ) {
+    return true;
+  }
+  if (/\.(test|spec)\.(sql|ts|js|mjs|cjs|tsx|jsx)$/.test(p)) return true;
+  if (/(^|\/)(docs?|examples?|demo)(\/|$)/.test(p) && !/supabase\//.test(p)) return true;
+  return false;
+}
+
+/** True when a tracked path is a Supabase migration SQL file. */
+function isSupabaseMigrationSql(rel) {
+  const p = String(rel || "").replace(/\\/g, "/");
+  if (!/\.sql$/i.test(p)) return false;
+  // Canonical layout + common variants under monorepos.
+  if (/\/supabase\/migrations\//i.test(`/${p}`)) return true;
+  if (/^supabase\/migrations\//i.test(p)) return true;
+  return false;
+}
+
+/** True when a tracked path is a Supabase Edge Function source file. */
+function isSupabaseEdgeFunctionSource(rel) {
+  const p = String(rel || "").replace(/\\/g, "/");
+  if (!/\.(ts|js|mjs|tsx|jsx)$/i.test(p)) return false;
+  if (/\/supabase\/functions\//i.test(`/${p}`)) return true;
+  if (/^supabase\/functions\//i.test(p)) return true;
+  return false;
+}
+
+/** Strip SQL line/block comments so commented policy text never matches. */
+function stripSqlComments(text) {
+  let out = "";
+  let i = 0;
+  const s = String(text || "");
+  let inLine = false;
+  let inBlock = false;
+  let inSingle = false;
+  let inDouble = false;
+  while (i < s.length) {
+    const ch = s[i];
+    const next = s[i + 1];
+    if (inLine) {
+      if (ch === "\n") {
+        inLine = false;
+        out += ch;
+      }
+      i++;
+      continue;
+    }
+    if (inBlock) {
+      if (ch === "*" && next === "/") {
+        inBlock = false;
+        i += 2;
+        out += "  ";
+        continue;
+      }
+      // Preserve newlines so line numbers stay stable for residual text.
+      if (ch === "\n") out += "\n";
+      else out += " ";
+      i++;
+      continue;
+    }
+    if (inSingle) {
+      out += ch;
+      if (ch === "'" && next === "'") {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === "'") inSingle = false;
+      i++;
+      continue;
+    }
+    if (inDouble) {
+      out += ch;
+      if (ch === '"') inDouble = false;
+      i++;
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      inLine = true;
+      out += "  ";
+      i += 2;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      inBlock = true;
+      out += "  ";
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      out += ch;
+      i++;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Normalize schema.table (default schema = public). */
+function normalizeTableName(raw) {
+  let t = String(raw || "").trim();
+  // Strip optional quotes around identifiers.
+  t = t.replace(/"/g, "");
+  if (!t) return null;
+  const parts = t.split(".").map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 1) return { schema: "public", name: parts[0].toLowerCase(), full: `public.${parts[0].toLowerCase()}` };
+  if (parts.length >= 2) {
+    const schema = parts[0].toLowerCase();
+    const name = parts[1].toLowerCase();
+    return { schema, name, full: `${schema}.${name}` };
+  }
+  return null;
+}
+
+/** True when a parenthesized SQL expression is literally `true` (optional casts/whitespace). */
+function isLiteralTrueExpr(expr) {
+  if (expr == null) return false;
+  const e = String(expr)
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  // pure true, true::boolean, (true), (((true)))
+  let s = e;
+  while (s.startsWith("(") && s.endsWith(")")) {
+    s = s.slice(1, -1).trim();
+  }
+  return s === "true" || s === "true::boolean" || s === "true::bool";
+}
+
+/**
+ * Extract balanced parentheses content starting at `openIdx` (must point at `(`).
+ * Returns { inner, end } or null if unbalanced / too deep / dynamic.
+ */
+function extractParen(text, openIdx) {
+  if (openIdx < 0 || text[openIdx] !== "(") return null;
+  let depth = 0;
+  let inSingle = false;
+  for (let i = openIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (inSingle) {
+      if (ch === "'" && text[i + 1] === "'") {
+        i++;
+        continue;
+      }
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return { inner: text.slice(openIdx + 1, i), end: i };
+    }
+  }
+  return null; // unbalanced
+}
+
+/** 1-based line of a character offset (text may still contain original newlines). */
+function lineOfOffset(text, offset) {
+  let line = 1;
+  const n = Math.min(offset, text.length);
+  for (let i = 0; i < n; i++) if (text[i] === "\n") line++;
+  return line;
+}
+
+/**
+ * Parse one migration file into ordered events against the policy-state model.
+ * Returns { events, incomplete: string[] } — incomplete covers malformed bits.
+ */
+function parseMigrationEvents(rel, rawText) {
+  const text = stripSqlComments(rawText);
+  const events = [];
+  const incomplete = [];
+
+  // CREATE TABLE [IF NOT EXISTS] [schema.]name
+  const createTableRe =
+    /\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of text.matchAll(createTableRe)) {
+    const table = normalizeTableName(m[1]);
+    if (!table) continue;
+    events.push({
+      kind: "create_table",
+      table,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
+  // DROP TABLE
+  const dropTableRe =
+    /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of text.matchAll(dropTableRe)) {
+    const table = normalizeTableName(m[1]);
+    if (!table) continue;
+    events.push({
+      kind: "drop_table",
+      table,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
+  // ALTER TABLE … ENABLE|DISABLE ROW LEVEL SECURITY
+  const rlsRe =
+    /\bALTER\s+TABLE\s+(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+(ENABLE|DISABLE)\s+ROW\s+LEVEL\s+SECURITY\b/gi;
+  for (const m of text.matchAll(rlsRe)) {
+    const table = normalizeTableName(m[1]);
+    if (!table) continue;
+    events.push({
+      kind: "rls",
+      table,
+      enabled: m[2].toUpperCase() === "ENABLE",
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+      raw: m[0].replace(/\s+/g, " ").trim(),
+    });
+  }
+
+  // CREATE POLICY "name" ON table [AS …] [FOR cmd] [TO roles] [USING (…)] [WITH CHECK (…)]
+  // High-confidence static shapes only. Dynamic SQL / EXECUTE format → incomplete.
+  const policyStartRe =
+    /\bCREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([^\s(]+))\s+ON\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of text.matchAll(policyStartRe)) {
+    const policyName = m[1] || m[2] || m[3] || "(unnamed)";
+    const table = normalizeTableName(m[4]);
+    if (!table) {
+      incomplete.push(`${rel}:${lineOfOffset(text, m.index)}: CREATE POLICY with unparseable table`);
+      continue;
+    }
+    const start = m.index;
+    // Slice forward to next semicolon (or 2 KB) for the rest of the statement.
+    let endSemi = text.indexOf(";", start);
+    if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+    const stmt = text.slice(start, endSemi + 1);
+    // Detect dynamic construction we cannot safely classify.
+    if (/\|\||format\s*\(|execute\s+/i.test(stmt) && !/USING|WITH\s+CHECK/i.test(stmt)) {
+      incomplete.push(`${rel}:${lineOfOffset(text, start)}: dynamic/malformed CREATE POLICY — not statically checkable`);
+      continue;
+    }
+
+    let forCmd = "ALL";
+    const forM = /\bFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b/i.exec(stmt);
+    if (forM) forCmd = forM[1].toUpperCase();
+
+    let roles = ["public"]; // Postgres default when TO is omitted: PUBLIC
+    const toM = /\bTO\s+([^;(]+?)(?=\s+(?:USING|WITH\s+CHECK|AS\s+|FOR\s+)|\s*;)/i.exec(stmt);
+    if (toM) {
+      roles = toM[1]
+        .split(",")
+        .map((r) => r.trim().replace(/^["']|["']$/g, "").toLowerCase())
+        .filter(Boolean);
+      if (roles.length === 0) roles = ["public"];
+    }
+
+    let usingExpr = null;
+    let withCheckExpr = null;
+    let usingTrue = false;
+    let withCheckTrue = false;
+    let usingParseOk = true;
+    let withCheckParseOk = true;
+
+    const usingIdx = stmt.search(/\bUSING\s*\(/i);
+    if (usingIdx >= 0) {
+      const open = stmt.indexOf("(", usingIdx);
+      const bal = extractParen(stmt, open);
+      if (!bal) {
+        usingParseOk = false;
+        incomplete.push(`${rel}:${lineOfOffset(text, start)}: unbalanced USING (…) in CREATE POLICY`);
+      } else {
+        usingExpr = bal.inner;
+        usingTrue = isLiteralTrueExpr(bal.inner);
+      }
+    }
+
+    const wcIdx = stmt.search(/\bWITH\s+CHECK\s*\(/i);
+    if (wcIdx >= 0) {
+      const open = stmt.indexOf("(", wcIdx);
+      const bal = extractParen(stmt, open);
+      if (!bal) {
+        withCheckParseOk = false;
+        incomplete.push(`${rel}:${lineOfOffset(text, start)}: unbalanced WITH CHECK (…) in CREATE POLICY`);
+      } else {
+        withCheckExpr = bal.inner;
+        withCheckTrue = isLiteralTrueExpr(bal.inner);
+      }
+    }
+
+    events.push({
+      kind: "create_policy",
+      table,
+      policyName,
+      forCmd,
+      roles,
+      usingExpr,
+      withCheckExpr,
+      usingTrue,
+      withCheckTrue,
+      usingParseOk,
+      withCheckParseOk,
+      file: rel,
+      line: lineOfOffset(text, start),
+      index: start,
+      raw: stmt.replace(/\s+/g, " ").trim().slice(0, 200),
+    });
+  }
+
+  // DROP POLICY [IF EXISTS] name ON table
+  const dropPolRe =
+    /\bDROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;]+))\s+ON\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of text.matchAll(dropPolRe)) {
+    const policyName = m[1] || m[2] || m[3];
+    const table = normalizeTableName(m[4]);
+    if (!table || !policyName) continue;
+    events.push({
+      kind: "drop_policy",
+      table,
+      policyName,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
+  // Sort events in this file by appearance order.
+  events.sort((a, b) => a.index - b.index || a.line - b.line);
+  return { events, incomplete };
+}
+
+/** Roles that count as a client-facing (non service-role) surface. */
+function isClientFacingRole(role) {
+  const r = String(role || "").toLowerCase();
+  if (r === "service_role" || r === "supabase_admin" || r === "postgres") return false;
+  // public, anon, authenticated, or any custom role — treat as client-facing
+  // when paired with a literal-true predicate (proven ungated for that role).
+  return true;
+}
+
+/** Write-shaped commands (the ship-risk surface). SELECT-only USING(true) is not write. */
+function isWriteCommand(forCmd) {
+  const c = String(forCmd || "ALL").toUpperCase();
+  return c === "ALL" || c === "INSERT" || c === "UPDATE" || c === "DELETE";
+}
+
+/**
+ * Apply ordered events → final per-table state map.
+ * @returns {Map<string, object>}
+ */
+function buildPolicyState(allEvents) {
+  /** @type {Map<string, any>} */
+  const tables = new Map();
+
+  function ensure(table) {
+    const k = table.full;
+    if (!tables.has(k)) {
+      tables.set(k, {
+        table,
+        // Postgres default: RLS off until ENABLE. Unknown until we see CREATE or RLS.
+        seenCreate: false,
+        rlsEnabled: null, // null = never touched; false/true after ALTER
+        rlsLast: null, // {file,line,enabled}
+        createLoc: null,
+        policies: new Map(), // name → policy
+      });
+    }
+    return tables.get(k);
+  }
+
+  for (const ev of allEvents) {
+    if (ev.kind === "create_table") {
+      const st = ensure(ev.table);
+      st.seenCreate = true;
+      st.createLoc = { file: ev.file, line: ev.line };
+      // Fresh table: RLS off by default in Postgres.
+      if (st.rlsEnabled === null) st.rlsEnabled = false;
+      st.policies.clear();
+    } else if (ev.kind === "drop_table") {
+      tables.delete(ev.table.full);
+    } else if (ev.kind === "rls") {
+      const st = ensure(ev.table);
+      st.rlsEnabled = ev.enabled;
+      st.rlsLast = { file: ev.file, line: ev.line, enabled: ev.enabled, raw: ev.raw };
+    } else if (ev.kind === "create_policy") {
+      const st = ensure(ev.table);
+      st.policies.set(ev.policyName.toLowerCase(), ev);
+    } else if (ev.kind === "drop_policy") {
+      const st = tables.get(ev.table.full);
+      if (st) st.policies.delete(String(ev.policyName).toLowerCase());
+    }
+  }
+  return tables;
+}
+
+/**
+ * Evaluate final state → findings (fail) + incomplete notes (warn).
+ */
+function evaluatePolicyState(tables) {
+  const fails = [];
+  const warns = [];
+
+  for (const st of tables.values()) {
+    // Only public schema is the PostgREST default exposure surface we prove.
+    if (st.table.schema !== "public") continue;
+
+    // ---- RLS disabled (or never enabled after create) --------------------
+    // Proven when we saw CREATE TABLE (default off) or explicit DISABLE, and
+    // final rlsEnabled is false.
+    if (st.rlsEnabled === false) {
+      const loc = st.rlsLast || st.createLoc;
+      if (!loc) continue; // no location evidence — do not invent
+      const whyDisable = st.rlsLast && st.rlsLast.enabled === false;
+      fails.push({
+        ruleId: "supabase/rls-disabled",
+        label: "RLS disabled on public table",
+        file: loc.file,
+        startLine: loc.line,
+        table: st.table.full,
+        message: whyDisable
+          ? `Table ${st.table.full} has RLS DISABLED (final migration state) — PostgREST can expose unauthenticated writes when grants allow.`
+          : `Table ${st.table.full} was created without ENABLE ROW LEVEL SECURITY (final state: RLS off) — public API clients can mutate rows when grants allow.`,
+        remediation: [
+          `-- Smallest safe next edit (in a new migration):`,
+          `ALTER TABLE ${st.table.full} ENABLE ROW LEVEL SECURITY;`,
+          `-- Then add restrictive policies, e.g. owner-only writes:`,
+          `CREATE POLICY "${st.table.name}_owner_all"`,
+          `  ON ${st.table.full}`,
+          `  FOR ALL`,
+          `  TO authenticated`,
+          `  USING (auth.uid() = user_id)`,
+          `  WITH CHECK (auth.uid() = user_id);`,
+          `-- Deny-by-default: no policy for 'anon' unless a deliberate public surface.`,
+        ],
+      });
+      continue; // RLS-off dominates; policy details are secondary
+    }
+
+    // ---- Permissive write policies (USING/WITH CHECK true) ---------------
+    if (st.rlsEnabled === true || st.rlsEnabled === null) {
+      // When rlsEnabled is null we never saw CREATE/ENABLE — only policies.
+      // A permissive policy still proves a write hole if RLS is (or will be) on;
+      // if RLS is never enabled, CREATE POLICY alone is incomplete (warn).
+      for (const pol of st.policies.values()) {
+        if (!isWriteCommand(pol.forCmd)) continue;
+        const clientRoles = (pol.roles || []).filter(isClientFacingRole);
+        if (clientRoles.length === 0) continue; // service_role-only — not public
+
+        const writeOpen =
+          (pol.forCmd === "INSERT" && (pol.withCheckTrue || (pol.usingTrue && pol.withCheckExpr == null))) ||
+          (pol.forCmd === "UPDATE" && (pol.usingTrue || pol.withCheckTrue)) ||
+          (pol.forCmd === "DELETE" && pol.usingTrue) ||
+          (pol.forCmd === "ALL" && (pol.usingTrue || pol.withCheckTrue));
+
+        // Incomplete parse of USING/WITH CHECK → never claim GO; surface warn.
+        if ((!pol.usingParseOk || !pol.withCheckParseOk) && !writeOpen) {
+          warns.push({
+            ruleId: "supabase/policy-not-checkable",
+            label: "Policy not fully parseable",
+            file: pol.file,
+            startLine: pol.line,
+            table: st.table.full,
+            message: `CREATE POLICY "${pol.policyName}" on ${st.table.full} has unbalanced/malformed USING or WITH CHECK — static analysis cannot prove safety.`,
+          });
+          continue;
+        }
+
+        if (!writeOpen) continue;
+
+        // If we only saw CREATE POLICY and never ENABLE RLS, the policy is
+        // inert until RLS is on — still a proven intent to open writes, but
+        // if RLS is off we already NO-GO above. When rlsEnabled is null
+        // (policy-only files, no CREATE/ENABLE), treat as fail if clearly
+        // permissive — the policy text is the evidence of public write intent
+        // once RLS is turned on, and is itself the ship-risk shape.
+        if (st.rlsEnabled === null && !st.seenCreate) {
+          // Policy without any table/RLS context: still fail on clear USING(true)
+          // write policy — that source evidence is the classic Lovable hole.
+        }
+
+        const roleList = clientRoles.join(", ");
+        const which =
+          pol.usingTrue && pol.withCheckTrue
+            ? "USING (true) and WITH CHECK (true)"
+            : pol.usingTrue
+              ? "USING (true)"
+              : "WITH CHECK (true)";
+        fails.push({
+          ruleId: "supabase/permissive-write-policy",
+          label: "Permissive write policy (USING/WITH CHECK true)",
+          file: pol.file,
+          startLine: pol.line,
+          table: st.table.full,
+          message: `Policy "${pol.policyName}" on ${st.table.full} FOR ${pol.forCmd} TO ${roleList} uses ${which} — any matching role can write/delete without a row predicate.`,
+          remediation: [
+            `-- Smallest safe next edit: replace the open predicate with an ownership (or equivalent) check.`,
+            `-- Example (drop + recreate; adjust column names to your schema):`,
+            `DROP POLICY IF EXISTS "${pol.policyName}" ON ${st.table.full};`,
+            `CREATE POLICY "${pol.policyName}"`,
+            `  ON ${st.table.full}`,
+            `  FOR ${pol.forCmd === "ALL" ? "ALL" : pol.forCmd}`,
+            `  TO ${clientRoles.includes("authenticated") || clientRoles.includes("public") ? "authenticated" : clientRoles[0]}`,
+            `  USING (auth.uid() = user_id)`,
+            `  WITH CHECK (auth.uid() = user_id);`,
+            `-- Do not ship USING (true) / WITH CHECK (true) on INSERT/UPDATE/DELETE/ALL for anon/authenticated/public.`,
+          ],
+        });
+      }
+    }
+  }
+
+  return { fails, warns };
+}
+
+/**
+ * Edge Function secondary scan — high bar only.
+ * Never treat service-role clients as public. Dynamic wrappers → warn.
+ * Do not infer auth from import/env alone.
+ */
+function scanEdgeFunctions(files, readText) {
+  const warns = [];
+  const incomplete = [];
+
+  for (const rel of files) {
+    let text;
+    try {
+      text = readText(rel);
+    } catch {
+      continue;
+    }
+    if (!text) continue;
+
+    // Strip // and /* */ comments roughly so commented mutations don't match.
+    const cleaned = text
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+
+    const hasServiceRole =
+      /service[_-]?role/i.test(cleaned) ||
+      /SERVICE_ROLE/i.test(text) ||
+      /createClient\s*\(\s*[^,]+,\s*[^,)]*service[_-]?role/i.test(cleaned);
+
+    // Explicit service-role client construction → server-only; do not claim public.
+    if (hasServiceRole && !/\.from\s*\(/.test(cleaned)) continue;
+
+    // Dynamic table / method — not statically checkable.
+    const dynamicFrom =
+      /\.from\s*\(\s*[`'"]?\s*\+|`[^`]*\$\{|\.from\s*\(\s*[a-zA-Z_$][\w$]*\s*\)/.test(cleaned) &&
+      !/\.from\s*\(\s*['"][a-zA-Z_][\w$]*['"]\s*\)/.test(cleaned);
+    const mutRe =
+      /\.from\s*\(\s*['"]([a-zA-Z_][\w$]*)['"]\s*\)\s*(?:\.\s*(?:select|insert|update|delete|upsert)\s*\(|[\s\S]{0,120}?\.\s*(insert|update|delete|upsert)\s*\()/gi;
+
+    let sawExplicitMutation = false;
+    let sawDynamicMutation = false;
+    const mutMethods = new Set();
+    let firstMutLine = null;
+    let firstMutTable = null;
+
+    for (const m of cleaned.matchAll(mutRe)) {
+      const method = (m[2] || (m[0].match(/\.(insert|update|delete|upsert)\s*\(/i) || [])[1] || "").toLowerCase();
+      if (!method || method === "select") continue;
+      sawExplicitMutation = true;
+      mutMethods.add(method);
+      if (firstMutLine == null) {
+        firstMutLine = lineOfOffset(cleaned, m.index);
+        firstMutTable = m[1];
+      }
+    }
+
+    // Broader dynamic: supabase.from(variable).delete()
+    if (
+      /\.from\s*\(\s*[a-zA-Z_$][\w$]*\s*\)\s*[\s\S]{0,80}?\.\s*(insert|update|delete|upsert)\s*\(/i.test(
+        cleaned,
+      )
+    ) {
+      sawDynamicMutation = true;
+    }
+
+    if (dynamicFrom || sawDynamicMutation) {
+      incomplete.push({
+        ruleId: "supabase/edge-mutation-not-checkable",
+        label: "Edge Function mutation not statically checkable",
+        file: rel,
+        startLine: firstMutLine || 1,
+        message: `Edge Function ${rel} uses a dynamic table/wrapper for mutations — static analysis cannot prove whether the call is public or authorized.`,
+      });
+      continue;
+    }
+
+    if (!sawExplicitMutation) continue;
+
+    // Service-role path with explicit mutations: server-only — do NOT claim public access.
+    if (hasServiceRole) {
+      // Honest non-finding: service role bypasses RLS by design; not a public surface.
+      continue;
+    }
+
+    // Explicit string-table write without any auth.getUser / getSession / requireAuth
+    // evidence in the same file → warn (not fail — edge functions may rely on
+    // gateway JWT verification we cannot see statically).
+    const hasAuthEvidence =
+      /\.auth\s*\.\s*(getUser|getSession|getClaims)\s*\(/.test(cleaned) ||
+      /\brequireAuth\b|\bverifyJWT\b|\bassertUser\b/i.test(cleaned) ||
+      /Authorization/i.test(cleaned) && /getUser|jwt|bearer/i.test(cleaned);
+
+    if (!hasAuthEvidence) {
+      warns.push({
+        ruleId: "supabase/edge-ungated-mutation",
+        label: "Edge Function mutation without local auth evidence",
+        file: rel,
+        startLine: firstMutLine || 1,
+        message: `Edge Function mutates table "${firstMutTable || "?"}" via .${[...mutMethods].join("/")}() with no local auth.getUser/getSession evidence — not proven public, but not proven gated either.`,
+        remediation: [
+          `// Smallest safe next edit: verify the caller before mutating.`,
+          `const { data: { user }, error } = await supabase.auth.getUser();`,
+          `if (error || !user) return new Response("Unauthorized", { status: 401 });`,
+          `// Then scope writes with .eq("user_id", user.id) (or equivalent).`,
+          `// Static check cannot see gateway JWT settings — confirm them in the dashboard too.`,
+        ],
+      });
+    }
+  }
+
+  return { warns, incomplete };
+}
+
+/**
+ * Supabase RLS / ungated-mutation static check (policy-state table model).
+ * @param {string} cwd
+ * @returns {{status,label,detail,extra,findings?}}
+ */
+export function checkSupabaseRls(cwd) {
+  // Tracked + untracked-not-ignored (same ship surface as secret scan).
+  const allFiles = [];
+  {
+    const set = new Set();
+    for (const f of gitFilesZ(["ls-files"], { cwd })) set.add(f);
+    for (const f of gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })) set.add(f);
+    allFiles.push(...set);
+  }
+
+  const migrations = allFiles
+    .filter((f) => isSupabaseMigrationSql(f) && !isSupabaseFixturePath(f))
+    .sort((a, b) => a.replace(/\\/g, "/").localeCompare(b.replace(/\\/g, "/")));
+
+  const edgeFns = allFiles
+    .filter((f) => isSupabaseEdgeFunctionSource(f) && !isSupabaseFixturePath(f))
+    .sort((a, b) => a.replace(/\\/g, "/").localeCompare(b.replace(/\\/g, "/")));
+
+  if (migrations.length === 0 && edgeFns.length === 0) {
+    return result(
+      "skip",
+      SUPABASE_RLS_LABEL,
+      "Skipped — no Supabase migration SQL or Edge Function sources found (nothing to check).",
+    );
+  }
+
+  const readText = (rel) => {
+    const abs = path.join(cwd, rel);
+    if (!existsSync(abs)) return null;
+    try {
+      const st = statSync(abs);
+      if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
+      const buf = readFileSync(abs);
+      // Reuse secret-scan binary skip: null-byte early → skip.
+      if (looksBinary(buf)) return null;
+      return buf.toString("utf8");
+    } catch {
+      return null;
+    }
+  };
+
+  const allEvents = [];
+  const incompleteNotes = [];
+  let migrationsRead = 0;
+
+  for (const rel of migrations) {
+    const raw = readText(rel);
+    if (raw == null) {
+      incompleteNotes.push(`${rel}: unreadable or oversized — not fully checkable`);
+      continue;
+    }
+    migrationsRead++;
+    const { events, incomplete } = parseMigrationEvents(rel, raw);
+    allEvents.push(...events);
+    incompleteNotes.push(...incomplete);
+  }
+
+  // Cross-file order: migration path name (Supabase timestamp prefixes sort correctly).
+  allEvents.sort((a, b) => {
+    const fa = a.file.replace(/\\/g, "/");
+    const fb = b.file.replace(/\\/g, "/");
+    if (fa !== fb) return fa.localeCompare(fb);
+    return a.index - b.index || a.line - b.line;
+  });
+
+  const tables = buildPolicyState(allEvents);
+  const { fails, warns: polWarns } = evaluatePolicyState(tables);
+
+  // Edge functions: optional secondary, high bar.
+  const edge = edgeFns.length > 0 ? scanEdgeFunctions(edgeFns, readText) : { warns: [], incomplete: [] };
+
+  const allFails = [...fails];
+  const allWarns = [...polWarns, ...edge.warns, ...edge.incomplete];
+  for (const n of incompleteNotes) {
+    allWarns.push({
+      ruleId: "supabase/sql-not-checkable",
+      label: "SQL not fully checkable",
+      file: String(n).split(":")[0] || "",
+      message: String(n),
+    });
+  }
+
+  const honesty =
+    "Static migration/policy evidence only — not a proof of end-to-end authorization or live Supabase config.";
+
+  // Build structured findings for SARIF/JSON.
+  const toFinding = (f, level) => ({
+    ruleId: f.ruleId,
+    label: f.label || f.ruleId,
+    file: f.file || undefined,
+    ...(typeof f.startLine === "number" ? { startLine: f.startLine } : {}),
+    message: f.message,
+    ...(f.table ? { table: f.table } : {}),
+    level,
+  });
+
+  if (allFails.length > 0) {
+    const findings = allFails.map((f) => toFinding(f, "fail"));
+    // Also attach warns as findings so JSON consumers see incomplete bits.
+    for (const w of allWarns) findings.push(toFinding(w, "warn"));
+
+    const extra = [];
+    for (const f of allFails.slice(0, 10)) {
+      extra.push(`${f.file}${f.startLine ? `:${f.startLine}` : ""} — ${f.message}`);
+      if (Array.isArray(f.remediation)) {
+        for (const line of f.remediation) extra.push(line);
+      }
+      extra.push(""); // blank separator
+    }
+    if (allFails.length > 10) extra.push(`…and ${allFails.length - 10} more proven RLS risks`);
+    if (allWarns.length > 0) {
+      extra.push(`${allWarns.length} additional incomplete/dynamic note${pl(allWarns.length)} (not GO-cleared):`);
+      for (const w of allWarns.slice(0, 5)) {
+        extra.push(`  ⚠ ${w.file || ""}${w.startLine ? `:${w.startLine}` : ""} — ${w.message}`);
+      }
+    }
+    extra.push(honesty);
+
+    const r = result(
+      "fail",
+      SUPABASE_RLS_LABEL,
+      `${allFails.length} proven public-write RLS risk${pl(allFails.length)} in migration final state — do not ship until fixed.`,
+      extra.filter((line, i, arr) => !(line === "" && arr[i - 1] === "")),
+    );
+    r.findings = findings;
+    return r;
+  }
+
+  if (allWarns.length > 0) {
+    const findings = allWarns.map((w) => toFinding(w, "warn"));
+    const extra = allWarns.slice(0, 15).map(
+      (w) => `${w.file || ""}${w.startLine ? `:${w.startLine}` : ""} — ${w.message}`,
+    );
+    for (const w of allWarns.slice(0, 5)) {
+      if (Array.isArray(w.remediation)) for (const line of w.remediation) extra.push(line);
+    }
+    extra.push(honesty);
+    const r = result(
+      "warn",
+      SUPABASE_RLS_LABEL,
+      `${allWarns.length} incomplete/dynamic Supabase surface${pl(allWarns.length)} — not proven safe (not checkable ≠ GO).`,
+      extra,
+    );
+    r.findings = findings;
+    return r;
+  }
+
+  // Evidence present, final state has no proven open write surface.
+  // Pass means "no proven static risk found" — not "authorization verified".
+  const tableCount = [...tables.values()].filter((t) => t.table.schema === "public").length;
+  return result(
+    "pass",
+    SUPABASE_RLS_LABEL,
+    migrationsRead > 0
+      ? `Scanned ${migrationsRead} migration${pl(migrationsRead)} (${tableCount} public table${pl(tableCount)} in final state)${edgeFns.length ? ` + ${edgeFns.length} edge function${pl(edgeFns.length)}` : ""} — no proven permissive public-write RLS surface.`
+      : `Scanned ${edgeFns.length} edge function${pl(edgeFns.length)} (no migration SQL) — no proven public-write surface.`,
+    [honesty],
+  );
+}

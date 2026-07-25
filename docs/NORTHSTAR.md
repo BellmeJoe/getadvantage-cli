@@ -77,6 +77,10 @@ lane ships or is killed. Only one implementation lane may be open.
 6. **Supabase RLS and ungated mutation checks** — static checks over migrations,
    policies, and edge functions; distinguish proven failure, warning, and
    uncheckable state.
+   **Status (2026-07-25):** **REVIEW_PENDING** (candidate 2, policy-state table
+   model) — `checkSupabaseRls` on migration final state (ENABLE/DISABLE +
+   CREATE POLICY ordered by path); NO-GO on proven public write surface; warn
+   on incomplete/dynamic; skip when absent. Not LIVE; not an end-to-end auth seal.
 7. **Paste-ready deterministic remediation** — what failed, exact location, why
    it matters, and the smallest safe next edit for every wedge finding.
 

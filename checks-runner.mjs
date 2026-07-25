@@ -11,6 +11,7 @@ import {
   checkTypecheck,
   checkBuild,
   checkSchemaBump,
+  checkSupabaseRls,
 } from "./checks.mjs";
 import {
   overviewApiSurface,
@@ -75,6 +76,11 @@ export async function runChecks(o) {
 
   // d. Schema-bump check (only on the SCHEMA_VERSION-sentinel pattern)
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
+  printResult(results[results.length - 1]);
+
+  // d2. Supabase RLS / ungated mutations — static policy-state over migrations
+  // (+ high-bar edge functions). Skip when no Supabase SQL/functions evidence.
+  results.push(safe(() => checkSupabaseRls(cwd), "Supabase RLS / ungated mutations"));
   printResult(results[results.length - 1]);
 
   // e. Intent Contract — only when a trusted freeze is present (including
@@ -223,6 +229,7 @@ export function gateTree(o) {
     results.push(safe(() => checkBuild(cwd, project), "Build"));
   }
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
+  results.push(safe(() => checkSupabaseRls(cwd), "Supabase RLS / ungated mutations"));
 
   const fails = results.filter((r) => r.status === "fail");
   return { ok: fails.length === 0, fails, results };
