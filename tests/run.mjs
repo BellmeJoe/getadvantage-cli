@@ -8174,6 +8174,406 @@ scenario("supabase-rls: real permissive USING(true) still NO-GO after quote-mask
 });
 
 // ---------------------------------------------------------------------------
+// P1 repair: CREATE TABLE IF NOT EXISTS must not erase proven policies (false-GO)
+// ---------------------------------------------------------------------------
+
+scenario("supabase-rls: CREATE TABLE IF NOT EXISTS re-decl on open table → still NO-GO (false-GO fix)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-if-not-exists-open");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-ine-open", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_idempotent_regen.sql",
+      "CREATE TABLE IF NOT EXISTS public.todos (id uuid PRIMARY KEY, user_id uuid);\n",
+    );
+    commitAll(repo, "chore: idempotent regen after open policy");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `IF NOT EXISTS must not false-GO open policy\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `must retain permissive-write-policy after IF NOT EXISTS:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: migration 1 alone with open_write → NO-GO (control)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-open-alone");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-open-alone", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: open alone");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `open policy alone must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `ruleId expected:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: DROP TABLE then fresh CREATE + owner policy → GO (real reset)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-drop-recreate");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-drop-rec", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_reset.sql",
+      [
+        "DROP TABLE public.todos;",
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner_all" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: drop and secure recreate");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `DROP+CREATE secure must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: CREATE TABLE IF NOT EXISTS on already-safe table → still GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-if-not-exists-safe");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-ine-safe", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_secure.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner_all" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_idempotent.sql",
+      "CREATE TABLE IF NOT EXISTS public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL);\n",
+    );
+    commitAll(repo, "chore: idempotent on safe table");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `IF NOT EXISTS on safe table must stay GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: IF NOT EXISTS re-decl then later new permissive policy → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-ine-then-open");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-ine-then", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_secure.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner_all" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_idempotent.sql",
+      "CREATE TABLE IF NOT EXISTS public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL);\n",
+    );
+    write(
+      repo,
+      "supabase/migrations/20240103000000_open.sql",
+      'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);\n',
+    );
+    commitAll(repo, "chore: later open after re-decl");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `later permissive after IF NOT EXISTS must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `must flag new open policy:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Extra false-GO path coverage (HEAVY budget)
+
+scenario("supabase-rls: DISABLE then re-ENABLE keeps open policy → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-disable-reenable");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-dis-re", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_toggle.sql",
+      [
+        "ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: disable re-enable");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `re-ENABLE must not drop open policy from model\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `open policy must survive RLS toggle:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: bare todos vs public.todos IF NOT EXISTS re-decl still NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-bare-vs-public");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-bare", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        // bare name normalizes to public.todos
+        "CREATE TABLE todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_regen.sql",
+      "CREATE TABLE IF NOT EXISTS public.todos (id uuid PRIMARY KEY, user_id uuid);\n",
+    );
+    commitAll(repo, "chore: bare vs public re-decl");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `bare/public must share model key\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(
+      rls?.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `schema-qualified re-decl must not erase bare-name policies:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: ALTER POLICY opens USING(true) → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-alter-policy-open");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-alter-pol", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_secure.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_alter_open.sql",
+      [
+        'ALTER POLICY "todos_owner" ON public.todos',
+        "  USING (true)",
+        "  WITH CHECK (true);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: alter policy open");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `ALTER POLICY open must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `ALTER POLICY USING(true) must be detected:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: RENAME TABLE carries open policy to new name → NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-rename-table");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-rename", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_rename.sql",
+      "ALTER TABLE public.todos RENAME TO items;\n",
+    );
+    commitAll(repo, "chore: rename open table");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `rename must carry open policy\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `open policy must follow RENAME TO items:\n${JSON.stringify(rls)}`,
+    );
+    const blob = JSON.stringify(rls);
+    assert.ok(/public\.items|items/i.test(blob), `finding should name renamed table:\n${blob}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: DROP open policy + recreate restrictive → GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-drop-policy-fix");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-drop-pol", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_open.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_fix.sql",
+      [
+        'DROP POLICY IF EXISTS "open_write" ON public.todos;',
+        'CREATE POLICY "todos_owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: drop open recreate owner");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `DROP open + owner recreate must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
 let failed = 0;

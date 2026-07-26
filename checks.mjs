@@ -1403,6 +1403,132 @@ function parseMigrationEvents(rel, rawText) {
     });
   }
 
+  // ALTER POLICY name ON table [RENAME TO …] | [TO roles] [USING (…)] [WITH CHECK (…)]
+  // Without this, opening a previously-restrictive policy via ALTER is a false-GO.
+  const alterPolRe =
+    /\bALTER\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([^\s(]+))\s+ON\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of text.matchAll(alterPolRe)) {
+    const policyName = m[1] || m[2] || m[3];
+    const table = normalizeTableName(m[4]);
+    if (!table || !policyName) {
+      incomplete.push(`${rel}:${lineOfOffset(text, m.index)}: ALTER POLICY with unparseable name/table`);
+      continue;
+    }
+    const start = m.index;
+    let endSemi = text.indexOf(";", start);
+    if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+    const stmt = text.slice(start, endSemi + 1);
+
+    const renameM = /\bRENAME\s+TO\s+(?:"([^"]+)"|'([^']+)'|([^\s;]+))/i.exec(stmt);
+    if (renameM) {
+      const renameTo = renameM[1] || renameM[2] || renameM[3];
+      events.push({
+        kind: "alter_policy",
+        table,
+        policyName,
+        renameTo,
+        file: rel,
+        line: lineOfOffset(text, start),
+        index: start,
+      });
+      continue;
+    }
+
+    let roles = null;
+    const toM = /\bTO\s+([^;(]+?)(?=\s+(?:USING|WITH\s+CHECK)|\s*;)/i.exec(stmt);
+    if (toM) {
+      roles = toM[1]
+        .split(",")
+        .map((r) => r.trim().replace(/^["']|["']$/g, "").toLowerCase())
+        .filter(Boolean);
+      if (roles.length === 0) roles = ["public"];
+    }
+
+    let usingExpr = null;
+    let withCheckExpr = null;
+    let usingTrue = false;
+    let withCheckTrue = false;
+    let usingParseOk = true;
+    let withCheckParseOk = true;
+    let usingTouched = false;
+    let withCheckTouched = false;
+
+    const usingIdx = stmt.search(/\bUSING\s*\(/i);
+    if (usingIdx >= 0) {
+      usingTouched = true;
+      const open = stmt.indexOf("(", usingIdx);
+      const bal = extractParen(stmt, open);
+      if (!bal) {
+        usingParseOk = false;
+        incomplete.push(`${rel}:${lineOfOffset(text, start)}: unbalanced USING (…) in ALTER POLICY`);
+      } else {
+        usingExpr = bal.inner;
+        usingTrue = isLiteralTrueExpr(bal.inner);
+      }
+    }
+
+    const wcIdx = stmt.search(/\bWITH\s+CHECK\s*\(/i);
+    if (wcIdx >= 0) {
+      withCheckTouched = true;
+      const open = stmt.indexOf("(", wcIdx);
+      const bal = extractParen(stmt, open);
+      if (!bal) {
+        withCheckParseOk = false;
+        incomplete.push(`${rel}:${lineOfOffset(text, start)}: unbalanced WITH CHECK (…) in ALTER POLICY`);
+      } else {
+        withCheckExpr = bal.inner;
+        withCheckTrue = isLiteralTrueExpr(bal.inner);
+      }
+    }
+
+    if (!usingTouched && !withCheckTouched && !roles) {
+      incomplete.push(
+        `${rel}:${lineOfOffset(text, start)}: ALTER POLICY without parseable USING/WITH CHECK/TO/RENAME — not fully checkable`,
+      );
+    }
+
+    events.push({
+      kind: "alter_policy",
+      table,
+      policyName,
+      roles,
+      usingExpr,
+      withCheckExpr,
+      usingTrue,
+      withCheckTrue,
+      usingParseOk,
+      withCheckParseOk,
+      usingTouched,
+      withCheckTouched,
+      file: rel,
+      line: lineOfOffset(text, start),
+      index: start,
+      raw: stmt.replace(/\s+/g, " ").trim().slice(0, 200),
+    });
+  }
+
+  // ALTER TABLE [IF EXISTS] [schema.]old RENAME TO new
+  // Move modeled RLS/policy state with the rename to avoid false-GO under the new name.
+  const renameTableRe =
+    /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+RENAME\s+TO\s+((?:"[^"]+"|[\w]+))/gi;
+  for (const m of text.matchAll(renameTableRe)) {
+    const from = normalizeTableName(m[1]);
+    if (!from) continue;
+    // RENAME TO only renames the relation within the same schema.
+    const rawTo = String(m[2] || "").replace(/"/g, "").trim();
+    if (!rawTo) continue;
+    const toTable = normalizeTableName(`${from.schema}.${rawTo}`);
+    if (!toTable) continue;
+    events.push({
+      kind: "rename_table",
+      table: from,
+      toTable,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
   // Sort events in this file by appearance order.
   events.sort((a, b) => a.index - b.index || a.line - b.line);
   return { events, incomplete };
@@ -1449,12 +1575,19 @@ function buildPolicyState(allEvents) {
 
   for (const ev of allEvents) {
     if (ev.kind === "create_table") {
+      // Only reset policy/RLS state for a *fresh* table (not already in the model).
+      // CREATE TABLE IF NOT EXISTS on an already-modeled table must not erase proven
+      // policies / ENABLE RLS — matching Postgres IF NOT EXISTS no-op semantics.
+      // Real reset path: drop_table deletes the entry, so DROP + CREATE starts clean.
+      const isFresh = !tables.has(ev.table.full);
       const st = ensure(ev.table);
       st.seenCreate = true;
       st.createLoc = { file: ev.file, line: ev.line };
-      // Fresh table: RLS off by default in Postgres.
-      if (st.rlsEnabled === null) st.rlsEnabled = false;
-      st.policies.clear();
+      if (isFresh) {
+        // Fresh table: RLS off by default in Postgres; no policies yet.
+        st.rlsEnabled = false;
+        st.policies.clear();
+      }
     } else if (ev.kind === "drop_table") {
       tables.delete(ev.table.full);
     } else if (ev.kind === "rls") {
@@ -1467,6 +1600,67 @@ function buildPolicyState(allEvents) {
     } else if (ev.kind === "drop_policy") {
       const st = tables.get(ev.table.full);
       if (st) st.policies.delete(String(ev.policyName).toLowerCase());
+    } else if (ev.kind === "alter_policy") {
+      // Update existing policy predicates / roles / rename in place so ALTER POLICY
+      // cannot silently open writes while the model still holds the old USING expr.
+      const st = tables.get(ev.table.full) || ensure(ev.table);
+      const key = String(ev.policyName).toLowerCase();
+      if (ev.renameTo) {
+        const prev = st.policies.get(key);
+        if (prev) {
+          st.policies.delete(key);
+          const renamed = { ...prev, policyName: ev.renameTo, file: ev.file, line: ev.line };
+          st.policies.set(String(ev.renameTo).toLowerCase(), renamed);
+        }
+      } else {
+        let pol = st.policies.get(key);
+        if (!pol) {
+          // ALTER without a prior CREATE we saw — seed a minimal policy so a
+          // proven-open USING/WITH CHECK still fails closed.
+          pol = {
+            kind: "alter_policy",
+            policyName: ev.policyName,
+            table: ev.table,
+            forCmd: "ALL",
+            roles: ev.roles || ["public"],
+            usingExpr: null,
+            withCheckExpr: null,
+            usingTrue: false,
+            withCheckTrue: false,
+            usingParseOk: true,
+            withCheckParseOk: true,
+            file: ev.file,
+            line: ev.line,
+          };
+          st.policies.set(key, pol);
+        }
+        if (ev.roles) pol.roles = ev.roles;
+        if (ev.usingExpr != null || ev.usingTouched) {
+          pol.usingExpr = ev.usingExpr;
+          pol.usingTrue = !!ev.usingTrue;
+          pol.usingParseOk = ev.usingParseOk !== false;
+        }
+        if (ev.withCheckExpr != null || ev.withCheckTouched) {
+          pol.withCheckExpr = ev.withCheckExpr;
+          pol.withCheckTrue = !!ev.withCheckTrue;
+          pol.withCheckParseOk = ev.withCheckParseOk !== false;
+        }
+        pol.file = ev.file;
+        pol.line = ev.line;
+      }
+    } else if (ev.kind === "rename_table") {
+      // Move modeled state to the new name so open policies cannot be stranded
+      // under a dead key (false clean under the new name).
+      const fromKey = ev.table.full;
+      const toKey = ev.toTable.full;
+      if (fromKey === toKey) continue;
+      const st = tables.get(fromKey);
+      if (st) {
+        tables.delete(fromKey);
+        st.table = ev.toTable;
+        // If target already exists, last rename wins (rare in migrations).
+        tables.set(toKey, st);
+      }
     }
   }
   return tables;
