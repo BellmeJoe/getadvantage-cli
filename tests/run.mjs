@@ -134,7 +134,10 @@
 //                                     authenticated policy → GO; comments/strings/
 //                                     test fixtures ignored; service-role edge path
 //                                     not public; dynamic wrapper → WARN not GO;
-//                                     no Supabase evidence → skip; packed cold path
+//                                     no Supabase evidence → skip; packed cold path;
+//                                     P1: COMMENT/DEFAULT/dollar-quoted RLS-like
+//                                     text must not false-GO unprotected tables;
+//                                     real top-level ENABLE + permissive still work
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -7967,6 +7970,204 @@ scenario("supabase-rls: packed cold path — RLS-disabled fixture NO-GO with rem
     assert.ok(/20240601000000_todos\.sql/.test(blob), blob);
     assert.ok(/ENABLE ROW LEVEL SECURITY/i.test(blob), `cold remediation:\n${blob}`);
     assert.ok(rls.findings?.some((f) => String(f.ruleId).startsWith("supabase/")), "supabase/* ruleId");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// P1 repair: quoted / dollar-quoted contents must not impersonate top-level RLS DDL
+scenario("supabase-rls: COMMENT ON single-quoted ENABLE RLS must not false-GO unprotected table", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-comment-trap");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-comment-trap", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_trap.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, title text);",
+        // No real ENABLE RLS — only a COMMENT whose string looks like DDL.
+        "COMMENT ON TABLE public.todos IS 'ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY';",
+        "COMMENT ON COLUMN public.todos.title IS 'also CREATE POLICY \"open\" ON public.todos FOR ALL USING (true)';",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: comment trap");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `quoted ENABLE must not mask unprotected table\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", `must fail-closed, got ${JSON.stringify(rls)}`);
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" || /rls/i.test(String(f.ruleId))),
+      `must flag unprotected public.todos, not false-GO:\n${JSON.stringify(rls)}`,
+    );
+    // Must not invent a permissive-policy finding solely from the COMMENT string.
+    assert.ok(
+      !rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `COMMENT string must not create permissive-policy finding:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: DEFAULT/string and ''-escaped quoted RLS text must not create false events", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-string-default");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-str", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_defaults.sql",
+      [
+        "CREATE TABLE public.todos (",
+        "  id uuid PRIMARY KEY,",
+        "  note text DEFAULT 'ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY',",
+        "  memo text DEFAULT 'it''s ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY ok'",
+        ");",
+        // Real table still has no ENABLE — must remain NO-GO.
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: string defaults");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `DEFAULT string ENABLE must not false-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled"),
+      `unprotected table must still fail:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: dollar-quoted body with RLS-like DDL must not false-GO unprotected table", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-dollar-quote");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-dq", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_dollar.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, title text);",
+        // $$ body contains ENABLE + open policy text — must not count as top-level DDL.
+        "SELECT $body$",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        "CREATE POLICY open_all ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);",
+        "$body$;",
+        // Tagged dollar quote too.
+        "DO $do$",
+        "BEGIN",
+        "  -- trap text only",
+        "  PERFORM 'ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY';",
+        "END",
+        "$do$;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: dollar quote trap");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `dollar-quoted ENABLE must not false-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled"),
+      `public.todos still unprotected:\n${JSON.stringify(rls)}`,
+    );
+    assert.ok(
+      !rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `dollar-quoted CREATE POLICY must not create finding:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: real top-level ENABLE + restrictive policy still GO after quote-masking", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-real-enable");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-real", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_secure.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid NOT NULL, title text);",
+        // Noise that must not break real detection.
+        "COMMENT ON TABLE public.todos IS 'docs: ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY';",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner_all"',
+        "  ON public.todos",
+        "  FOR ALL",
+        "  TO authenticated",
+        "  USING (auth.uid() = user_id)",
+        "  WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: real enable still works");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `real ENABLE + restrictive policy must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: real permissive USING(true) still NO-GO after quote-masking", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-real-perm");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-perm", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_open.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid, title text);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        "COMMENT ON TABLE public.todos IS 'ignore me: USING (true)';",
+        'CREATE POLICY "allow all writes"',
+        "  ON public.todos",
+        "  FOR ALL",
+        "  TO anon, authenticated",
+        "  USING (true)",
+        "  WITH CHECK (true);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: real permissive still NO-GO");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `real permissive policy must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `must still detect top-level permissive policy:\n${JSON.stringify(rls)}`,
+    );
   } finally {
     cleanup(base);
   }

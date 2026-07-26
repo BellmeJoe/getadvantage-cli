@@ -955,7 +955,9 @@ export function checkSchemaBump(cwd, baseRef = "main", project = null) {
 // Incomplete / dynamic / malformed → warn or skip, NEVER pass claiming security.
 // No Supabase migration/function evidence → honest skip (not a green seal).
 // Does NOT execute SQL, call Supabase, or prove end-to-end authorization.
-// Comments stripped; test/fixture path patterns ignored.
+// Comments stripped; single-quoted + dollar-quoted interiors masked (spaces,
+// newlines kept) so COMMENT/DEFAULT/$$ bodies cannot fake top-level RLS DDL.
+// Test/fixture path patterns ignored.
 
 const SUPABASE_RLS_LABEL = "Supabase RLS / ungated mutations";
 
@@ -991,6 +993,18 @@ function isSupabaseEdgeFunctionSource(rel) {
   return false;
 }
 
+/**
+ * Try to read a PostgreSQL dollar-quote delimiter starting at `i` (`$tag$` or `$$`).
+ * Returns the delimiter string or null.
+ */
+function matchDollarQuoteDelim(s, i) {
+  if (s[i] !== "$") return null;
+  let j = i + 1;
+  while (j < s.length && /[A-Za-z0-9_]/.test(s[j])) j++;
+  if (j < s.length && s[j] === "$") return s.slice(i, j + 1);
+  return null;
+}
+
 /** Strip SQL line/block comments so commented policy text never matches. */
 function stripSqlComments(text) {
   let out = "";
@@ -1000,6 +1014,7 @@ function stripSqlComments(text) {
   let inBlock = false;
   let inSingle = false;
   let inDouble = false;
+  let dollarDelim = null; // active $tag$ / $$ open delimiter, or null
   while (i < s.length) {
     const ch = s[i];
     const next = s[i + 1];
@@ -1021,6 +1036,19 @@ function stripSqlComments(text) {
       // Preserve newlines so line numbers stay stable for residual text.
       if (ch === "\n") out += "\n";
       else out += " ";
+      i++;
+      continue;
+    }
+    // Inside dollar-quoted body: copy through (mask pass neutralizes DDL);
+    // do not treat -- / /* as comments.
+    if (dollarDelim) {
+      if (s.startsWith(dollarDelim, i)) {
+        out += dollarDelim;
+        i += dollarDelim.length;
+        dollarDelim = null;
+        continue;
+      }
+      out += ch;
       i++;
       continue;
     }
@@ -1065,6 +1093,74 @@ function stripSqlComments(text) {
       i++;
       continue;
     }
+    const dq = matchDollarQuoteDelim(s, i);
+    if (dq) {
+      dollarDelim = dq;
+      out += dq;
+      i += dq.length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * Mask interiors of SQL single-quoted string literals and dollar-quoted bodies
+ * so DDL-like text inside them cannot match top-level migration regexes.
+ * Preserves newlines (and overall layout) so lineOfOffset stays accurate.
+ * Handles '' escapes inside '…' and $tag$…$tag$ / $$…$$ dollar quotes.
+ */
+function maskSqlQuotedLiterals(text) {
+  let out = "";
+  let i = 0;
+  const s = String(text || "");
+  while (i < s.length) {
+    const ch = s[i];
+
+    // Dollar-quote: $tag$ … $tag$ or $$ … $$
+    const open = matchDollarQuoteDelim(s, i);
+    if (open) {
+      out += open;
+      i += open.length;
+      while (i < s.length) {
+        if (s.startsWith(open, i)) {
+          out += open;
+          i += open.length;
+          break;
+        }
+        if (s[i] === "\n") out += "\n";
+        else out += " ";
+        i++;
+      }
+      continue;
+    }
+
+    // Single-quoted string literal (including '' escapes).
+    if (ch === "'") {
+      out += "'";
+      i++;
+      while (i < s.length) {
+        const c = s[i];
+        if (c === "'" && s[i + 1] === "'") {
+          // Escaped quote pair — neutralize both chars; keep length stable.
+          out += "  ";
+          i += 2;
+          continue;
+        }
+        if (c === "'") {
+          out += "'";
+          i++;
+          break;
+        }
+        if (c === "\n") out += "\n";
+        else out += " ";
+        i++;
+      }
+      continue;
+    }
+
     out += ch;
     i++;
   }
@@ -1148,7 +1244,10 @@ function lineOfOffset(text, offset) {
  * Returns { events, incomplete: string[] } — incomplete covers malformed bits.
  */
 function parseMigrationEvents(rel, rawText) {
-  const text = stripSqlComments(rawText);
+  // Comments first, then mask quoted/dollar-quoted interiors so string content
+  // (COMMENT ON … IS 'ALTER TABLE … ENABLE RLS', DEFAULT '…', $$…$$ bodies)
+  // cannot produce false top-level RLS / policy events.
+  const text = maskSqlQuotedLiterals(stripSqlComments(rawText));
   const events = [];
   const incomplete = [];
 
