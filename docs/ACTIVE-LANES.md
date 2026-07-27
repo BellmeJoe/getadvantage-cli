@@ -13,14 +13,14 @@ Empty board = nobody claims exclusive work — first writer updates this.
 | `0.10.0-intent-contract-gate` | Grok Build | Local Intent Contract: human goal bound to enforceable repo-change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; CLI/JSON/MCP/Action surfaces | **LIVE_VERIFIED 0.10.0** · `done` · release commit `705986c` · Actions [30021314088](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30021314088) success · `npm view` **0.10.0** · registry `gitHead` = `705986c` · tags `v0.10.0` + floating `v1` + [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.0) · cold published: version 0.10.0 · intent init+check GO · outside-allow NO-GO · `npm test` 96/96 · evidence 8/8 · rollback `0.9.1`/`v0.9.1` + `0.9.0`/`v0.9.0` intact | 2026-07-23 |
 | `0.9.1-release-tagger-gate-repair` | Grok Build | Bounded current-main release-pipeline gate repair: reconcile the repository-local tagger-identity contract/test order without weakening publish, source-identity, tag, Release, or rollback safeguards | **done** · Grok 4.5 HEAVY best-of-5 selected candidate 4 · `publish.yml` name-then-email local tagger + `validatePublishWorkflowContract` regression · `npm test` **71/71** · `npm run evidence` **8/8** · no version/publish/tag/LIVE claim change · Vite lane deferred by founder priority | 2026-07-22 |
 
-| `0.10.x-supabase-rls-ungated-mutations` | Grok Build (same-lane multi-DROP P1 repair · HEAVY best-of-5 winner: candidate 1) | Bounded static check: multi-table `DROP TABLE a, b;` now emits one `drop_table` per name (false-GO fix); IF NOT EXISTS / quote-mask / ALTER POLICY / RENAME retained. | **REVIEW_PENDING** · product fingerprint `ba03158` · prior fingerprint `31c9c90` · prior NO_GO audits at `fdb81a4` / `c0bf5dd` / `31c9c90` · live remains **0.10.1** / `7592004` · rollback **0.10.0** / `v0.10.0` / `705986c` · `npm test` **143/143** · evidence **8/8** · pack 32 files / ~269 kB · no `_` scratch · no version bump / no push/tag/publish/LIVE. **Limitation:** zero real-repo RLS evidence — all proofs are synthetic fixtures. | 2026-07-27 |
+| `0.10.x-supabase-rls-ungated-mutations` | Grok Build (same-lane DROP TABLE ONLY P1 + class sweep · HEAVY best-of-5 winner: candidate 4) | Bounded static check: `DROP TABLE [IF EXISTS] [ONLY] a,b` list parser; `SET SCHEMA` / `DROP SCHEMA CASCADE` clear modeled state; multi-DROP / IF NOT EXISTS / quote-mask / RENAME retained. | **REVIEW_PENDING** · product fingerprint `7f41d06` · prior fingerprint `ba03158` · prior NO_GO audits at `fdb81a4` / `c0bf5dd` / `31c9c90` / `ba03158` · live remains **0.10.1** / `7592004` · rollback **0.10.0** / `v0.10.0` / `705986c` · `npm test` **164/164** · evidence **8/8** · pack 32 files / ~272 kB · no `_` scratch · no version bump / no push/tag/publish/LIVE. **Limitation:** zero real-repo RLS evidence — all proofs are synthetic fixtures. | 2026-07-27 |
 
-> Same-lane P1 repair (2026-07-27 09:00): Claude evening audit `REVIEW_NO_GO`
-> at `31c9c90` — multi-table `DROP TABLE a, b;` only cleared the first table
-> from the policy-state model → stale safe state after naked recreate → false
-> GO. Repair complete for review at **REVIEW_PENDING** fingerprint **`ba03158`**.
-> Live product remains **0.10.1** / `7592004`. No version bump, push, tag,
-> publish, or LIVE claim is authorized.
+> Same-lane P1 repair (2026-07-27 17:00): Claude midday audit `REVIEW_NO_GO`
+> at `ba03158` — `DROP TABLE ONLY <table>;` left stale secure state after naked
+> recreate → false GO (warn-only incomplete). Repair + class sweep complete for
+> review at **REVIEW_PENDING** fingerprint **`7f41d06`**. Live product remains
+> **0.10.1** / `7592004`. No version bump, push, tag, publish, or LIVE claim is
+> authorized.
 
 ### Rules
 1. Before starting: add a row.  
