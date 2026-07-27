@@ -1266,12 +1266,14 @@ function parseMigrationEvents(rel, rawText) {
     });
   }
 
-  // DROP TABLE [IF EXISTS] name [, ...] [CASCADE | RESTRICT]
-  // Postgres allows a comma-separated multi-object list. Mirror CREATE POLICY's
-  // TO-roles style: slice to statement end, split commas, emit one event each.
-  // Single-table capture alone left tables after the first with stale safe state
-  // after DROP+CREATE → false GO.
-  const dropTableStartRe = /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/gi;
+  // DROP TABLE [IF EXISTS] [ONLY] name [, ...] [CASCADE | RESTRICT]
+  // Postgres allows optional ONLY once before the first name, and a comma-
+  // separated multi-object list. Mirror CREATE POLICY's TO-roles style: slice
+  // to statement end, split commas, emit one event each. Single-table capture
+  // alone left tables after the first with stale safe state after DROP+CREATE
+  // → false GO. Omitting ONLY from the prefix left "ONLY public.bar" as a list
+  // segment that failed tableIdRe → incomplete warn + no drop_table → false GO.
+  const dropTableStartRe = /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?/gi;
   for (const m of text.matchAll(dropTableStartRe)) {
     const start = m.index;
     // Slice forward to next semicolon (or 2 KB) — same discipline as CREATE POLICY.
@@ -1279,7 +1281,7 @@ function parseMigrationEvents(rel, rawText) {
     if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
     const stmt = text.slice(start, endSemi + 1);
 
-    // List body after DROP TABLE [IF EXISTS]; ends at CASCADE|RESTRICT or ';'.
+    // List body after DROP TABLE [IF EXISTS] [ONLY]; ends at CASCADE|RESTRICT or ';'.
     let listPart = stmt.slice(m[0].length);
     listPart = listPart.replace(/\s*;\s*$/, "");
     listPart = listPart.replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
@@ -1591,6 +1593,107 @@ function parseMigrationEvents(rel, rawText) {
     });
   }
 
+  // ALTER TABLE [IF EXISTS] [ONLY] name SET SCHEMA new_schema
+  // Moving a secured public table out of public frees the old name; a naked
+  // CREATE of that name must not inherit the stranded safe state → false GO.
+  const setSchemaRe =
+    /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+SET\s+SCHEMA\s+((?:"[^"]+"|[\w]+))/gi;
+  for (const m of text.matchAll(setSchemaRe)) {
+    const from = normalizeTableName(m[1]);
+    if (!from) continue;
+    const rawSchema = String(m[2] || "").replace(/"/g, "").trim();
+    if (!rawSchema) continue;
+    const toTable = normalizeTableName(`${rawSchema}.${from.name}`);
+    if (!toTable) continue;
+    events.push({
+      kind: "set_schema",
+      table: from,
+      toTable,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
+  // DROP SCHEMA [IF EXISTS] name [, ...] [CASCADE | RESTRICT]
+  // CASCADE drops every object in the schema. Without clearing modeled tables
+  // for that schema, a later naked CREATE of a previously-secured public name
+  // reuses stale safe state → false GO. Without CASCADE, Postgres refuses
+  // non-empty drops — leave modeled tables intact (no silent clear).
+  const dropSchemaStartRe = /\bDROP\s+SCHEMA\s+(?:IF\s+EXISTS\s+)?/gi;
+  for (const m of text.matchAll(dropSchemaStartRe)) {
+    const start = m.index;
+    let endSemi = text.indexOf(";", start);
+    if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+    const stmt = text.slice(start, endSemi + 1);
+    const hasCascade = /\bCASCADE\b/i.test(stmt);
+
+    let listPart = stmt.slice(m[0].length);
+    listPart = listPart.replace(/\s*;\s*$/, "");
+    listPart = listPart.replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+    listPart = listPart.trim();
+
+    if (!listPart) {
+      incomplete.push(
+        `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA with empty schema list — not fully checkable`,
+      );
+      continue;
+    }
+
+    const afterPrefix = stmt.slice(m[0].length).replace(/;\s*$/, "").replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+    const leadWs = (afterPrefix.match(/^\s*/) || [""])[0].length;
+    const listAbsBase = start + m[0].length + leadWs;
+    const segments = listPart.split(",");
+    // Schema identifiers only (no dotted names).
+    const schemaIdRe = /^((?:"[^"]+"|[\w]+))$/i;
+    let scan = 0;
+    let emitted = 0;
+    for (const seg of segments) {
+      const raw = seg.trim();
+      const rawAt = raw ? listPart.indexOf(raw, scan) : scan;
+      const segAbs = listAbsBase + (rawAt >= 0 ? rawAt : scan);
+      scan = (rawAt >= 0 ? rawAt + raw.length : scan) + 1;
+      if (!raw) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA empty list element — not fully checkable`,
+        );
+        continue;
+      }
+      const idM = schemaIdRe.exec(raw);
+      if (!idM) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA unparseable schema element "${raw.slice(0, 60)}" — not fully checkable`,
+        );
+        continue;
+      }
+      const schema = String(idM[1] || "").replace(/"/g, "").trim().toLowerCase();
+      if (!schema) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA unparseable schema element — not fully checkable`,
+        );
+        continue;
+      }
+      // Only CASCADE is a proven destroy of contained tables. RESTRICT / bare
+      // DROP SCHEMA leaves objects in place when the schema is non-empty.
+      if (hasCascade) {
+        events.push({
+          kind: "drop_schema",
+          schema,
+          cascade: true,
+          file: rel,
+          line: lineOfOffset(text, segAbs),
+          index: segAbs,
+        });
+        emitted++;
+      }
+    }
+    if (hasCascade && emitted === 0) {
+      incomplete.push(
+        `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA CASCADE with no parseable schema names — not fully checkable`,
+      );
+    }
+  }
+
   // Sort events in this file by appearance order.
   events.sort((a, b) => a.index - b.index || a.line - b.line);
   return { events, incomplete };
@@ -1722,6 +1825,29 @@ function buildPolicyState(allEvents) {
         st.table = ev.toTable;
         // If target already exists, last rename wins (rare in migrations).
         tables.set(toKey, st);
+      }
+    } else if (ev.kind === "set_schema") {
+      // Move modeled state to the new schema-qualified name; free the old key so
+      // a naked CREATE of the vacated public name starts fresh (RLS off).
+      const fromKey = ev.table.full;
+      const toKey = ev.toTable.full;
+      if (fromKey === toKey) continue;
+      const st = tables.get(fromKey);
+      if (st) {
+        tables.delete(fromKey);
+        st.table = ev.toTable;
+        tables.set(toKey, st);
+      }
+    } else if (ev.kind === "drop_schema") {
+      // CASCADE-modeled DROP SCHEMA removes every table in that schema from the
+      // policy-state map — same fail-closed posture as drop_table.
+      const schema = String(ev.schema || "").toLowerCase();
+      if (!schema) continue;
+      for (const key of [...tables.keys()]) {
+        const st = tables.get(key);
+        if (st && st.table && String(st.table.schema).toLowerCase() === schema) {
+          tables.delete(key);
+        }
       }
     }
   }
