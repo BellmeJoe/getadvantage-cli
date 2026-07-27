@@ -8574,6 +8574,499 @@ scenario("supabase-rls: DROP open policy + recreate restrictive → GO", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Group-49 P1: multi-table DROP TABLE must clear every listed table's state
+// ---------------------------------------------------------------------------
+
+scenario("supabase-rls: multi-DROP TABLE audit_log,bar then recreate bar unprotected → NO-GO (supabase/rls-disabled, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-multidrop-auditor");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-multidrop-aud", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.audit_log (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_multidrop.sql",
+      [
+        "DROP TABLE public.audit_log, public.bar;",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: multi-drop recreate bar unprotected");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `multi-DROP + unprotected recreate must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
+      `public.bar must be proven unprotected (supabase/rls-disabled):\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: multi-DROP IF EXISTS … CASCADE then recreate bar unprotected → NO-GO (supabase/rls-disabled, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-multidrop-cascade");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-md-casc", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.audit_log (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_multidrop.sql",
+      [
+        "DROP TABLE IF EXISTS public.audit_log, public.bar CASCADE;",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: multi-drop if exists cascade");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `IF EXISTS multi-DROP CASCADE unprotected recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
+      `public.bar must be supabase/rls-disabled after CASCADE multi-drop:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: multi-DROP then recreate second table secured (ENABLE RLS + owner) → GO (exit 0)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-multidrop-secure");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-md-sec", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.audit_log (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_multidrop_secure.sql",
+      [
+        "DROP TABLE public.audit_log, public.bar;",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: multi-drop secure recreate");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `multi-DROP + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: single-table DROP TABLE public.bar + secure recreate → GO (control, exit 0)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-singledrop-control");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-sd-ctl", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_reset.sql",
+      [
+        "DROP TABLE public.bar;",
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner_all" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: single drop secure recreate control");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `single DROP + secure recreate control must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: three-table DROP a,b,c; third recreated unprotected → NO-GO (supabase/rls-disabled, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-threedrop");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-3drop", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.a (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.b (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.c (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.c ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "c_owner" ON public.c FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_threedrop.sql",
+      [
+        "DROP TABLE public.a, public.b, public.c;",
+        "CREATE TABLE public.c (id uuid PRIMARY KEY, user_id uuid);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: three-drop recreate c unprotected");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `three-table DROP with unprotected c must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.c/i.test(f.table || f.message || "")),
+      `public.c must be supabase/rls-disabled:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: three-table DROP a,b,c; third recreated secured → GO (safe control, exit 0)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-threedrop-secure");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-3drop-s", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.a (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.b (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.c (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.c ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "c_owner" ON public.c FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_threedrop_secure.sql",
+      [
+        "DROP TABLE public.a, public.b, public.c;",
+        "CREATE TABLE public.c (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.c ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "c_owner" ON public.c FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: three-drop secure c");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `three-drop secure control must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario('supabase-rls: quoted/mixed-case multi-DROP public."Bar", other_schema.baz → two drops; unprotected Bar → NO-GO (supabase/rls-disabled, exit 1)', () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-quoted-multidrop");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-qmd", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        'CREATE TABLE public."Bar" (id uuid PRIMARY KEY, user_id uuid);',
+        "CREATE TABLE other_schema.baz (id uuid PRIMARY KEY);",
+        'ALTER TABLE public."Bar" ENABLE ROW LEVEL SECURITY;',
+        'CREATE POLICY "bar_owner" ON public."Bar" FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_quoted_drop.sql",
+      [
+        'DROP TABLE public."Bar", other_schema.baz;',
+        'CREATE TABLE public."Bar" (id uuid PRIMARY KEY, user_id uuid);',
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: quoted multi-drop unprotected recreate");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `quoted multi-DROP unprotected Bar must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    // normalizeTableName lowercases → public.bar
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
+      `public.bar (from "Bar") must be supabase/rls-disabled:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario('supabase-rls: quoted multi-DROP + secure recreate public."Bar" → GO (safe control, exit 0)', () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-quoted-multidrop-sec");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-qmd-s", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        'CREATE TABLE public."Bar" (id uuid PRIMARY KEY, user_id uuid);',
+        "CREATE TABLE other_schema.baz (id uuid PRIMARY KEY);",
+        'ALTER TABLE public."Bar" ENABLE ROW LEVEL SECURITY;',
+        'CREATE POLICY "bar_owner" ON public."Bar" FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_quoted_drop_sec.sql",
+      [
+        'DROP TABLE public."Bar", other_schema.baz;',
+        'CREATE TABLE public."Bar" (id uuid PRIMARY KEY, user_id uuid);',
+        'ALTER TABLE public."Bar" ENABLE ROW LEVEL SECURITY;',
+        'CREATE POLICY "bar_owner" ON public."Bar" FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: quoted multi-drop secure");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `quoted multi-DROP secure control must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: newline-split multi-DROP public.a,\\n  public.b; both dropped; b unprotected recreate → NO-GO (supabase/rls-disabled, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-newline-multidrop");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-nl-md", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.a (id uuid PRIMARY KEY);",
+        "CREATE TABLE public.b (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.b ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "b_owner" ON public.b FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_nl_drop.sql",
+      [
+        "DROP TABLE public.a,",
+        "  public.b;",
+        "CREATE TABLE public.b (id uuid PRIMARY KEY, user_id uuid);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: newline multi-drop unprotected b");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `newline multi-DROP unprotected b must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.b/i.test(f.table || f.message || "")),
+      `public.b must be supabase/rls-disabled after newline multi-drop:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: comma in masked literal/comment near DROP TABLE must not create phantom table (safe control, exit 0)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-phantom-comma");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-phantom", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid, note text);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        // Secure second table that must NOT be phantom-dropped by comma-in-string
+        "CREATE TABLE public.ghost (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.ghost ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "ghost_owner" ON public.ghost FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_literal_comma.sql",
+      [
+        // Commas inside string / comment must not invent DROP of public.ghost
+        "COMMENT ON TABLE public.todos IS 'DROP TABLE public.todos, public.ghost;';",
+        "-- DROP TABLE public.todos, public.ghost;",
+        "ALTER TABLE public.todos ADD COLUMN label text DEFAULT 'a, b, public.ghost';",
+        // Real single-table drop+secure recreate of todos only
+        "DROP TABLE public.todos;",
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid, note text);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "todos_owner" ON public.todos FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: phantom comma control");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `comma-in-literal must not phantom-drop secure ghost → GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", `expected pass (no phantom drop):\n${JSON.stringify(rls)}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: TRUNCATE a,b must NOT clear policies → open policy still NO-GO (supabase/permissive-write-policy, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-truncate-noclear");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-trunc", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.todos (id uuid PRIMARY KEY, user_id uuid);",
+        "CREATE TABLE public.items (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.todos ENABLE ROW LEVEL SECURITY;",
+        "ALTER TABLE public.items ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "open_write" ON public.todos FOR ALL TO anon USING (true) WITH CHECK (true);',
+        'CREATE POLICY "items_owner" ON public.items FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_truncate.sql",
+      "TRUNCATE public.todos, public.items;\n",
+    );
+    commitAll(repo, "chore: truncate must not erase policies");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `TRUNCATE must not clear open policy → NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
+      `open policy must survive TRUNCATE:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
 let failed = 0;

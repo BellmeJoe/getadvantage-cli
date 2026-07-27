@@ -1266,19 +1266,81 @@ function parseMigrationEvents(rel, rawText) {
     });
   }
 
-  // DROP TABLE
-  const dropTableRe =
-    /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
-  for (const m of text.matchAll(dropTableRe)) {
-    const table = normalizeTableName(m[1]);
-    if (!table) continue;
-    events.push({
-      kind: "drop_table",
-      table,
-      file: rel,
-      line: lineOfOffset(text, m.index),
-      index: m.index,
-    });
+  // DROP TABLE [IF EXISTS] name [, ...] [CASCADE | RESTRICT]
+  // Postgres allows a comma-separated multi-object list. Mirror CREATE POLICY's
+  // TO-roles style: slice to statement end, split commas, emit one event each.
+  // Single-table capture alone left tables after the first with stale safe state
+  // after DROP+CREATE → false GO.
+  const dropTableStartRe = /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/gi;
+  for (const m of text.matchAll(dropTableStartRe)) {
+    const start = m.index;
+    // Slice forward to next semicolon (or 2 KB) — same discipline as CREATE POLICY.
+    let endSemi = text.indexOf(";", start);
+    if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+    const stmt = text.slice(start, endSemi + 1);
+
+    // List body after DROP TABLE [IF EXISTS]; ends at CASCADE|RESTRICT or ';'.
+    let listPart = stmt.slice(m[0].length);
+    listPart = listPart.replace(/\s*;\s*$/, "");
+    listPart = listPart.replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+    listPart = listPart.trim();
+
+    if (!listPart) {
+      incomplete.push(
+        `${rel}:${lineOfOffset(text, start)}: DROP TABLE with empty table list — not fully checkable`,
+      );
+      continue;
+    }
+
+    // Per-table absolute indexes: list body base + offset within comma-split list.
+    const afterPrefix = stmt.slice(m[0].length).replace(/;\s*$/, "").replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+    const leadWs = (afterPrefix.match(/^\s*/) || [""])[0].length;
+    const listAbsBase = start + m[0].length + leadWs;
+    const segments = listPart.split(",");
+    // High-confidence [schema.]name only; trailing junk → incomplete (fail safe).
+    const tableIdRe = /^((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)$/i;
+    let scan = 0;
+    let emitted = 0;
+    for (const seg of segments) {
+      const raw = seg.trim();
+      const rawAt = raw ? listPart.indexOf(raw, scan) : scan;
+      const segAbs = listAbsBase + (rawAt >= 0 ? rawAt : scan);
+      scan = (rawAt >= 0 ? rawAt + raw.length : scan) + 1;
+      if (!raw) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP TABLE empty list element — not fully checkable`,
+        );
+        continue;
+      }
+      const idM = tableIdRe.exec(raw);
+      if (!idM) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP TABLE unparseable table element "${raw.slice(0, 60)}" — not fully checkable`,
+        );
+        continue;
+      }
+      const table = normalizeTableName(idM[1]);
+      if (!table) {
+        incomplete.push(
+          `${rel}:${lineOfOffset(text, start)}: DROP TABLE unparseable table element — not fully checkable`,
+        );
+        continue;
+      }
+      events.push({
+        kind: "drop_table",
+        table,
+        file: rel,
+        line: lineOfOffset(text, segAbs),
+        // Per-table absolute index so multi-drops order correctly vs siblings.
+        index: segAbs,
+      });
+      emitted++;
+    }
+    if (emitted === 0) {
+      incomplete.push(
+        `${rel}:${lineOfOffset(text, start)}: DROP TABLE with no parseable table names — not fully checkable`,
+      );
+    }
   }
 
   // ALTER TABLE … ENABLE|DISABLE ROW LEVEL SECURITY
