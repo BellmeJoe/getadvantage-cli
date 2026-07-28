@@ -1167,17 +1167,53 @@ function maskSqlQuotedLiterals(text) {
   return out;
 }
 
-/** Normalize schema.table (default schema = public). */
+/**
+ * Normalize one SQL identifier: unquoted → lowercase; quoted → preserve case
+ * (Postgres folds unquoted idents; quoted "Bar" ≠ bar). Handles "" escapes.
+ */
+function normalizeIdent(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    return s.slice(1, -1).replace(/""/g, '"');
+  }
+  // Unquoted: strip any residual quotes defensively, fold case.
+  return s.replace(/"/g, "").toLowerCase();
+}
+
+/**
+ * Normalize schema.table (default schema = public).
+ * Quoted mixed-case is preserved: public."Bar" ≠ public.bar;
+ * public."bar" == public.bar (quoted lowercase merges with unquoted fold).
+ */
 function normalizeTableName(raw) {
-  let t = String(raw || "").trim();
-  // Strip optional quotes around identifiers.
-  t = t.replace(/"/g, "");
+  const t = String(raw || "").trim();
   if (!t) return null;
+  // Prefer structured parse so quotes around either part survive.
+  const two = /^((?:"[^"]+"|[\w]+))\s*\.\s*((?:"[^"]+"|[\w]+))$/.exec(t);
+  if (two) {
+    const schema = normalizeIdent(two[1]);
+    const name = normalizeIdent(two[2]);
+    if (!schema || !name) return null;
+    return { schema, name, full: `${schema}.${name}` };
+  }
+  const one = /^((?:"[^"]+"|[\w]+))$/.exec(t);
+  if (one) {
+    const name = normalizeIdent(one[1]);
+    if (!name) return null;
+    return { schema: "public", name, full: `public.${name}` };
+  }
+  // Fallback: loose split (legacy / partially-stripped forms).
   const parts = t.split(".").map((p) => p.trim()).filter(Boolean);
-  if (parts.length === 1) return { schema: "public", name: parts[0].toLowerCase(), full: `public.${parts[0].toLowerCase()}` };
+  if (parts.length === 1) {
+    const name = normalizeIdent(parts[0]);
+    if (!name) return null;
+    return { schema: "public", name, full: `public.${name}` };
+  }
   if (parts.length >= 2) {
-    const schema = parts[0].toLowerCase();
-    const name = parts[1].toLowerCase();
+    const schema = normalizeIdent(parts[0]);
+    const name = normalizeIdent(parts[1]);
+    if (!schema || !name) return null;
     return { schema, name, full: `${schema}.${name}` };
   }
   return null;
@@ -1240,16 +1276,430 @@ function lineOfOffset(text, offset) {
 }
 
 /**
+ * Extract `DO [LANGUAGE …] $tag$ … $tag$` bodies (comments already stripped).
+ * Bodies are scanned for destroy-path DDL before maskSqlQuotedLiterals blanks them.
+ */
+function extractDoBlocks(text) {
+  const blocks = [];
+  const s = String(text || "");
+  const doRe = /\bDO\b/gi;
+  let m;
+  while ((m = doRe.exec(s)) !== null) {
+    let i = m.index + 2;
+    while (i < s.length && /\s/.test(s[i])) i++;
+    // optional LANGUAGE lang_name
+    if (s.slice(i, i + 8).toUpperCase() === "LANGUAGE") {
+      i += 8;
+      while (i < s.length && /\s/.test(s[i])) i++;
+      if (s[i] === '"') {
+        i++;
+        while (i < s.length && s[i] !== '"') i++;
+        if (i < s.length && s[i] === '"') i++;
+      } else {
+        while (i < s.length && /[A-Za-z0-9_]/.test(s[i])) i++;
+      }
+      while (i < s.length && /\s/.test(s[i])) i++;
+    }
+    const delim = matchDollarQuoteDelim(s, i);
+    if (!delim) continue;
+    const bodyStart = i + delim.length;
+    let j = bodyStart;
+    let found = false;
+    while (j < s.length) {
+      if (s.startsWith(delim, j)) {
+        blocks.push({
+          body: s.slice(bodyStart, j),
+          bodyStart,
+          doIndex: m.index,
+        });
+        doRe.lastIndex = j + delim.length;
+        found = true;
+        break;
+      }
+      j++;
+    }
+    if (!found) {
+      // Unclosed DO body — advance past DO to avoid tight loop.
+      doRe.lastIndex = m.index + 2;
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Destroy-path / hostile events from inside plpgsql DO bodies.
+ * Fail-closed: DROP/DISABLE/DROP POLICY/SET SCHEMA/RENAME/DROP SCHEMA and
+ * permissive CREATE POLICY are real events. ENABLE RLS and restrictive
+ * CREATE POLICY are never treated as grants from DO bodies.
+ */
+function parseDoBodyDestroyEvents(rel, strippedText) {
+  const events = [];
+  const incomplete = [];
+  const lineSrc = strippedText;
+
+  for (const block of extractDoBlocks(strippedText)) {
+    // Mask nested string / dollar-quote interiors inside the body so
+    // PERFORM 'ALTER TABLE … ENABLE RLS' cannot produce phantom events.
+    const text = maskSqlQuotedLiterals(block.body);
+    const base = block.bodyStart;
+
+    const abs = (localIdx) => base + localIdx;
+    const lineAt = (localIdx) => lineOfOffset(lineSrc, abs(localIdx));
+
+    // DROP TABLE [IF EXISTS] [ONLY] name [, ...]
+    const dropTableStartRe = /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?/gi;
+    for (const m of text.matchAll(dropTableStartRe)) {
+      const start = m.index;
+      let endSemi = text.indexOf(";", start);
+      if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+      const stmt = text.slice(start, endSemi + 1);
+      let listPart = stmt.slice(m[0].length);
+      listPart = listPart.replace(/\s*;\s*$/, "");
+      listPart = listPart.replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+      listPart = listPart.trim();
+      if (!listPart) {
+        incomplete.push(
+          `${rel}:${lineAt(start)}: DO-body DROP TABLE with empty table list — not fully checkable`,
+        );
+        continue;
+      }
+      const afterPrefix = stmt
+        .slice(m[0].length)
+        .replace(/;\s*$/, "")
+        .replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+      const leadWs = (afterPrefix.match(/^\s*/) || [""])[0].length;
+      const listAbsBase = start + m[0].length + leadWs;
+      const segments = listPart.split(",");
+      const tableIdRe = /^((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)$/i;
+      let scan = 0;
+      let emitted = 0;
+      for (const seg of segments) {
+        const raw = seg.trim();
+        const rawAt = raw ? listPart.indexOf(raw, scan) : scan;
+        const segLocal = listAbsBase + (rawAt >= 0 ? rawAt : scan);
+        scan = (rawAt >= 0 ? rawAt + raw.length : scan) + 1;
+        if (!raw) continue;
+        const idM = tableIdRe.exec(raw);
+        if (!idM) {
+          incomplete.push(
+            `${rel}:${lineAt(start)}: DO-body DROP TABLE unparseable element "${raw.slice(0, 60)}"`,
+          );
+          continue;
+        }
+        const table = normalizeTableName(idM[1]);
+        if (!table) continue;
+        events.push({
+          kind: "drop_table",
+          table,
+          file: rel,
+          line: lineAt(segLocal),
+          index: abs(segLocal),
+        });
+        emitted++;
+      }
+      if (emitted === 0) {
+        incomplete.push(
+          `${rel}:${lineAt(start)}: DO-body DROP TABLE with no parseable table names`,
+        );
+      }
+    }
+
+    // ALTER TABLE … DISABLE ROW LEVEL SECURITY only (never ENABLE as grant)
+    const rlsDisRe =
+      /\bALTER\s+TABLE\s+(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b/gi;
+    for (const m of text.matchAll(rlsDisRe)) {
+      const table = normalizeTableName(m[1]);
+      if (!table) continue;
+      events.push({
+        kind: "rls",
+        table,
+        enabled: false,
+        file: rel,
+        line: lineAt(m.index),
+        index: abs(m.index),
+        raw: m[0].replace(/\s+/g, " ").trim(),
+      });
+    }
+
+    // DROP POLICY [IF EXISTS] name ON table
+    const dropPolRe =
+      /\bDROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;]+))\s+ON\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+    for (const m of text.matchAll(dropPolRe)) {
+      const policyName = m[1] || m[2] || m[3];
+      const table = normalizeTableName(m[4]);
+      if (!table || !policyName) continue;
+      events.push({
+        kind: "drop_policy",
+        table,
+        policyName,
+        file: rel,
+        line: lineAt(m.index),
+        index: abs(m.index),
+      });
+    }
+
+    // ALTER TABLE … RENAME TO …
+    const renameTableRe =
+      /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+RENAME\s+TO\s+((?:"[^"]+"|[\w]+))/gi;
+    for (const m of text.matchAll(renameTableRe)) {
+      const from = normalizeTableName(m[1]);
+      if (!from) continue;
+      const toTable = normalizeTableName(`${from.schema}.${m[2]}`);
+      if (!toTable) continue;
+      events.push({
+        kind: "rename_table",
+        table: from,
+        toTable,
+        file: rel,
+        line: lineAt(m.index),
+        index: abs(m.index),
+      });
+    }
+
+    // ALTER TABLE … SET SCHEMA …
+    const setSchemaRe =
+      /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+SET\s+SCHEMA\s+((?:"[^"]+"|[\w]+))/gi;
+    for (const m of text.matchAll(setSchemaRe)) {
+      const from = normalizeTableName(m[1]);
+      if (!from) continue;
+      const schemaName = normalizeIdent(m[2]);
+      if (!schemaName) continue;
+      const toTable = { schema: schemaName, name: from.name, full: `${schemaName}.${from.name}` };
+      events.push({
+        kind: "set_schema",
+        table: from,
+        toTable,
+        file: rel,
+        line: lineAt(m.index),
+        index: abs(m.index),
+      });
+    }
+
+    // DROP SCHEMA … CASCADE
+    const dropSchemaStartRe = /\bDROP\s+SCHEMA\s+(?:IF\s+EXISTS\s+)?/gi;
+    for (const m of text.matchAll(dropSchemaStartRe)) {
+      const start = m.index;
+      let endSemi = text.indexOf(";", start);
+      if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+      const stmt = text.slice(start, endSemi + 1);
+      const hasCascade = /\bCASCADE\b/i.test(stmt);
+      if (!hasCascade) continue;
+      let listPart = stmt.slice(m[0].length);
+      listPart = listPart.replace(/\s*;\s*$/, "");
+      listPart = listPart.replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+      listPart = listPart.trim();
+      if (!listPart) continue;
+      const afterPrefix = stmt
+        .slice(m[0].length)
+        .replace(/;\s*$/, "")
+        .replace(/\s+(CASCADE|RESTRICT)\s*$/i, "");
+      const leadWs = (afterPrefix.match(/^\s*/) || [""])[0].length;
+      const listAbsBase = start + m[0].length + leadWs;
+      const segments = listPart.split(",");
+      const schemaIdRe = /^((?:"[^"]+"|[\w]+))$/i;
+      let scan = 0;
+      for (const seg of segments) {
+        const raw = seg.trim();
+        const rawAt = raw ? listPart.indexOf(raw, scan) : scan;
+        const segLocal = listAbsBase + (rawAt >= 0 ? rawAt : scan);
+        scan = (rawAt >= 0 ? rawAt + raw.length : scan) + 1;
+        if (!raw) continue;
+        const idM = schemaIdRe.exec(raw);
+        if (!idM) continue;
+        const schema = normalizeIdent(idM[1]);
+        if (!schema) continue;
+        events.push({
+          kind: "drop_schema",
+          schema,
+          cascade: true,
+          file: rel,
+          line: lineAt(segLocal),
+          index: abs(segLocal),
+        });
+      }
+    }
+
+    // Hostile CREATE POLICY (USING/WITH CHECK true on write) — real event so
+    // final-state cannot silent-GO. Restrictive policies are not granted from DO.
+    const policyStartRe =
+      /\bCREATE\s+POLICY\s+(?:"([^"]+)"|'([^']+)'|([^\s(]+))\s+ON\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+    for (const m of text.matchAll(policyStartRe)) {
+      const policyName = m[1] || m[2] || m[3] || "(unnamed)";
+      const table = normalizeTableName(m[4]);
+      if (!table) continue;
+      const start = m.index;
+      let endSemi = text.indexOf(";", start);
+      if (endSemi < 0) endSemi = Math.min(text.length, start + 2048);
+      const stmt = text.slice(start, endSemi + 1);
+
+      let forCmd = "ALL";
+      const forM = /\bFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b/i.exec(stmt);
+      if (forM) forCmd = forM[1].toUpperCase();
+
+      let roles = ["public"];
+      const toM = /\bTO\s+([^;(]+?)(?=\s+(?:USING|WITH\s+CHECK|AS\s+|FOR\s+)|\s*;)/i.exec(stmt);
+      if (toM) {
+        roles = toM[1]
+          .split(",")
+          .map((r) => r.trim().replace(/^["']|["']$/g, "").toLowerCase())
+          .filter(Boolean);
+        if (roles.length === 0) roles = ["public"];
+      }
+
+      let usingTrue = false;
+      let withCheckTrue = false;
+      const usingIdx = stmt.search(/\bUSING\s*\(/i);
+      if (usingIdx >= 0) {
+        const open = stmt.indexOf("(", usingIdx);
+        const bal = extractParen(stmt, open);
+        if (bal) usingTrue = isLiteralTrueExpr(bal.inner);
+      }
+      const wcIdx = stmt.search(/\bWITH\s+CHECK\s*\(/i);
+      if (wcIdx >= 0) {
+        const open = stmt.indexOf("(", wcIdx);
+        const bal = extractParen(stmt, open);
+        if (bal) withCheckTrue = isLiteralTrueExpr(bal.inner);
+      }
+
+      const writeOpen =
+        (forCmd === "INSERT" && withCheckTrue) ||
+        (forCmd === "UPDATE" && (usingTrue || withCheckTrue)) ||
+        (forCmd === "DELETE" && usingTrue) ||
+        (forCmd === "ALL" && (usingTrue || withCheckTrue));
+
+      if (!writeOpen) continue; // restrictive / non-write — do not grant from DO
+
+      events.push({
+        kind: "create_policy",
+        table,
+        policyName,
+        forCmd,
+        roles,
+        usingExpr: usingTrue ? "true" : null,
+        withCheckExpr: withCheckTrue ? "true" : null,
+        usingTrue,
+        withCheckTrue,
+        usingParseOk: true,
+        withCheckParseOk: true,
+        file: rel,
+        line: lineAt(start),
+        index: abs(start),
+        raw: stmt.replace(/\s+/g, " ").trim().slice(0, 200),
+      });
+    }
+
+    // EXECUTE '<literal>' / EXECUTE $tag$…$tag$ — fail closed when the literal
+    // holds destroy-shaped DDL. format()/concat remain a carried limitation.
+    const execRe = /\bEXECUTE\s+/gi;
+    for (const m of text.matchAll(execRe)) {
+      let i = m.index + m[0].length;
+      while (i < text.length && /\s/.test(text[i])) i++;
+      let lit = null;
+      const dq = matchDollarQuoteDelim(text, i);
+      if (dq) {
+        // Body was already maskSqlQuotedLiterals'd → dollar interiors are blank.
+        // Use the unmasked block.body slice for EXECUTE dollar/string literals.
+        continue;
+      }
+      if (text[i] === "'") {
+        // Single-quoted interiors are blanked by mask — re-read from raw body.
+        continue;
+      }
+      // Dynamic EXECUTE format(...) / variable — cannot prove; note incomplete.
+      if (/^format\s*\(/i.test(text.slice(i))) {
+        incomplete.push(
+          `${rel}:${lineAt(m.index)}: DO-body EXECUTE format(…) — not statically checkable`,
+        );
+      }
+    }
+
+    // Re-scan unmasked DO body for EXECUTE '…' / EXECUTE $tag$…$tag$ destroy DDL.
+    {
+      const rawBody = block.body;
+      const execRawRe = /\bEXECUTE\s+/gi;
+      for (const m of rawBody.matchAll(execRawRe)) {
+        let i = m.index + m[0].length;
+        while (i < rawBody.length && /\s/.test(rawBody[i])) i++;
+        let lit = null;
+        const dq = matchDollarQuoteDelim(rawBody, i);
+        if (dq) {
+          const bs = i + dq.length;
+          const be = rawBody.indexOf(dq, bs);
+          if (be < 0) continue;
+          lit = rawBody.slice(bs, be);
+        } else if (rawBody[i] === "'") {
+          let j = i + 1;
+          let out = "";
+          while (j < rawBody.length) {
+            if (rawBody[j] === "'" && rawBody[j + 1] === "'") {
+              out += "'";
+              j += 2;
+              continue;
+            }
+            if (rawBody[j] === "'") break;
+            out += rawBody[j];
+            j++;
+          }
+          lit = out;
+        }
+        if (!lit) continue;
+        if (/\bformat\s*\(/i.test(lit) || /\|\|/.test(lit)) {
+          incomplete.push(
+            `${rel}:${lineAt(m.index)}: DO-body EXECUTE dynamic string — not statically checkable`,
+          );
+          continue;
+        }
+        // Parse destroy paths inside the EXECUTE literal (fail closed).
+        const litMasked = maskSqlQuotedLiterals(lit);
+        const dropRe =
+          /\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+        for (const dm of litMasked.matchAll(dropRe)) {
+          const table = normalizeTableName(dm[1]);
+          if (!table) continue;
+          events.push({
+            kind: "drop_table",
+            table,
+            file: rel,
+            line: lineAt(m.index),
+            index: abs(m.index),
+          });
+        }
+        const disRe =
+          /\bALTER\s+TABLE\s+(?:ONLY\s+)?((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b/gi;
+        for (const dm of litMasked.matchAll(disRe)) {
+          const table = normalizeTableName(dm[1]);
+          if (!table) continue;
+          events.push({
+            kind: "rls",
+            table,
+            enabled: false,
+            file: rel,
+            line: lineAt(m.index),
+            index: abs(m.index),
+            raw: dm[0].replace(/\s+/g, " ").trim(),
+          });
+        }
+      }
+    }
+  }
+
+  return { events, incomplete };
+}
+
+/**
  * Parse one migration file into ordered events against the policy-state model.
  * Returns { events, incomplete: string[] } — incomplete covers malformed bits.
  */
 function parseMigrationEvents(rel, rawText) {
-  // Comments first, then mask quoted/dollar-quoted interiors so string content
-  // (COMMENT ON … IS 'ALTER TABLE … ENABLE RLS', DEFAULT '…', $$…$$ bodies)
-  // cannot produce false top-level RLS / policy events.
-  const text = maskSqlQuotedLiterals(stripSqlComments(rawText));
-  const events = [];
-  const incomplete = [];
+  // Comments first. Extract DO $tag$ bodies for destroy-path events BEFORE
+  // maskSqlQuotedLiterals blanks every dollar-quoted interior (that mask is
+  // correct for string-literal traps, but erases real static DDL inside plpgsql
+  // DO blocks → false GO). Then mask and parse top-level as usual.
+  const stripped = stripSqlComments(rawText);
+  const doParsed = parseDoBodyDestroyEvents(rel, stripped);
+  const text = maskSqlQuotedLiterals(stripped);
+  const events = [...doParsed.events];
+  const incomplete = [...doParsed.incomplete];
 
   // CREATE TABLE [IF NOT EXISTS] [schema.]name
   const createTableRe =
@@ -1579,9 +2029,8 @@ function parseMigrationEvents(rel, rawText) {
     const from = normalizeTableName(m[1]);
     if (!from) continue;
     // RENAME TO only renames the relation within the same schema.
-    const rawTo = String(m[2] || "").replace(/"/g, "").trim();
-    if (!rawTo) continue;
-    const toTable = normalizeTableName(`${from.schema}.${rawTo}`);
+    // Keep quotes on the target so normalizeIdent preserves mixed case.
+    const toTable = normalizeTableName(`${from.schema}.${m[2]}`);
     if (!toTable) continue;
     events.push({
       kind: "rename_table",
@@ -1601,14 +2050,32 @@ function parseMigrationEvents(rel, rawText) {
   for (const m of text.matchAll(setSchemaRe)) {
     const from = normalizeTableName(m[1]);
     if (!from) continue;
-    const rawSchema = String(m[2] || "").replace(/"/g, "").trim();
-    if (!rawSchema) continue;
-    const toTable = normalizeTableName(`${rawSchema}.${from.name}`);
-    if (!toTable) continue;
+    const schemaName = normalizeIdent(m[2]);
+    if (!schemaName) continue;
+    const toTable = { schema: schemaName, name: from.name, full: `${schemaName}.${from.name}` };
     events.push({
       kind: "set_schema",
       table: from,
       toTable,
+      file: rel,
+      line: lineOfOffset(text, m.index),
+      index: m.index,
+    });
+  }
+
+  // ALTER SCHEMA old RENAME TO new — bulk relocate every modeled table whose
+  // schema matches `old` into `new`, freeing the vacated schema name so a later
+  // CREATE SCHEMA old + naked CREATE TABLE cannot inherit stranded safe state.
+  const renameSchemaRe =
+    /\bALTER\s+SCHEMA\s+((?:"[^"]+"|[\w]+))\s+RENAME\s+TO\s+((?:"[^"]+"|[\w]+))/gi;
+  for (const m of text.matchAll(renameSchemaRe)) {
+    const fromSchema = normalizeIdent(m[1]);
+    const toSchema = normalizeIdent(m[2]);
+    if (!fromSchema || !toSchema || fromSchema === toSchema) continue;
+    events.push({
+      kind: "rename_schema",
+      fromSchema,
+      toSchema,
       file: rel,
       line: lineOfOffset(text, m.index),
       index: m.index,
@@ -1666,7 +2133,7 @@ function parseMigrationEvents(rel, rawText) {
         );
         continue;
       }
-      const schema = String(idM[1] || "").replace(/"/g, "").trim().toLowerCase();
+      const schema = normalizeIdent(idM[1]);
       if (!schema) {
         incomplete.push(
           `${rel}:${lineOfOffset(text, start)}: DROP SCHEMA unparseable schema element — not fully checkable`,
@@ -1841,13 +2308,32 @@ function buildPolicyState(allEvents) {
     } else if (ev.kind === "drop_schema") {
       // CASCADE-modeled DROP SCHEMA removes every table in that schema from the
       // policy-state map — same fail-closed posture as drop_table.
-      const schema = String(ev.schema || "").toLowerCase();
+      const schema = String(ev.schema || "");
       if (!schema) continue;
       for (const key of [...tables.keys()]) {
         const st = tables.get(key);
-        if (st && st.table && String(st.table.schema).toLowerCase() === schema) {
+        if (st && st.table && String(st.table.schema) === schema) {
           tables.delete(key);
         }
+      }
+    } else if (ev.kind === "rename_schema") {
+      // Bulk-relocate every modeled table from fromSchema → toSchema (same names).
+      // Vacates fromSchema so a later CREATE SCHEMA + naked CREATE cannot reuse
+      // stranded secure state under the old schema name.
+      const fromSchema = String(ev.fromSchema || "");
+      const toSchema = String(ev.toSchema || "");
+      if (!fromSchema || !toSchema || fromSchema === toSchema) continue;
+      for (const key of [...tables.keys()]) {
+        const st = tables.get(key);
+        if (!st || !st.table || String(st.table.schema) !== fromSchema) continue;
+        tables.delete(key);
+        const toTable = {
+          schema: toSchema,
+          name: st.table.name,
+          full: `${toSchema}.${st.table.name}`,
+        };
+        st.table = toTable;
+        tables.set(toTable.full, st);
       }
     }
   }
