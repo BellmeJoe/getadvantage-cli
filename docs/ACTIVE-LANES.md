@@ -13,15 +13,15 @@ Empty board = nobody claims exclusive work — first writer updates this.
 | `0.10.0-intent-contract-gate` | Grok Build | Local Intent Contract: human goal bound to enforceable repo-change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; CLI/JSON/MCP/Action surfaces | **LIVE_VERIFIED 0.10.0** · `done` · release commit `705986c` · Actions [30021314088](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30021314088) success · `npm view` **0.10.0** · registry `gitHead` = `705986c` · tags `v0.10.0` + floating `v1` + [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.10.0) · cold published: version 0.10.0 · intent init+check GO · outside-allow NO-GO · `npm test` 96/96 · evidence 8/8 · rollback `0.9.1`/`v0.9.1` + `0.9.0`/`v0.9.0` intact | 2026-07-23 |
 | `0.9.1-release-tagger-gate-repair` | Grok Build | Bounded current-main release-pipeline gate repair: reconcile the repository-local tagger-identity contract/test order without weakening publish, source-identity, tag, Release, or rollback safeguards | **done** · Grok 4.5 HEAVY best-of-5 selected candidate 4 · `publish.yml` name-then-email local tagger + `validatePublishWorkflowContract` regression · `npm test` **71/71** · `npm run evidence` **8/8** · no version/publish/tag/LIVE claim change · Vite lane deferred by founder priority | 2026-07-22 |
 
-| `0.10.x-supabase-rls-ungated-mutations` | Grok Build (same-lane evening-audit P1/P2/P3 · HEAVY best-of-5 winner: candidate 2) | DO-block static DDL destroy-path before quote-mask; `ALTER SCHEMA … RENAME TO` bulk relocate; quoted mixed-case identity; README not-yet-live. Prior: DROP ONLY / SET SCHEMA / DROP SCHEMA CASCADE / multi-DROP / quote-mask / RENAME. | **REVIEW_PENDING** · product fingerprint `3ef84cf` · prior fingerprint `7f41d06` · prior NO_GO audits at `fdb81a4` / `c0bf5dd` / `31c9c90` / `ba03158` / `7f41d06` · live remains **0.10.1** / `7592004` · rollback **0.10.0** / `v0.10.0` / `705986c` · `npm test` **175/175** · evidence **8/8** · pack 32 files / ~276 kB · no `_` scratch · no version bump / no push/tag/publish/LIVE. **Limitation:** zero real-repo RLS evidence — all proofs are synthetic fixtures. Dynamic `EXECUTE format(…)` inside DO remains carried. | 2026-07-28 |
+| `0.10.x-supabase-rls-ungated-mutations` | Grok Build (same-lane midday-audit P1 · HEAVY best-of-5 winner: candidate 4) | DO-body `ALTER SCHEMA … RENAME TO` destroy-path (was silent false GO); prior: DO-block static DDL before quote-mask; top-level ALTER SCHEMA bulk relocate; quoted mixed-case identity; DROP ONLY / SET SCHEMA / DROP SCHEMA CASCADE / multi-DROP / quote-mask / RENAME. | **REVIEW_PENDING** · product fingerprint `786736d` · prior fingerprint `3ef84cf` (midday `REVIEW_NO_GO`, 1 open P1) · prior NO_GO audits at `fdb81a4` / `c0bf5dd` / `31c9c90` / `ba03158` / `7f41d06` / `3ef84cf` · live remains **0.10.1** / `7592004` · rollback **0.10.0** / `v0.10.0` / `705986c` · `npm test` **178/178** · evidence **8/8** · pack 32 files / ~277 kB · no `_` scratch · no version bump / no push/tag/publish/LIVE. **Limitation:** zero real-repo RLS evidence — all proofs are synthetic fixtures. Dynamic `EXECUTE format(…)` inside DO remains carried. **Class-level (out of scope):** incomplete on a previously-proven-secure table with no confident drop/reset should be NOT_CHECKABLE-and-blocking rather than warn — orchestrator decision. | 2026-07-28 |
 
-> Same-lane repair (2026-07-28): evening audit P1 — static DDL inside `DO $$…$$`
-> was erased by `maskSqlQuotedLiterals` → false GO. Fix extracts DO bodies
-> before mask and applies destroy-path events only (never grant ENABLE/restrictive
-> policy from DO). P2: `ALTER SCHEMA RENAME` + quoted identity. P3: README
-> not-yet-live; `DROP TABLE ONLY` is not legal Postgres (parser keep; no new
-> investment). **REVIEW_PENDING** product fingerprint **`3ef84cf`**. Live
-> remains **0.10.1** / `7592004`. No version bump, push, tag, publish, or LIVE.
+> Same-lane repair (2026-07-28 afternoon): midday audit P1 at `3ef84cf` —
+> DO-wrapped `ALTER SCHEMA … RENAME TO` was invisible to
+> `parseDoBodyDestroyEvents` → silent false GO. Fix ports top-level
+> `rename_schema` into the DO-body parser; Group-51 hostile + safe + quoted.
+> Prior: DO-block static DDL extract; top-level ALTER SCHEMA; quoted identity.
+> **REVIEW_PENDING** product fingerprint **`786736d`**. Live remains
+> **0.10.1** / `7592004`. No version bump, push, tag, publish, or LIVE.
 
 ### Rules
 1. Before starting: add a row.  
