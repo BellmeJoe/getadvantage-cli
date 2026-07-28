@@ -1328,9 +1328,9 @@ function extractDoBlocks(text) {
 
 /**
  * Destroy-path / hostile events from inside plpgsql DO bodies.
- * Fail-closed: DROP/DISABLE/DROP POLICY/SET SCHEMA/RENAME/DROP SCHEMA and
- * permissive CREATE POLICY are real events. ENABLE RLS and restrictive
- * CREATE POLICY are never treated as grants from DO bodies.
+ * Fail-closed: DROP/DISABLE/DROP POLICY/SET SCHEMA/RENAME/DROP SCHEMA/
+ * ALTER SCHEMA RENAME and permissive CREATE POLICY are real events.
+ * ENABLE RLS and restrictive CREATE POLICY are never treated as grants from DO bodies.
  */
 function parseDoBodyDestroyEvents(rel, strippedText) {
   const events = [];
@@ -1469,6 +1469,29 @@ function parseDoBodyDestroyEvents(rel, strippedText) {
         kind: "set_schema",
         table: from,
         toTable,
+        file: rel,
+        line: lineAt(m.index),
+        index: abs(m.index),
+      });
+    }
+
+    // ALTER SCHEMA old RENAME TO new — bulk relocate (same as top-level ~2069)
+    const renameSchemaRe =
+      /\bALTER\s+SCHEMA\s+((?:"[^"]+"|[\w]+))\s+RENAME\s+TO\s+((?:"[^"]+"|[\w]+))/gi;
+    for (const m of text.matchAll(renameSchemaRe)) {
+      const fromSchema = normalizeIdent(m[1]);
+      const toSchema = normalizeIdent(m[2]);
+      if (!fromSchema || !toSchema) {
+        incomplete.push(
+          `${rel}:${lineAt(m.index)}: DO-body ALTER SCHEMA RENAME unparseable schema name — not fully checkable`,
+        );
+        continue;
+      }
+      if (fromSchema === toSchema) continue;
+      events.push({
+        kind: "rename_schema",
+        fromSchema,
+        toSchema,
         file: rel,
         line: lineAt(m.index),
         index: abs(m.index),
