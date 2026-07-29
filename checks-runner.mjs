@@ -202,13 +202,22 @@ export async function runChecks(o) {
  * Run the BLOCKING gate on a tree, SILENTLY, and return a structured verdict.
  * Used by the fan-in merge-train to judge the COMBINED tree after each merge —
  * the novel "two green branches can be red together" check. We deliberately run
- * the real correctness checks (secret scan + typecheck + build + schema-bump),
- * NOT the dirty-tree guard (the merge train commits each step, so a clean
- * committed tree is expected) and NOT the informational overview maps.
+ * the real correctness checks (secret scan + typecheck + build + schema-bump +
+ * Intent Contract when present), NOT the dirty-tree guard (the merge train
+ * commits each step, so a clean committed tree is expected) and NOT the
+ * informational overview maps.
  *
  * `--build`-equivalent is FORCED on here: a textual merge can leave code that
  * typechecks per-file but fails to build together, so the combined gate must
  * actually build to be honest about semantic breaks.
+ *
+ * Intent Contract (parity with runChecks): when a trusted freeze is present in
+ * reachable HEAD ancestry, scope violations and untrusted/not-checkable lineage
+ * fail the gate → quarantine + rollback of the in-flight lane. No contract →
+ * clean omit (never a false "intent verified", never a new block for repos
+ * without Intent). Freeze trust is history-first via discoverOriginalFreeze
+ * (original dedicated freeze blob) — never HEAD's baselineCommit pointer — so a
+ * merged lane cannot forge trust by rewriting baselineCommit in the combined tree.
  *
  * @param {object} o
  * @param {string} o.cwd       tree to gate (a worktree or the integration checkout)
@@ -230,6 +239,27 @@ export function gateTree(o) {
   }
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
   results.push(safe(() => checkSupabaseRls(cwd), "Supabase RLS / ungated mutations"));
+
+  // Intent Contract — same semantics as runChecks: null when absent (omit);
+  // fail-closed when present-but-untrusted / scope violation / not-checkable.
+  // checkIntent uses history-first freeze discovery from HEAD ancestry, so
+  // trust is independent of any baselineCommit rewrite in the merged tree.
+  {
+    let intentResult = null;
+    try {
+      intentResult = checkIntent(cwd, {});
+    } catch (e) {
+      intentResult = {
+        status: "fail",
+        label: "Intent Contract",
+        detail: `Check errored: ${e.message || e}`,
+        extra: [],
+      };
+    }
+    if (intentResult) {
+      results.push(intentResult);
+    }
+  }
 
   const fails = results.filter((r) => r.status === "fail");
   return { ok: fails.length === 0, fails, results };

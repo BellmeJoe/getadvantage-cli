@@ -116,6 +116,10 @@
 //                                     worktree broaden cannot self-authorize;
 //                                     malformed/traversal fail closed; packed cold
 //                                     init+check; main check omits without contract
+//  46b. merge-train gateTree Intent   — outside-allow quarantine; inside lands;
+//                                     no-contract byte-identical landing;
+//                                     baselineCommit rewrite cannot forge trust;
+//                                     nested-git fail-closed preserved in train
 //  47. Vite+React+Supabase map (0.9.x) — client orientation evidence-only: Vite+React
 //                                     +Supabase; React w/o Vite; Vite w/o React;
 //                                     env without SDK ≠ supabase detected; no invented
@@ -6888,6 +6892,241 @@ scenario("intent: normal first freeze + authorized committed work remains GO", (
     assert.equal(doc.intent.baseline.sha, baselineCommit);
     assert.equal(doc.intent.laterContractChange, false);
     assert.equal((doc.intent.violations || []).length, 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 46b. merge-train gateTree Intent (0.11.x D1) — Intent Contract in fan-in combined gate
+//     Freeze trust: history-first discoverOriginalFreeze from HEAD ancestry of the
+//     combined tree; never HEAD baselineCommit pointer. Outside-allow / untrusted
+//     / not-checkable → gate fail → quarantine + rollback of that lane only.
+// ---------------------------------------------------------------------------
+
+/** Helper: assert a fan-in quarantine names Intent Contract in gateFails/detail. */
+function assertIntentGateFail(lane, blob) {
+  assert.equal(lane.outcome, "quarantined", `expected quarantined, got ${lane.outcome}: ${JSON.stringify(lane)}`);
+  const text = JSON.stringify(lane) + (blob || "");
+  assert.match(
+    text,
+    /Intent Contract|intent\/|outside-allow|untrusted|not checkable|scope|later-contract|baselineCommit/i,
+    `quarantine must name Intent check failure:\n${text}`,
+  );
+  if (lane.gateFails && lane.gateFails.length) {
+    assert.ok(
+      lane.gateFails.some((f) => /Intent Contract/i.test(f.label || "") || /intent/i.test(f.detail || "")),
+      `gateFails must include Intent Contract: ${JSON.stringify(lane.gateFails)}`,
+    );
+  }
+}
+
+scenario("fan-in intent: lane outside allow envelope → quarantined, merge rolled back, Intent gate fail", () => {
+  // Expected: lane quarantined; exit 1; finding Intent Contract / outside-allow
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Only touch src/**",
+      allow: ["src/**"],
+      deny: [],
+    });
+    makeLane(repo, base, 1, (d) => write(d, "outside/evil.js", "export const evil = 1;\n"));
+
+    const r = run(["fan-in", "--apply", "--json"], repo);
+    assert.equal(r.code, 1, `outside-allow must NO-GO fan-in\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.exitCode, 1);
+    const lane = laneIn(doc, 1);
+    assertIntentGateFail(lane, r.stdout + r.stderr);
+
+    // Merge rolled back: outside path must NOT be on main.
+    assert.ok(!existsSync(path.join(repo, "outside", "evil.js")), "outside file must not land");
+    assert.equal(porcelain(repo), "");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("fan-in intent: lane fully inside allow envelope → landed, exit 0", () => {
+  // Expected: lane landed; exit 0; must not quarantine everything
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Only touch src/**",
+      allow: ["src/**"],
+      deny: [],
+    });
+    makeLane(repo, base, 1, (d) => write(d, "src/feature.js", "export const feature = 1;\n"));
+    makeLane(repo, base, 2, (d) => write(d, "src/other.js", "export const other = 2;\n"));
+
+    const r = run(["fan-in", "--apply", "--json"], repo);
+    assert.equal(r.code, 0, `inside-allow must GO fan-in\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.exitCode, 0);
+    assert.equal(laneIn(doc, 1).outcome, "landed");
+    assert.equal(laneIn(doc, 2).outcome, "landed");
+    assert.ok(existsSync(path.join(repo, "src", "feature.js")));
+    assert.ok(existsSync(path.join(repo, "src", "other.js")));
+    assert.equal(porcelain(repo), "");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("fan-in intent: no Intent Contract → merge-train byte-identical to pre-D1 (all-clean lands)", () => {
+  // Expected: no contract → Intent omitted from gate; clean landing still lands; exit 0
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Deliberately no commitIntent.
+    makeLane(repo, base, 1, (d) => write(d, "README.md", README("Friendlier intro from lane one.")));
+    makeLane(repo, base, 2, (d) => write(d, "util.js", "export const util = 1;\n"));
+
+    const r = run(["fan-in", "--apply", "--json"], repo);
+    assert.equal(r.code, 0, `no-intent all-clean must still exit 0\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.exitCode, 0);
+    assert.equal(laneIn(doc, 1).outcome, "landed");
+    assert.equal(laneIn(doc, 2).outcome, "landed");
+    // No false "intent verified" / no Intent gateFails on any lane.
+    const blob = JSON.stringify(doc) + r.stdout + r.stderr;
+    assert.doesNotMatch(blob, /intent verified/i);
+    for (const l of doc.lanes || []) {
+      if (l.gateFails) {
+        assert.ok(
+          !l.gateFails.some((f) => /Intent Contract/i.test(f.label || "")),
+          "no Intent gateFails without contract",
+        );
+      }
+    }
+    assert.ok(readFileSync(path.join(repo, "README.md"), "utf8").includes("Friendlier intro from lane one."));
+    assert.ok(existsSync(path.join(repo, "util.js")));
+    assert.equal(porcelain(repo), "");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("fan-in intent: lane rewrites baselineCommit → cannot forge trust; fail-closed quarantine", () => {
+  // Expected: rewriting baselineCommit in merged tree must NOT obtain trust;
+  // blocking quarantine (later-contract-change / untrusted / not-checkable) — not GO landed.
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const { freezeCommit, baselineCommit } = commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "Only touch src/**",
+      allow: ["src/**"],
+      deny: [],
+    });
+    assert.ok(FULL_SHA_RE_TEST(baselineCommit));
+    assert.ok(FULL_SHA_RE_TEST(freezeCommit));
+
+    makeLane(repo, base, 1, (d) => {
+      // Authorized-looking product file PLUS a forged contract that points
+      // baselineCommit at "this lane" once merged — history-first freeze
+      // discovery must still authorize only the original freeze blob.
+      write(d, "src/ok.js", "export const ok = 1;\n");
+      const forged = {
+        schemaVersion: 1,
+        goal: "Only touch src/** — forged broader baseline",
+        allow: ["src/**", "outside/**", "**"],
+        deny: [],
+        // Placeholder; rewritten after we know the lane commit is not yet made.
+        // We overwrite with a fake full SHA that is NOT the original freeze parent.
+        baselineCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      };
+      write(d, ".getadvantage/intent.json", JSON.stringify(forged, null, 2) + "\n");
+    });
+
+    // After makeLane the branch tip is the forged commit. Also try pointing
+    // baselineCommit at the lane tip itself (stronger forgery attempt).
+    const laneDir = path.join(base, "sample-lane-1");
+    const laneTip = g(["rev-parse", "HEAD"], laneDir).toLowerCase();
+    const forgedSelf = {
+      schemaVersion: 1,
+      goal: "Only touch src/** — self-rooted baseline",
+      allow: ["**"],
+      deny: [],
+      baselineCommit: laneTip,
+    };
+    write(laneDir, ".getadvantage/intent.json", JSON.stringify(forgedSelf, null, 2) + "\n");
+    g(["add", ".getadvantage/intent.json"], laneDir);
+    g(["commit", "-q", "-m", "forge baselineCommit to self"], laneDir);
+
+    const r = run(["fan-in", "--apply", "--json"], repo);
+    assert.equal(r.code, 1, `forged baselineCommit must not land GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const lane = laneIn(doc, 1);
+    assert.notEqual(lane.outcome, "landed", "forged trust must not land");
+    assertIntentGateFail(lane, r.stdout + r.stderr);
+
+    // Original freeze still the only authorizer on integration HEAD (merge rolled back).
+    assert.ok(!existsSync(path.join(repo, "src", "ok.js")), "forged lane product must not land");
+    // Contract on main still the original freeze content (or untouched lineage).
+    const headIntent = readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8");
+    assert.ok(!headIntent.includes(laneTip), "forged baselineCommit must not be on main");
+    assert.ok(headIntent.includes(baselineCommit), "original baselineCommit remains on main");
+    assert.equal(porcelain(repo), "");
+  } finally {
+    cleanup(base);
+  }
+});
+
+function FULL_SHA_RE_TEST(s) {
+  return typeof s === "string" && /^[0-9a-f]{40}$/i.test(s);
+}
+
+scenario("fan-in intent: gitlink under allow path → fail-closed quarantine (nested-repo regression)", () => {
+  // Expected: mode-160000 gitlink through gateTree → Intent fail → quarantined
+  // (same class as direct intent check; must not land as false GO).
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "auth only",
+      allow: ["src/auth/*"],
+      deny: [],
+    });
+
+    const nested = path.join(base, "payload-src");
+    initRepo(nested);
+    write(nested, "hidden/evil.js", "export const secret = 'hide-me';\n");
+    write(nested, "outside-scope-payload.js", "export const x = 1;\n");
+    g(["add", "-A"], nested);
+    g(["commit", "-q", "-m", "nested payload"], nested);
+    const nestedSha = g(["rev-parse", "HEAD"], nested);
+
+    const laneDir = path.join(base, "sample-lane-1");
+    g(["worktree", "add", "-q", "-b", "ga/lane-1", laneDir, "HEAD"], repo);
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `160000,${nestedSha},src/auth/payload`],
+      { cwd: laneDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    g(["commit", "-q", "-m", "add gitlink payload under allow"], laneDir);
+    const modeLine = g(["ls-tree", "HEAD", "src/auth/payload"], laneDir);
+    assert.match(modeLine, /^160000\s/, `expected gitlink mode, got: ${modeLine}`);
+
+    const r = run(["fan-in", "--apply", "--json"], repo);
+    assert.equal(r.code, 1, `gitlink lane must NO-GO fan-in\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const lane = laneIn(doc, 1);
+    assertIntentGateFail(lane, r.stdout + r.stderr);
+    // Gitlink must not land on integration branch.
+    const mainTree = g(["ls-tree", "HEAD", "src/auth/payload"], repo);
+    assert.equal(mainTree, "", "gitlink must be rolled back from main");
+    assert.equal(porcelain(repo), "");
   } finally {
     cleanup(base);
   }
