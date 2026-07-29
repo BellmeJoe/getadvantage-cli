@@ -1327,10 +1327,188 @@ function extractDoBlocks(text) {
 }
 
 /**
+ * Pull high-confidence [schema.]table references from a SQL slice (for attaching
+ * not_checkable lineage notes). Literals should already be masked when possible.
+ */
+function extractTableRefsFromSql(slice) {
+  /** @type {Map<string, {schema:string,name:string,full:string}>} */
+  const found = new Map();
+  const re =
+    /\b(?:(?:public|auth|storage|extensions|graphql_public)\s*\.\s*)?(?:"[^"]+"|[A-Za-z_][\w$]*)\b/gi;
+  // Prefer dotted public.table forms first.
+  const dotted =
+    /\b((?:"[^"]+"|[\w]+)\s*\.\s*(?:"[^"]+"|[\w]+))/gi;
+  for (const m of String(slice || "").matchAll(dotted)) {
+    const t = normalizeTableName(m[1]);
+    if (!t) continue;
+    // Skip schema-only noise like information_schema.columns if any.
+    if (t.schema === "pg_catalog" || t.schema === "information_schema") continue;
+    found.set(t.full, t);
+  }
+  // Bare table names after ON / TABLE / POLICY … ON keywords.
+  const afterKw =
+    /\b(?:ON|TABLE|INTO|FROM|UPDATE|TRUNCATE)\s+((?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)/gi;
+  for (const m of String(slice || "").matchAll(afterKw)) {
+    const t = normalizeTableName(m[1]);
+    if (!t) continue;
+    if (t.schema === "pg_catalog" || t.schema === "information_schema") continue;
+    found.set(t.full, t);
+  }
+  void re; // reserved for future wider scans
+  return [...found.values()];
+}
+
+/** Normalize incomplete notes to a display string. */
+function incompleteNoteText(n) {
+  if (n == null) return "";
+  if (typeof n === "string") return n;
+  if (n.message) {
+    const loc =
+      n.file != null
+        ? `${n.file}${n.line != null ? `:${n.line}` : ""}`
+        : "";
+    return loc ? `${loc}: ${n.message}` : String(n.message);
+  }
+  return String(n);
+}
+
+/**
+ * Emit a class-level not_checkable event (+ incomplete note) for lineage confidence.
+ * Prefer attaching known table refs; when none, still record an ambient incomplete.
+ */
+function emitNotCheckable(events, incomplete, o) {
+  const snippet = String(o.snippet || o.reason || "unparsed SQL")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  const reason = o.reason || "unparsed statement";
+  const tables = Array.isArray(o.tables) ? o.tables.filter(Boolean) : [];
+  const msgBase = o.message || `${reason} — not statically checkable`;
+  if (tables.length === 0) {
+    // Event path owns the verdict; incomplete is only a diagnostic trail and
+    // must not double-emit sql-not-checkable warns after promotion.
+    incomplete.push({
+      file: o.file,
+      line: o.line,
+      index: o.index,
+      message: msgBase,
+      snippet,
+      reason,
+      viaNotCheckable: true,
+    });
+    // Ambient: no table attachment — still an event so post-pass can promote
+    // against modelled-secure public tables later in the same lineage window.
+    events.push({
+      kind: "not_checkable",
+      table: null,
+      file: o.file,
+      line: o.line,
+      index: o.index,
+      reason,
+      snippet,
+      ambient: true,
+    });
+    return;
+  }
+  for (const table of tables) {
+    events.push({
+      kind: "not_checkable",
+      table,
+      file: o.file,
+      line: o.line,
+      index: o.index,
+      reason,
+      snippet,
+    });
+    incomplete.push({
+      file: o.file,
+      line: o.line,
+      index: o.index,
+      table: table.full,
+      message: `${msgBase} (table ${table.full})`,
+      snippet,
+      reason,
+      viaNotCheckable: true,
+    });
+  }
+}
+
+/**
+ * After known DO-body event extraction, cover modelled (and deliberately ignored)
+ * spans and emit not_checkable for residual statement-like fragments that can
+ * still mutate protection. Class fix: unmodelled constructs (e.g. ALTER POLICY)
+ * are incomplete, not silent.
+ */
+function scanDoBodyResidualUnmodeled(rel, text, abs, lineAt, events, incomplete) {
+  const n = text.length;
+  const covered = new Uint8Array(n);
+
+  const cover = (start, end) => {
+    const a = Math.max(0, start);
+    const b = Math.min(n, end);
+    for (let i = a; i < b; i++) covered[i] = 1;
+  };
+
+  const stmtEnd = (start) => {
+    let endSemi = text.indexOf(";", start);
+    if (endSemi < 0) endSemi = Math.min(n, start + 2048);
+    return endSemi + 1;
+  };
+
+  // Cover known / deliberately-ignored shapes (same discipline as parsers above).
+  const coverRes = [
+    /\bDROP\s+TABLE\b/gi,
+    /\bDROP\s+POLICY\b/gi,
+    /\bDROP\s+SCHEMA\b/gi,
+    /\bCREATE\s+POLICY\b/gi,
+    /\bALTER\s+SCHEMA\b/gi,
+    /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+(?:DISABLE|ENABLE)\s+ROW\s+LEVEL\s+SECURITY\b/gi,
+    /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+RENAME\s+TO\b/gi,
+    /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:(?:"[^"]+"|[\w]+)(?:\s*\.\s*(?:"[^"]+"|[\w]+))?)\s+SET\s+SCHEMA\b/gi,
+    /\bEXECUTE\s+/gi,
+    /\bPERFORM\s+/gi,
+  ];
+  for (const re of coverRes) {
+    for (const m of text.matchAll(re)) {
+      cover(m.index, stmtEnd(m.index));
+    }
+  }
+
+  // Residual security-relevant statement starters still present.
+  const residualRe =
+    /\b(?:ALTER\s+POLICY|ALTER\s+TABLE|DROP\s+TABLE|DROP\s+POLICY|CREATE\s+POLICY|DROP\s+SCHEMA|ALTER\s+SCHEMA|CREATE\s+TABLE|TRUNCATE|GRANT|REVOKE|EXECUTE)\b/gi;
+  for (const m of text.matchAll(residualRe)) {
+    if (covered[m.index]) continue;
+    const end = stmtEnd(m.index);
+    // Skip if majority of the match span is already covered (partial overlap).
+    let cov = 0;
+    for (let i = m.index; i < end; i++) if (covered[i]) cov++;
+    if (cov > (end - m.index) * 0.5) continue;
+
+    const stmt = text.slice(m.index, end);
+    const snippet = stmt.replace(/\s+/g, " ").trim().slice(0, 160);
+    const tables = extractTableRefsFromSql(stmt);
+    const head = snippet.slice(0, 40);
+    emitNotCheckable(events, incomplete, {
+      file: rel,
+      line: lineAt(m.index),
+      index: abs(m.index),
+      tables,
+      reason: `DO-body unmodelled statement (${head}${snippet.length > 40 ? "…" : ""})`,
+      message: `DO-body statement not confidently modelled: "${snippet}"`,
+      snippet,
+    });
+    cover(m.index, end);
+  }
+}
+
+/**
  * Destroy-path / hostile events from inside plpgsql DO bodies.
  * Fail-closed: DROP/DISABLE/DROP POLICY/SET SCHEMA/RENAME/DROP SCHEMA/
  * ALTER SCHEMA RENAME and permissive CREATE POLICY are real events.
  * ENABLE RLS and restrictive CREATE POLICY are never treated as grants from DO bodies.
+ * Unmodelled residual DDL (class: ALTER POLICY, dynamic EXECUTE, …) emits
+ * not_checkable events so lineage confidence can fail closed.
  */
 function parseDoBodyDestroyEvents(rel, strippedText) {
   const events = [];
@@ -1612,12 +1790,11 @@ function parseDoBodyDestroyEvents(rel, strippedText) {
     }
 
     // EXECUTE '<literal>' / EXECUTE $tag$…$tag$ — fail closed when the literal
-    // holds destroy-shaped DDL. format()/concat remain a carried limitation.
+    // holds destroy-shaped DDL. format()/concat → not_checkable (class lineage).
     const execRe = /\bEXECUTE\s+/gi;
     for (const m of text.matchAll(execRe)) {
       let i = m.index + m[0].length;
       while (i < text.length && /\s/.test(text[i])) i++;
-      let lit = null;
       const dq = matchDollarQuoteDelim(text, i);
       if (dq) {
         // Body was already maskSqlQuotedLiterals'd → dollar interiors are blank.
@@ -1628,11 +1805,37 @@ function parseDoBodyDestroyEvents(rel, strippedText) {
         // Single-quoted interiors are blanked by mask — re-read from raw body.
         continue;
       }
-      // Dynamic EXECUTE format(...) / variable — cannot prove; note incomplete.
+      // Dynamic EXECUTE format(...) / variable — cannot prove; class not_checkable.
       if (/^format\s*\(/i.test(text.slice(i))) {
-        incomplete.push(
-          `${rel}:${lineAt(m.index)}: DO-body EXECUTE format(…) — not statically checkable`,
-        );
+        let endSemi = text.indexOf(";", m.index);
+        if (endSemi < 0) endSemi = Math.min(text.length, m.index + 2048);
+        // Use unmasked body for table refs inside format string literals.
+        const rawSlice = block.body.slice(m.index, endSemi + 1);
+        const tables = extractTableRefsFromSql(rawSlice);
+        const snippet = rawSlice.replace(/\s+/g, " ").trim().slice(0, 160);
+        emitNotCheckable(events, incomplete, {
+          file: rel,
+          line: lineAt(m.index),
+          index: abs(m.index),
+          tables,
+          reason: "DO-body EXECUTE format(…)",
+          message: `DO-body EXECUTE format(…) — not statically checkable`,
+          snippet,
+        });
+      } else if (/^[A-Za-z_]/.test(text.slice(i))) {
+        // EXECUTE variable / expression — not statically checkable.
+        let endSemi = text.indexOf(";", m.index);
+        if (endSemi < 0) endSemi = Math.min(text.length, m.index + 256);
+        const snippet = text.slice(m.index, endSemi + 1).replace(/\s+/g, " ").trim().slice(0, 160);
+        emitNotCheckable(events, incomplete, {
+          file: rel,
+          line: lineAt(m.index),
+          index: abs(m.index),
+          tables: [],
+          reason: "DO-body EXECUTE dynamic",
+          message: `DO-body EXECUTE dynamic expression — not statically checkable`,
+          snippet,
+        });
       }
     }
 
@@ -1667,9 +1870,17 @@ function parseDoBodyDestroyEvents(rel, strippedText) {
         }
         if (!lit) continue;
         if (/\bformat\s*\(/i.test(lit) || /\|\|/.test(lit)) {
-          incomplete.push(
-            `${rel}:${lineAt(m.index)}: DO-body EXECUTE dynamic string — not statically checkable`,
-          );
+          const tables = extractTableRefsFromSql(lit);
+          const snippet = lit.replace(/\s+/g, " ").trim().slice(0, 160);
+          emitNotCheckable(events, incomplete, {
+            file: rel,
+            line: lineAt(m.index),
+            index: abs(m.index),
+            tables,
+            reason: "DO-body EXECUTE dynamic string",
+            message: `DO-body EXECUTE dynamic string — not statically checkable`,
+            snippet,
+          });
           continue;
         }
         // Parse destroy paths inside the EXECUTE literal (fail closed).
@@ -1704,6 +1915,11 @@ function parseDoBodyDestroyEvents(rel, strippedText) {
         }
       }
     }
+
+    // Class residual: any unmodelled security-relevant DDL left in the DO body
+    // (ALTER POLICY is the canonical example — not a bespoke ALTER-only rule;
+    // residual scan catches the whole unmodelled class).
+    scanDoBodyResidualUnmodeled(rel, text, abs, lineAt, events, incomplete);
   }
 
   return { events, incomplete };
@@ -2205,12 +2421,42 @@ function isWriteCommand(forCmd) {
 }
 
 /**
+ * True when a policy is a proven permissive write open (USING/WITH CHECK true).
+ * Used to decide "modelled-secure" (RLS on + at least one non-open policy).
+ */
+function isProvenPermissiveWritePolicy(pol) {
+  if (!pol || !isWriteCommand(pol.forCmd)) return false;
+  const clientRoles = (pol.roles || []).filter(isClientFacingRole);
+  if (clientRoles.length === 0) return false;
+  const forCmd = String(pol.forCmd || "ALL").toUpperCase();
+  return (
+    (forCmd === "INSERT" && (pol.withCheckTrue || (pol.usingTrue && pol.withCheckExpr == null))) ||
+    (forCmd === "UPDATE" && (pol.usingTrue || pol.withCheckTrue)) ||
+    (forCmd === "DELETE" && pol.usingTrue) ||
+    (forCmd === "ALL" && (pol.usingTrue || pol.withCheckTrue))
+  );
+}
+
+/** RLS enabled + at least one policy that is not a proven open write. */
+function isModelledSecureState(st) {
+  if (!st || st.rlsEnabled !== true) return false;
+  if (!st.policies || st.policies.size === 0) return false;
+  for (const pol of st.policies.values()) {
+    if (!isProvenPermissiveWritePolicy(pol)) return true;
+  }
+  return false;
+}
+
+/**
  * Apply ordered events → final per-table state map.
+ * Tracks lineage confidence (everSecureSeq / lineageNotCheckable).
  * @returns {Map<string, object>}
  */
 function buildPolicyState(allEvents) {
   /** @type {Map<string, any>} */
   const tables = new Map();
+  /** Ambient not_checkable events (no table) for post-pass promotion. */
+  const ambientNotCheckable = [];
 
   function ensure(table) {
     const k = table.full;
@@ -2223,12 +2469,64 @@ function buildPolicyState(allEvents) {
         rlsLast: null, // {file,line,enabled}
         createLoc: null,
         policies: new Map(), // name → policy
+        // Lineage confidence: first monotonic seq at which modelled-secure was observed.
+        everSecureSeq: null,
+        // Later unmodelled statement against this table after secure observation.
+        lineageNotCheckable: null, // {file,line,index,seq,reason,snippet}
       });
     }
     return tables.get(k);
   }
 
+  // Monotonic order across sorted events (file path then index) — do not compare
+  // raw char offsets across different migration files.
+  let seq = 0;
+
+  function noteSecure(st, atSeq) {
+    if (st.everSecureSeq == null && isModelledSecureState(st)) {
+      st.everSecureSeq = typeof atSeq === "number" ? atSeq : seq;
+    }
+  }
+
+  function markLineageNotCheckable(st, ev, atSeq) {
+    if (!st) return;
+    // Once observed secure, any later unmodelled statement blocks.
+    if (st.everSecureSeq == null) return;
+    if (typeof atSeq === "number" && atSeq < st.everSecureSeq) return;
+    // Keep earliest blocking unmodelled statement.
+    if (st.lineageNotCheckable && st.lineageNotCheckable.seq <= atSeq) return;
+    st.lineageNotCheckable = {
+      file: ev.file,
+      line: ev.line,
+      index: ev.index,
+      seq: atSeq,
+      reason: ev.reason || "unparsed statement",
+      snippet: ev.snippet || "",
+    };
+  }
+
   for (const ev of allEvents) {
+    const atSeq = seq++;
+    if (ev.kind === "not_checkable") {
+      if (!ev.table) {
+        ambientNotCheckable.push({ ev, atSeq });
+        continue;
+      }
+      const st = ensure(ev.table);
+      markLineageNotCheckable(st, ev, atSeq);
+      // Rule 2: public table reachable for mutation with uncertain protection —
+      // record for evaluate even if never secure (final-state pass would be wrong).
+      if (st.table.schema === "public" && st.everSecureSeq == null) {
+        st.uncertainNotCheckable = st.uncertainNotCheckable || {
+          file: ev.file,
+          line: ev.line,
+          index: ev.index,
+          reason: ev.reason || "unparsed statement",
+          snippet: ev.snippet || "",
+        };
+      }
+      continue;
+    }
     if (ev.kind === "create_table") {
       // Only reset policy/RLS state for a *fresh* table (not already in the model).
       // CREATE TABLE IF NOT EXISTS on an already-modeled table must not erase proven
@@ -2242,16 +2540,24 @@ function buildPolicyState(allEvents) {
         // Fresh table: RLS off by default in Postgres; no policies yet.
         st.rlsEnabled = false;
         st.policies.clear();
+        // Fresh identity — prior secure under this name is gone with drop_table;
+        // IF NOT EXISTS on existing keeps everSecureSeq.
+        st.everSecureSeq = null;
+        st.lineageNotCheckable = null;
+        st.uncertainNotCheckable = null;
       }
+      noteSecure(st, atSeq);
     } else if (ev.kind === "drop_table") {
       tables.delete(ev.table.full);
     } else if (ev.kind === "rls") {
       const st = ensure(ev.table);
       st.rlsEnabled = ev.enabled;
       st.rlsLast = { file: ev.file, line: ev.line, enabled: ev.enabled, raw: ev.raw };
+      noteSecure(st, atSeq);
     } else if (ev.kind === "create_policy") {
       const st = ensure(ev.table);
       st.policies.set(ev.policyName.toLowerCase(), ev);
+      noteSecure(st, atSeq);
     } else if (ev.kind === "drop_policy") {
       const st = tables.get(ev.table.full);
       if (st) st.policies.delete(String(ev.policyName).toLowerCase());
@@ -2302,7 +2608,22 @@ function buildPolicyState(allEvents) {
         }
         pol.file = ev.file;
         pol.line = ev.line;
+        // Unbalanced/malformed USING/WITH CHECK → not confidently modelled.
+        if (ev.usingParseOk === false || ev.withCheckParseOk === false) {
+          markLineageNotCheckable(
+            st,
+            {
+              file: ev.file,
+              line: ev.line,
+              index: ev.index,
+              reason: "ALTER POLICY with unparseable USING/WITH CHECK",
+              snippet: ev.raw || "ALTER POLICY …",
+            },
+            atSeq,
+          );
+        }
       }
+      noteSecure(st, atSeq);
     } else if (ev.kind === "rename_table") {
       // Move modeled state to the new name so open policies cannot be stranded
       // under a dead key (false clean under the new name).
@@ -2315,6 +2636,7 @@ function buildPolicyState(allEvents) {
         st.table = ev.toTable;
         // If target already exists, last rename wins (rare in migrations).
         tables.set(toKey, st);
+        noteSecure(st, atSeq);
       }
     } else if (ev.kind === "set_schema") {
       // Move modeled state to the new schema-qualified name; free the old key so
@@ -2327,6 +2649,7 @@ function buildPolicyState(allEvents) {
         tables.delete(fromKey);
         st.table = ev.toTable;
         tables.set(toKey, st);
+        noteSecure(st, atSeq);
       }
     } else if (ev.kind === "drop_schema") {
       // CASCADE-modeled DROP SCHEMA removes every table in that schema from the
@@ -2357,22 +2680,96 @@ function buildPolicyState(allEvents) {
         };
         st.table = toTable;
         tables.set(toTable.full, st);
+        noteSecure(st, atSeq);
       }
     }
   }
+
+  // Ambient not_checkable (no table ref): attach to every public table that was
+  // already modelled-secure before the ambient statement's seq.
+  for (const { ev, atSeq } of ambientNotCheckable) {
+    for (const st of tables.values()) {
+      if (st.table.schema !== "public") continue;
+      markLineageNotCheckable(st, ev, atSeq);
+    }
+  }
+
   return tables;
 }
 
 /**
  * Evaluate final state → findings (fail) + incomplete notes (warn).
+ * Class lineage: after modelled-secure, unmodelled later statements → blocking
+ * NOT_CHECKABLE (not warn). Disclosure path is always named on those fails.
  */
 function evaluatePolicyState(tables) {
   const fails = [];
   const warns = [];
 
+  const lineageRemediation = (tableFull) => [
+    `-- Disclosure / escape hatch (fail-closed lineage confidence):`,
+    `-- Rewrite the unmodelled statement as top-level static SQL outside DO $$ … $$ / EXECUTE format(…)`,
+    `-- so this check can parse the full protection lineage for ${tableFull}.`,
+    `-- Example: move ALTER POLICY / dynamic DDL to a plain migration statement, or re-state final protection:`,
+    `ALTER TABLE ${tableFull} ENABLE ROW LEVEL SECURITY;`,
+    `-- Then (re)create restrictive policies statically, e.g.:`,
+    `CREATE POLICY "${String(tableFull).split(".").pop()}_owner_all"`,
+    `  ON ${tableFull}`,
+    `  FOR ALL`,
+    `  TO authenticated`,
+    `  USING (auth.uid() = user_id)`,
+    `  WITH CHECK (auth.uid() = user_id);`,
+    `-- not checkable ≠ GO for previously secured public tables — do not ship until lineage is static.`,
+  ];
+
   for (const st of tables.values()) {
     // Only public schema is the PostgREST default exposure surface we prove.
     if (st.table.schema !== "public") continue;
+
+    // ---- Class lineage NOT_CHECKABLE (after modelled-secure) -------------
+    // Must block before a false "pass" on still-looking-secure final state.
+    if (st.lineageNotCheckable) {
+      const nc = st.lineageNotCheckable;
+      const snip = String(nc.snippet || nc.reason || "unparsed SQL").replace(/\s+/g, " ").trim().slice(0, 160);
+      fails.push({
+        ruleId: "supabase/lineage-not-checkable",
+        label: "Table lineage not fully checkable after secure state",
+        file: nc.file,
+        startLine: nc.line,
+        table: st.table.full,
+        message:
+          `Table ${st.table.full} was previously modelled as RLS-secured, but a later statement could not be confidently parsed` +
+          ` (${nc.reason || "unparsed statement"}): "${snip}". ` +
+          `Protection of ${st.table.full} cannot be proven — not checkable ≠ GO.`,
+        remediation: lineageRemediation(st.table.full),
+      });
+      // Still surface proven open holes below when present; lineage fail alone is enough to block.
+    }
+
+    // ---- Rule 2: public mutation surface with uncertain protection + gap --
+    // If we never observed modelled-secure, final state would "pass" only when
+    // RLS is on with no open policies — but an unmodelled gap means we cannot
+    // establish protection. When RLS is confidently off, rls-disabled owns it.
+    if (
+      !st.lineageNotCheckable &&
+      st.uncertainNotCheckable &&
+      st.rlsEnabled !== false &&
+      !isModelledSecureState(st)
+    ) {
+      const nc = st.uncertainNotCheckable;
+      const snip = String(nc.snippet || nc.reason || "unparsed SQL").replace(/\s+/g, " ").trim().slice(0, 160);
+      fails.push({
+        ruleId: "supabase/lineage-not-checkable",
+        label: "Public table protection not fully checkable",
+        file: nc.file,
+        startLine: nc.line,
+        table: st.table.full,
+        message:
+          `Table ${st.table.full} is a public mutation surface whose protection state cannot be confidently established` +
+          ` because of unparsed SQL (${nc.reason || "unparsed statement"}): "${snip}". not checkable ≠ GO.`,
+        remediation: lineageRemediation(st.table.full),
+      });
+    }
 
     // ---- RLS disabled (or never enabled after create) --------------------
     // Proven when we saw CREATE TABLE (default off) or explicit DISABLE, and
@@ -2422,16 +2819,31 @@ function evaluatePolicyState(tables) {
           (pol.forCmd === "DELETE" && pol.usingTrue) ||
           (pol.forCmd === "ALL" && (pol.usingTrue || pol.withCheckTrue));
 
-        // Incomplete parse of USING/WITH CHECK → never claim GO; surface warn.
+        // Incomplete parse of USING/WITH CHECK → never claim GO.
+        // After modelled-secure (or RLS on), promote to blocking not-checkable.
         if ((!pol.usingParseOk || !pol.withCheckParseOk) && !writeOpen) {
-          warns.push({
-            ruleId: "supabase/policy-not-checkable",
+          const finding = {
+            ruleId:
+              st.everSecureSeq != null || st.rlsEnabled === true
+                ? "supabase/lineage-not-checkable"
+                : "supabase/policy-not-checkable",
             label: "Policy not fully parseable",
             file: pol.file,
             startLine: pol.line,
             table: st.table.full,
             message: `CREATE POLICY "${pol.policyName}" on ${st.table.full} has unbalanced/malformed USING or WITH CHECK — static analysis cannot prove safety.`,
-          });
+          };
+          if (st.everSecureSeq != null || st.rlsEnabled === true) {
+            finding.message +=
+              ` Table ${st.table.full} protection lineage is not checkable ≠ GO.`;
+            finding.remediation = [
+              `-- Disclosure / escape hatch: fix the policy syntax or rewrite as a complete static CREATE POLICY`,
+              `-- with balanced USING / WITH CHECK so lineage can be proven for ${st.table.full}.`,
+            ];
+            fails.push(finding);
+          } else {
+            warns.push(finding);
+          }
           continue;
         }
 
@@ -2672,12 +3084,66 @@ export function checkSupabaseRls(cwd) {
 
   const allFails = [...fails];
   const allWarns = [...polWarns, ...edge.warns, ...edge.incomplete];
+  // Incomplete notes: most stay warns. Notes already promoted via not_checkable
+  // events appear as lineage-not-checkable fails above. Remaining notes that
+  // name a table which still looks modelled-secure (final pass candidate) are
+  // promoted here as a safety net (class fail-closed).
+  const secureFinal = new Set();
+  for (const st of tables.values()) {
+    if (st.table.schema === "public" && isModelledSecureState(st) && !st.lineageNotCheckable) {
+      secureFinal.add(st.table.full);
+    }
+  }
   for (const n of incompleteNotes) {
+    // Notes emitted alongside not_checkable events are owned by evaluatePolicyState
+    // (lineage-not-checkable fails). Skip so we do not double-emit warn/fail.
+    if (typeof n === "object" && n && n.viaNotCheckable) continue;
+    const text = incompleteNoteText(n);
+    const file =
+      typeof n === "object" && n && n.file
+        ? n.file
+        : String(text).split(":")[0] || "";
+    const tableFull =
+      typeof n === "object" && n && n.table
+        ? n.table
+        : null;
+    const startLine =
+      typeof n === "object" && n && typeof n.line === "number" ? n.line : undefined;
+    const snip =
+      typeof n === "object" && n && n.snippet
+        ? String(n.snippet).replace(/\s+/g, " ").trim().slice(0, 160)
+        : "";
+    // Already blocking via not_checkable → lineage-not-checkable in evaluatePolicyState;
+    // do not also emit a redundant sql-not-checkable warn for the same gap.
+    if (tableFull) {
+      const st = tables.get(tableFull);
+      if (st && st.lineageNotCheckable) continue;
+    }
+    // Promote when the note attaches to a still-secure-looking public table.
+    if (tableFull && secureFinal.has(tableFull)) {
+      allFails.push({
+        ruleId: "supabase/lineage-not-checkable",
+        label: "Table lineage not fully checkable after secure state",
+        file,
+        startLine,
+        table: tableFull,
+        message:
+          `Table ${tableFull} was modelled as RLS-secured, but migration SQL was not fully checkable` +
+          `${snip ? `: "${snip}"` : `: ${text}`}. Protection cannot be proven — not checkable ≠ GO.`,
+        remediation: [
+          `-- Disclosure / escape hatch: rewrite dynamic/DO-wrapped DDL as top-level static SQL`,
+          `-- so lineage for ${tableFull} is fully parseable, then re-run getadvantage check.`,
+        ],
+      });
+      continue;
+    }
     allWarns.push({
       ruleId: "supabase/sql-not-checkable",
       label: "SQL not fully checkable",
-      file: String(n).split(":")[0] || "",
-      message: String(n),
+      file,
+      ...(startLine != null ? { startLine } : {}),
+      ...(tableFull ? { table: tableFull } : {}),
+      message: text,
     });
   }
 

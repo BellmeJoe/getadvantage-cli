@@ -10519,6 +10519,162 @@ scenario('supabase-rls: DO ALTER SCHEMA "public" RENAME TO "Public_Old" then nak
   }
 });
 
+// ---- Group-51: class-level fail-closed lineage confidence --------------------
+// After modelled-secure (RLS on + restrictive policy), unmodelled later SQL is
+// blocking NOT_CHECKABLE — not warn, not silent pass. Closes DO-wrapped
+// ALTER POLICY … USING (true) as a *consequence* of residual unmodelled class,
+// not a bespoke ALTER POLICY-only regex.
+
+scenario("supabase-rls: DO-wrapped ALTER POLICY USING(true) on secured table → NO-GO (lineage-not-checkable, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-do-alter-policy");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-do-ap", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_do_alter_policy.sql",
+      [
+        "DO $do$",
+        "BEGIN",
+        // Hostile open via ALTER POLICY inside DO — parser does not model this
+        // as alter_policy; class residual → lineage-not-checkable.
+        '  ALTER POLICY "bar_owner" ON public.bar USING (true) WITH CHECK (true);',
+        "END",
+        "$do$;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: DO ALTER POLICY open");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `DO ALTER POLICY USING(true) must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some(
+        (f) =>
+          (f.ruleId === "supabase/lineage-not-checkable" || /not-checkable/i.test(f.ruleId || "")) &&
+          /public\.bar/i.test(f.table || f.message || ""),
+      ),
+      `public.bar must be lineage-not-checkable after DO ALTER POLICY:\n${JSON.stringify(rls)}`,
+    );
+    // Disclosure path / escape hatch named (fix #7 friction).
+    const blob = JSON.stringify(rls);
+    assert.ok(
+      /escape hatch|top-level static|not checkable/i.test(blob),
+      `must name disclosure path:\n${blob}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: DO EXECUTE format against secured table → NO-GO (lineage-not-checkable class fix, exit 1)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-do-exec-format");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-do-ef", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.secrets (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.secrets ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "sec_owner" ON public.secrets FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_do_exec_format.sql",
+      [
+        "DO $do$",
+        "BEGIN",
+        // Deliberately unparseable construct in secure table lineage — proves
+        // class fix (not an ALTER POLICY-only instance rule).
+        "  EXECUTE format('ALTER TABLE public.secrets DISABLE ROW LEVEL SECURITY');",
+        "END",
+        "$do$;",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: DO EXECUTE format against secured table");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 1, `DO EXECUTE format on secured table must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
+    assert.ok(
+      rls.findings?.some(
+        (f) =>
+          (f.ruleId === "supabase/lineage-not-checkable" || /not-checkable/i.test(f.ruleId || "")) &&
+          /public\.secrets/i.test(f.table || f.message || ""),
+      ),
+      `public.secrets must be lineage-not-checkable after DO EXECUTE format:\n${JSON.stringify(rls)}`,
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("supabase-rls: fully parseable secure lineage → GO (safe control, exit 0)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rls-lineage-safe");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "rls-lin-safe", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      "supabase/migrations/20240101000000_init.sql",
+      [
+        "CREATE TABLE public.bar (id uuid PRIMARY KEY, user_id uuid);",
+        "ALTER TABLE public.bar ENABLE ROW LEVEL SECURITY;",
+        'CREATE POLICY "bar_owner" ON public.bar FOR ALL TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "supabase/migrations/20240102000000_top_level_ok.sql",
+      [
+        // Fully parseable top-level alter that keeps restrictive predicates.
+        'ALTER POLICY "bar_owner" ON public.bar TO authenticated',
+        "  USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: fully parseable secure lineage");
+
+    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(r.code, 0, `fully parseable secure lineage must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const rls = findRlsCheck(doc);
+    assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
 scenario('supabase-rls: distinct public."Bar" and public.bar both unprotected → NO-GO both (exit 1)', () => {
   const base = freshBase();
   try {
@@ -10624,8 +10780,10 @@ scenario('supabase-rls: public."bar" merges with public.bar — ENABLE on unquot
 // ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
+const filter = process.env.TEST_FILTER || "";
+const toRun = filter ? scenarios.filter((s) => s.name.includes(filter)) : scenarios;
 let failed = 0;
-for (const s of scenarios) {
+for (const s of toRun) {
   const t0 = Date.now();
   try {
     await s.fn();
@@ -10637,5 +10795,5 @@ for (const s of scenarios) {
   }
 }
 console.log("");
-console.log(`  ${scenarios.length - failed}/${scenarios.length} scenarios passed${failed ? ` — ${failed} FAILED` : ""}`);
+console.log(`  ${toRun.length - failed}/${toRun.length} scenarios passed${failed ? ` — ${failed} FAILED` : ""}${filter ? ` (filter: ${filter})` : ""}`);
 process.exit(failed ? 1 : 0);
