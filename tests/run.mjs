@@ -158,6 +158,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
+import { checkSupabaseRls } from "../checks.mjs";
 
 /** Same as util.mjs secretAuthId — local so scenarios never import production modules. */
 function hashOf(match) {
@@ -7851,10 +7852,6 @@ scenario("dogfood: product check completes without raw Intent git noise; hostile
 // 49. Supabase RLS / ungated mutations — policy-state table model (0.10.x)
 // ---------------------------------------------------------------------------
 
-function findRlsCheck(doc) {
-  return (doc.checks || []).find((c) => /Supabase RLS/i.test(c.label));
-}
-
 scenario("supabase-rls: public.todos with RLS disabled → NO-GO + location + paste-ready remediation", () => {
   const base = freshBase();
   try {
@@ -7877,11 +7874,7 @@ scenario("supabase-rls: public.todos with RLS disabled → NO-GO + location + pa
     );
     commitAll(repo, "chore: todos rls off");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `RLS disabled must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", `expected RLS fail, got ${JSON.stringify(rls)}`);
     const blob = JSON.stringify(rls);
     assert.ok(/supabase\/migrations\/20240101000000_init\.sql/.test(blob), `must cite migration file:\n${blob}`);
@@ -7931,11 +7924,7 @@ scenario("supabase-rls: permissive USING (true) write policy → NO-GO", () => {
     );
     commitAll(repo, "chore: open policy");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `permissive write policy must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     const blob = JSON.stringify(rls);
     assert.ok(/20240102000000_open_policy\.sql/.test(blob), `must cite policy migration:\n${blob}`);
@@ -7976,11 +7965,7 @@ scenario("supabase-rls: ENABLE RLS + restrictive authenticated policy → GO", (
     );
     commitAll(repo, "chore: secure todos");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `restrictive RLS must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
     assert.ok(!rls.findings || rls.findings.length === 0, "no findings on secure migration");
   } finally {
@@ -8022,11 +8007,7 @@ scenario("supabase-rls: comments, strings, and test fixtures do NOT create findi
     );
     commitAll(repo, "chore: noise only");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `comments/fixtures must not NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -8065,11 +8046,7 @@ scenario("supabase-rls: service-role edge path is NOT claimed public; dynamic wr
       ].join("\n"),
     );
     commitAll(repoSrv, "chore: service role edge");
-    const rSrv = run(["check", "--json", "--no-overview", "--no-brief-check"], repoSrv);
-    assert.equal(rSrv.code, 0, `service-role must not false-public NO-GO\n${rSrv.stderr}\n${rSrv.stdout}`);
-    const docSrv = parseJson(rSrv);
-    assert.equal(docSrv.verdict, "GO");
-    const rlsSrv = findRlsCheck(docSrv);
+    const rlsSrv = checkSupabaseRls(repoSrv);
     assert.ok(rlsSrv && rlsSrv.status === "pass", JSON.stringify(rlsSrv));
     assert.ok(
       !JSON.stringify(rlsSrv).includes("public access") || rlsSrv.status === "pass",
@@ -8093,10 +8070,7 @@ scenario("supabase-rls: service-role edge path is NOT claimed public; dynamic wr
       ].join("\n"),
     );
     commitAll(repoDyn, "chore: dynamic edge");
-    const rDyn = run(["check", "--json", "--no-overview", "--no-brief-check"], repoDyn);
-    // warn keeps GO exit 0, but status must not be pass claiming safety
-    const docDyn = parseJson(rDyn);
-    const rlsDyn = findRlsCheck(docDyn);
+    const rlsDyn = checkSupabaseRls(repoDyn);
     assert.ok(rlsDyn, "RLS check must run when edge functions present");
     assert.ok(
       rlsDyn.status === "warn" || rlsDyn.status === "fail",
@@ -8122,10 +8096,7 @@ scenario("supabase-rls: no Supabase evidence → honest skip; cross-file final s
     write(repoNone, "package.json", JSON.stringify({ name: "no-sb", version: "1.0.0", private: true }, null, 2) + "\n");
     write(repoNone, "app.js", "export const ok = 1;\n");
     commitAll(repoNone, "chore: plain");
-    const rNone = run(["check", "--json", "--no-overview", "--no-brief-check"], repoNone);
-    assert.equal(rNone.code, 0, rNone.stderr);
-    const docNone = parseJson(rNone);
-    const rlsNone = findRlsCheck(docNone);
+    const rlsNone = checkSupabaseRls(repoNone);
     assert.ok(rlsNone && rlsNone.status === "skip", `absent evidence must skip: ${JSON.stringify(rlsNone)}`);
     assert.ok(/no Supabase|Skipped/i.test(rlsNone.detail), rlsNone.detail);
 
@@ -8150,11 +8121,7 @@ scenario("supabase-rls: no Supabase evidence → honest skip; cross-file final s
       "ALTER TABLE public.todos DISABLE ROW LEVEL SECURITY;\n",
     );
     commitAll(repoX, "chore: later disable");
-    const rX = run(["check", "--json", "--no-overview", "--no-brief-check"], repoX);
-    assert.equal(rX.code, 1, `later DISABLE must NO-GO\n${rX.stderr}\n${rX.stdout}`);
-    const docX = parseJson(rX);
-    assert.equal(docX.verdict, "NO-GO");
-    const rlsX = findRlsCheck(docX);
+    const rlsX = checkSupabaseRls(repoX);
     assert.ok(rlsX && rlsX.status === "fail");
     assert.ok(/20240115000000_oops_disable\.sql/.test(JSON.stringify(rlsX)), "must cite later migration");
   } finally {
@@ -8201,17 +8168,15 @@ scenario("supabase-rls: packed cold path — RLS-disabled fixture NO-GO with rem
     );
     commitAll(sample, "chore: cold rls off");
 
-    const r = spawnSync(process.execPath, [bin, "check", "--json", "--no-overview", "--no-brief-check"], {
-      cwd: sample,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 120_000,
-      env: buildEnv(),
-    });
-    assert.equal(r.status, 1, `cold packed must NO-GO on RLS off:\n${r.stderr}\n${r.stdout}`);
-    const doc = JSON.parse(r.stdout);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    // Prove implementation is in the published pack surface, then exercise it directly
+    // (check is intentionally unexposed from runChecks/gateTree while PARKED_INSUFFICIENT).
+    const packedChecks = path.join(cold, "node_modules", "getadvantage", "checks.mjs");
+    assert.ok(existsSync(packedChecks), "packed checks.mjs must include checkSupabaseRls implementation");
+    assert.ok(
+      /export function checkSupabaseRls/.test(readFileSync(packedChecks, "utf8")),
+      "packed checks.mjs must export checkSupabaseRls",
+    );
+    const rls = checkSupabaseRls(sample);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     const blob = JSON.stringify(rls);
     assert.ok(/20240601000000_todos\.sql/.test(blob), blob);
@@ -8242,11 +8207,7 @@ scenario("supabase-rls: COMMENT ON single-quoted ENABLE RLS must not false-GO un
     );
     commitAll(repo, "chore: comment trap");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `quoted ENABLE must not mask unprotected table\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", `must fail-closed, got ${JSON.stringify(rls)}`);
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" || /rls/i.test(String(f.ruleId))),
@@ -8283,11 +8244,7 @@ scenario("supabase-rls: DEFAULT/string and ''-escaped quoted RLS text must not c
     );
     commitAll(repo, "chore: string defaults");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DEFAULT string ENABLE must not false-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled"),
@@ -8326,11 +8283,7 @@ scenario("supabase-rls: dollar-quoted body with RLS-like DDL must not false-GO u
     );
     commitAll(repo, "chore: dollar quote trap");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `dollar-quoted ENABLE must not false-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled"),
@@ -8370,11 +8323,7 @@ scenario("supabase-rls: real top-level ENABLE + restrictive policy still GO afte
     );
     commitAll(repo, "chore: real enable still works");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `real ENABLE + restrictive policy must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -8405,11 +8354,7 @@ scenario("supabase-rls: real permissive USING(true) still NO-GO after quote-mask
     );
     commitAll(repo, "chore: real permissive still NO-GO");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `real permissive policy must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8447,11 +8392,7 @@ scenario("supabase-rls: CREATE TABLE IF NOT EXISTS re-decl on open table → sti
     );
     commitAll(repo, "chore: idempotent regen after open policy");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `IF NOT EXISTS must not false-GO open policy\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8480,11 +8421,7 @@ scenario("supabase-rls: migration 1 alone with open_write → NO-GO (control)", 
     );
     commitAll(repo, "chore: open alone");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `open policy alone must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8525,11 +8462,7 @@ scenario("supabase-rls: DROP TABLE then fresh CREATE + owner policy → GO (real
     );
     commitAll(repo, "chore: drop and secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DROP+CREATE secure must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -8560,11 +8493,7 @@ scenario("supabase-rls: CREATE TABLE IF NOT EXISTS on already-safe table → sti
     );
     commitAll(repo, "chore: idempotent on safe table");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `IF NOT EXISTS on safe table must stay GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -8600,11 +8529,7 @@ scenario("supabase-rls: IF NOT EXISTS re-decl then later new permissive policy �
     );
     commitAll(repo, "chore: later open after re-decl");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `later permissive after IF NOT EXISTS must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8644,11 +8569,7 @@ scenario("supabase-rls: DISABLE then re-ENABLE keeps open policy → NO-GO", () 
     );
     commitAll(repo, "chore: disable re-enable");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `re-ENABLE must not drop open policy from model\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8683,11 +8604,7 @@ scenario("supabase-rls: bare todos vs public.todos IF NOT EXISTS re-decl still N
     );
     commitAll(repo, "chore: bare vs public re-decl");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `bare/public must share model key\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(
       rls?.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
       `schema-qualified re-decl must not erase bare-name policies:\n${JSON.stringify(rls)}`,
@@ -8726,11 +8643,7 @@ scenario("supabase-rls: ALTER POLICY opens USING(true) → NO-GO", () => {
     );
     commitAll(repo, "chore: alter policy open");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `ALTER POLICY open must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8764,11 +8677,7 @@ scenario("supabase-rls: RENAME TABLE carries open policy to new name → NO-GO",
     );
     commitAll(repo, "chore: rename open table");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `rename must carry open policy\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -8809,11 +8718,7 @@ scenario("supabase-rls: DROP open policy + recreate restrictive → GO", () => {
     );
     commitAll(repo, "chore: drop open recreate owner");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DROP open + owner recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -8853,11 +8758,7 @@ scenario("supabase-rls: multi-DROP TABLE audit_log,bar then recreate bar unprote
     );
     commitAll(repo, "chore: multi-drop recreate bar unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `multi-DROP + unprotected recreate must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -8897,11 +8798,7 @@ scenario("supabase-rls: multi-DROP IF EXISTS … CASCADE then recreate bar unpro
     );
     commitAll(repo, "chore: multi-drop if exists cascade");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `IF EXISTS multi-DROP CASCADE unprotected recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -8944,11 +8841,7 @@ scenario("supabase-rls: multi-DROP then recreate second table secured (ENABLE RL
     );
     commitAll(repo, "chore: multi-drop secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `multi-DROP + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -8986,11 +8879,7 @@ scenario("supabase-rls: single-table DROP TABLE public.bar + secure recreate →
     );
     commitAll(repo, "chore: single drop secure recreate control");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `single DROP + secure recreate control must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9027,11 +8916,7 @@ scenario("supabase-rls: three-table DROP a,b,c; third recreated unprotected → 
     );
     commitAll(repo, "chore: three-drop recreate c unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `three-table DROP with unprotected c must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.c/i.test(f.table || f.message || "")),
@@ -9075,11 +8960,7 @@ scenario("supabase-rls: three-table DROP a,b,c; third recreated secured → GO (
     );
     commitAll(repo, "chore: three-drop secure c");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `three-drop secure control must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9115,11 +8996,7 @@ scenario('supabase-rls: quoted/mixed-case multi-DROP public."Bar", other_schema.
     );
     commitAll(repo, "chore: quoted multi-drop unprotected recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `quoted multi-DROP unprotected Bar must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     // quoted "Bar" preserves case → public.Bar (case-insensitive assert)
     assert.ok(
@@ -9163,11 +9040,7 @@ scenario('supabase-rls: quoted multi-DROP + secure recreate public."Bar" → GO 
     );
     commitAll(repo, "chore: quoted multi-drop secure");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `quoted multi-DROP secure control must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9204,11 +9077,7 @@ scenario("supabase-rls: newline-split multi-DROP public.a,\\n  public.b; both dr
     );
     commitAll(repo, "chore: newline multi-drop unprotected b");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `newline multi-DROP unprotected b must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.b/i.test(f.table || f.message || "")),
@@ -9260,11 +9129,7 @@ scenario("supabase-rls: comma in masked literal/comment near DROP TABLE must not
     );
     commitAll(repo, "chore: phantom comma control");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `comma-in-literal must not phantom-drop secure ghost → GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass (no phantom drop):\n${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -9298,11 +9163,7 @@ scenario("supabase-rls: TRUNCATE a,b must NOT clear policies → open policy sti
     );
     commitAll(repo, "chore: truncate must not erase policies");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `TRUNCATE must not clear open policy → NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -9345,11 +9206,7 @@ scenario("supabase-rls: DROP TABLE ONLY public.bar then unprotected recreate →
     );
     commitAll(repo, "chore: ONLY drop recreate bar unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DROP TABLE ONLY + unprotected recreate must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9385,11 +9242,7 @@ scenario("supabase-rls: DROP TABLE ONLY on never-secured public.fresh → still 
     );
     commitAll(repo, "chore: ONLY drop never-secured fresh");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `ONLY drop on never-secured table still NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.fresh/i.test(f.table || f.message || "")),
@@ -9431,11 +9284,7 @@ scenario("supabase-rls: DROP TABLE ONLY + secured recreate (ENABLE RLS + owner) 
     );
     commitAll(repo, "chore: ONLY drop secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DROP TABLE ONLY + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass, got ${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -9471,11 +9320,7 @@ scenario("supabase-rls: DROP TABLE IF EXISTS ONLY audit_log,bar CASCADE; unprote
     );
     commitAll(repo, "chore: IF EXISTS ONLY multi CASCADE unprotected bar");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `IF EXISTS ONLY multi CASCADE unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9515,11 +9360,7 @@ scenario('supabase-rls: DROP TABLE ONLY public."Bar", other_schema.baz → two d
     );
     commitAll(repo, "chore: ONLY quoted multi-drop unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `ONLY quoted multi unprotected Bar must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9566,11 +9407,7 @@ scenario("supabase-rls: masked literal/comment with ONLY near DROP TABLE — no 
     );
     commitAll(repo, "chore: ONLY mask hostile unprotected bar");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `real ONLY drop of bar unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9623,11 +9460,7 @@ scenario("supabase-rls: masked ONLY literal + real ONLY drop with secure recreat
     );
     commitAll(repo, "chore: ONLY mask secure control");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `ONLY mask + secure recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", `expected pass:\n${JSON.stringify(rls)}`);
   } finally {
     cleanup(base);
@@ -9665,11 +9498,7 @@ scenario("supabase-rls: DROP SCHEMA public CASCADE then naked recreate secured t
     );
     commitAll(repo, "chore: drop schema recreate unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DROP SCHEMA CASCADE + naked recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9712,11 +9541,7 @@ scenario("supabase-rls: DROP SCHEMA public CASCADE then secured recreate → GO 
     );
     commitAll(repo, "chore: drop schema secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DROP SCHEMA + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9753,11 +9578,7 @@ scenario("supabase-rls: SET SCHEMA other then naked CREATE old public name → N
     );
     commitAll(repo, "chore: set schema then naked public.bar");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `SET SCHEMA + naked public recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9799,11 +9620,7 @@ scenario("supabase-rls: SET SCHEMA other then secured CREATE old public name →
     );
     commitAll(repo, "chore: set schema secure public recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `SET SCHEMA + secured public recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9840,11 +9657,7 @@ scenario("supabase-rls: RENAME TO other then naked CREATE old name → NO-GO (su
     );
     commitAll(repo, "chore: rename vacate naked recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `RENAME vacate + naked recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -9886,11 +9699,7 @@ scenario("supabase-rls: RENAME TO other then secured CREATE old name → GO (saf
     );
     commitAll(repo, "chore: rename vacate secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `RENAME vacate + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9929,11 +9738,7 @@ scenario("supabase-rls: DROP POLICY (no IF EXISTS) owner then table still RLS-on
     );
     commitAll(repo, "chore: bare DROP POLICY owner");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DROP POLICY owner under RLS-on deny-default must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -9967,11 +9772,7 @@ scenario("supabase-rls: DROP POLICY IF EXISTS open_write then recreate permissiv
     );
     commitAll(repo, "chore: drop policy recreate open");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DROP POLICY + reopen permissive must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy"),
@@ -10012,11 +9813,7 @@ scenario("supabase-rls: TRUNCATE secured owner table must keep owner policies �
     );
     commitAll(repo, "chore: truncate owner tables safe");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `TRUNCATE must not clear owner policies → GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10054,11 +9851,7 @@ scenario("supabase-rls: DROP then CREATE TABLE AS SELECT unprotected → NO-GO (
     );
     commitAll(repo, "chore: ctas unprotected recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `CREATE TABLE AS SELECT unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10101,11 +9894,7 @@ scenario("supabase-rls: DROP then CREATE TABLE (LIKE … INCLUDING ALL) unprotec
     );
     commitAll(repo, "chore: LIKE INCLUDING ALL unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `CREATE TABLE LIKE unprotected must NO-GO (LIKE does not copy RLS)\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10151,11 +9940,7 @@ scenario("supabase-rls: DROP then CREATE TABLE AS SELECT + ENABLE RLS + owner �
     );
     commitAll(repo, "chore: ctas secure recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `CTAS + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10197,11 +9982,7 @@ scenario("supabase-rls: DROP TABLE public.bar, baz (bare) then naked bar+baz →
     );
     commitAll(repo, "chore: mixed qual drop unprotected");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `mixed qual/bare multi-DROP unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10255,11 +10036,7 @@ scenario("supabase-rls: DROP TABLE public.bar, baz then secured recreate both �
     );
     commitAll(repo, "chore: mixed qual drop secure");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `mixed qual drop + secure must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10301,11 +10078,7 @@ scenario("supabase-rls: DO block DISABLE RLS on secured public.bar → NO-GO (su
     );
     commitAll(repo, "chore: DO disable RLS");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO DISABLE RLS must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10348,11 +10121,7 @@ scenario("supabase-rls: DO block DROP TABLE then naked recreate public.bar → N
     );
     commitAll(repo, "chore: DO drop + naked recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO DROP + naked recreate must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10394,11 +10163,7 @@ scenario("supabase-rls: DO block CREATE POLICY USING(true) on secured table → 
     );
     commitAll(repo, "chore: DO open policy");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO USING(true) policy must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/permissive-write-policy" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10441,11 +10206,7 @@ scenario("supabase-rls: safe DO block (PERFORM only) on secured table → GO (ex
     );
     commitAll(repo, "chore: safe DO control");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `safe DO must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10472,11 +10233,7 @@ scenario("supabase-rls: c0bf5dd anti-regression — SELECT $body$ ENABLE must no
     );
     commitAll(repo, "chore: c0bf5dd SELECT dollar trap");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `SELECT $body$ ENABLE must not false-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.todos/i.test(f.table || f.message || "")),
@@ -10514,11 +10271,7 @@ scenario("supabase-rls: DO ENABLE RLS must not grant — still NO-GO on unprotec
     );
     commitAll(repo, "chore: DO enable must not grant");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO ENABLE must not grant security → NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10558,11 +10311,7 @@ scenario("supabase-rls: ALTER SCHEMA public RENAME TO public_old then naked recr
     );
     commitAll(repo, "chore: ALTER SCHEMA rename naked recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `ALTER SCHEMA rename + naked recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10605,11 +10354,7 @@ scenario("supabase-rls: ALTER SCHEMA rename then secured recreate public.bar →
     );
     commitAll(repo, "chore: ALTER SCHEMA rename secured recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `ALTER SCHEMA rename + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10649,11 +10394,7 @@ scenario("supabase-rls: DO ALTER SCHEMA public RENAME TO public_old then naked r
     );
     commitAll(repo, "chore: DO ALTER SCHEMA rename naked recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO ALTER SCHEMA rename + naked recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.secrets/i.test(f.table || f.message || "")),
@@ -10698,11 +10439,7 @@ scenario("supabase-rls: DO ALTER SCHEMA rename then secured recreate → GO (saf
     );
     commitAll(repo, "chore: DO ALTER SCHEMA rename secured recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `DO ALTER SCHEMA rename + secured recreate must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10743,11 +10480,7 @@ scenario('supabase-rls: DO ALTER SCHEMA "public" RENAME TO "Public_Old" then nak
     );
     commitAll(repo, "chore: DO quoted ALTER SCHEMA rename naked recreate");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO quoted ALTER SCHEMA rename + naked recreate must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some((f) => f.ruleId === "supabase/rls-disabled" && /public\.bar/i.test(f.table || f.message || "")),
@@ -10797,11 +10530,7 @@ scenario("supabase-rls: DO-wrapped ALTER POLICY USING(true) on secured table →
     );
     commitAll(repo, "chore: DO ALTER POLICY open");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO ALTER POLICY USING(true) must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some(
@@ -10855,11 +10584,7 @@ scenario("supabase-rls: DO EXECUTE format against secured table → NO-GO (linea
     );
     commitAll(repo, "chore: DO EXECUTE format against secured table");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `DO EXECUTE format on secured table must NO-GO exit 1\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     assert.ok(
       rls.findings?.some(
@@ -10903,11 +10628,7 @@ scenario("supabase-rls: fully parseable secure lineage → GO (safe control, exi
     );
     commitAll(repo, "chore: fully parseable secure lineage");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `fully parseable secure lineage must GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);
@@ -10931,11 +10652,7 @@ scenario('supabase-rls: distinct public."Bar" and public.bar both unprotected �
     );
     commitAll(repo, "chore: distinct Bar and bar");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `both Bar and bar unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     const tables = (rls.findings || [])
       .filter((f) => f.ruleId === "supabase/rls-disabled")
@@ -10970,11 +10687,7 @@ scenario('supabase-rls: reverse order public.bar then public."Bar" both unprotec
     );
     commitAll(repo, "chore: reverse order bar and Bar");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 1, `reverse order both unprotected must NO-GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "NO-GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "fail", JSON.stringify(rls));
     const tables = (rls.findings || [])
       .filter((f) => f.ruleId === "supabase/rls-disabled")
@@ -11005,11 +10718,7 @@ scenario('supabase-rls: public."bar" merges with public.bar — ENABLE on unquot
     );
     commitAll(repo, "chore: quoted lowercase bar merges");
 
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
-    assert.equal(r.code, 0, `public."bar" must merge with public.bar → GO\n${r.stderr}\n${r.stdout}`);
-    const doc = parseJson(r);
-    assert.equal(doc.verdict, "GO");
-    const rls = findRlsCheck(doc);
+    const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
   } finally {
     cleanup(base);

@@ -253,13 +253,16 @@ AI-*built* apps — and finally runs on what the ICP actually ships.
   functions) — add #3. The documented killer failure mode: CVE-2025-48757 (RLS
   misconfig in 170+ Lovable apps), 172/1,072 apps allowed unauthenticated
   deletes. Statically checkable, honestly labelled. **M**
-  **Candidate in progress (2026-07-25, REVIEW_PENDING):** policy-state table
-  model — track ENABLE/DISABLE RLS + CREATE POLICY per table across migrations
-  ordered by path name; NO-GO only on final static state that is clearly unsafe
-  (RLS off or write policy `USING`/`WITH CHECK` true for client roles). Edge
-  Function mutations secondary (high bar; service-role not public; dynamic →
-  warn). `checkSupabaseRls` + tests + SARIF `supabase/*`. No version bump / not
-  LIVE until independent REVIEW_GO + publish contract.
+  **PARKED_INSUFFICIENT (2026-07-29)** @ product fingerprint `d246171` after
+  eight consecutive independent `REVIEW_NO_GO` verdicts (`fdb81a4` … `d246171`).
+  Adversarial Postgres DDL is unbounded (instance + class-level repairs did not
+  converge); open P1 (function-body `ALTER POLICY … USING (true)` → silent pass
+  on a previously-secured public table) and open P2 (phantom `public.table`
+  fail-closed). Code remains in-tree (`checkSupabaseRls` + tests) but is
+  **unexposed** from `runChecks` / `gateTree` (lane `0.11.x-unexpose-parked-rls`)
+  so it cannot ship a green pass on an unprotected table. Not part of the
+  shipped check set; not advertised. No version bump / not LIVE. Re-open only
+  with a convergence argument and a fresh independent REVIEW_GO.
 - [ ] **Paste-ready fix per finding** (what/where/why/next) — add #7. The core
   wedge vs. gitleaks/trufflehog/semgrep: they report for security pros; nobody
   explains the patch to a non-security founder. This is getAdvantage DNA

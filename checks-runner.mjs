@@ -11,7 +11,6 @@ import {
   checkTypecheck,
   checkBuild,
   checkSchemaBump,
-  checkSupabaseRls,
 } from "./checks.mjs";
 import {
   overviewApiSurface,
@@ -78,10 +77,12 @@ export async function runChecks(o) {
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
   printResult(results[results.length - 1]);
 
-  // d2. Supabase RLS / ungated mutations — static policy-state over migrations
-  // (+ high-bar edge functions). Skip when no Supabase SQL/functions evidence.
-  results.push(safe(() => checkSupabaseRls(cwd), "Supabase RLS / ungated mutations"));
-  printResult(results[results.length - 1]);
+  // d2. Supabase RLS / ungated mutations — PARKED_INSUFFICIENT (see ACTIVE-LANES /
+  // 0.10.x-supabase-rls-ungated-mutations). Implementation remains in checks.mjs
+  // and is covered by direct unit scenarios; it is intentionally NOT wired into
+  // runChecks or gateTree so a 0.11.x release cannot ship a green pass on an
+  // unprotected public table. Do not re-expose without a fresh REVIEW_GO on the
+  // parked lane's open P1/P2.
 
   // e. Intent Contract — only when a trusted freeze is present (including
   // historically: deletion after freeze still surfaces as present + NO-GO).
@@ -238,7 +239,7 @@ export function gateTree(o) {
     results.push(safe(() => checkBuild(cwd, project), "Build"));
   }
   results.push(safe(() => checkSchemaBump(cwd, o.baseRef || "main", project), "Schema-bump check"));
-  results.push(safe(() => checkSupabaseRls(cwd), "Supabase RLS / ungated mutations"));
+  // Supabase RLS deliberately unexposed while PARKED_INSUFFICIENT (parity with runChecks).
 
   // Intent Contract — same semantics as runChecks: null when absent (omit);
   // fail-closed when present-but-untrusted / scope violation / not-checkable.
