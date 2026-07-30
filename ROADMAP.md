@@ -39,6 +39,7 @@ independently reproduced 1:1 against the live npm package.
 | **0.9.1** | Client-bundle secret exposure: scan committed `.next/static/**` | **Released** (npm + tag v0.9.1, 2026-07-22) |
 | **0.10.0** | Intent Contract trust layer: human goal → enforceable change envelope; immutable `baselineCommit` + dedicated freeze-blob trust; committed+dirty coverage; `receiptHash`; nested-git/gitlink fail-closed; `intent init` / `intent check`; main `check` integration | **Released** (npm + tag v0.10.0 + floating v1, 2026-07-23; cold published verified) |
 | **0.10.1** | ICP stack-fit: Vite+React+Supabase **client orientation map** + dogfood reliability (quiet missing Intent; no fixture/string-literal routes as live map routes) | **Released** (npm + tag v0.10.1 + floating v1, 2026-07-25; product `4001a58`; release `7592004`; cold published verified) |
+| **0.11.0** | Intent Contract in fan-in merge-train `gateTree` (parity with `runChecks`; outside-allow quarantine; no contract → clean omit) + parked Supabase RLS **unexposed** (in-tree, not a shipped check; open P1/P2 remain) | **Released** (npm + tag v0.11.0 + floating v1, 2026-07-30; product `cef3491`; release `96fb5f8`; cold published verified; *scope verified; semantic correctness not proven*) |
 | Later | Proof-records → signing → audit export (demand-gated, SaaS-linked) | Backlog |
 
 ---
@@ -261,8 +262,9 @@ AI-*built* apps — and finally runs on what the ICP actually ships.
   fail-closed). Code remains in-tree (`checkSupabaseRls` + tests) but is
   **unexposed** from `runChecks` / `gateTree` (lane `0.11.x-unexpose-parked-rls`)
   so it cannot ship a green pass on an unprotected table. Not part of the
-  shipped check set; not advertised. No version bump / not LIVE. Re-open only
-  with a convergence argument and a fresh independent REVIEW_GO.
+  shipped check set; not advertised. **Released unexposed with 0.11.0**
+  (unexposing is not repairing; open P1/P2 remain). Re-open only with a
+  convergence argument and a fresh independent REVIEW_GO.
 - [ ] **Paste-ready fix per finding** (what/where/why/next) — add #7. The core
   wedge vs. gitleaks/trufflehog/semgrep: they report for security pros; nobody
   explains the patch to a non-security founder. This is getAdvantage DNA
