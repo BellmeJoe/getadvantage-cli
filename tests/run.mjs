@@ -35,6 +35,13 @@
 //                                     must not authorize the other;
 //                                     incomplete/truncated PEM (no END) still NO-GO
 //                                     and never value/hash-allowlistable
+//  9g. paste-ready remediation (B1) — blocking secret names secrets.ignore hatch
+//                                     with pattern-aware paste-ready snippet
+//                                     (hashes for normal; paths/patternIds only
+//                                     for private-key-incomplete); applied
+//                                     snippet suppresses + still disclosed;
+//                                     per-auth not blanket; clean GO quiet;
+//                                     emitted JSON round-trips parse
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
@@ -1649,6 +1656,303 @@ scenario("policy safety: incomplete/truncated PEM (no END) stays NO-GO; header h
     const rExpl = run(["check", "--json"], expl);
     assert.equal(rExpl.code, 0, `explicit private-key-incomplete patternId must GO\n${rExpl.stderr}\n${rExpl.stdout}`);
     assert.equal(parseJson(rExpl).verdict, "GO");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 9g. paste-ready remediation (B1 0.11.x) — secrets.ignore escape hatch named
+// ---------------------------------------------------------------------------
+
+/** Extract the first paste-ready secrets.ignore JSON object from check output. */
+function extractPasteReadyIgnoreSnippet(text) {
+  const src = String(text || "");
+  // Prefer the indented multi-line block after the escape-hatch / paste-ready cue.
+  const cue =
+    /Paste-ready \.getadvantage\/config\.json secrets\.ignore|Hash\/value ignore is refused for pattern/i;
+  const cueAt = src.search(cue);
+  const from = cueAt >= 0 ? src.slice(cueAt) : src;
+  const start = from.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let end = -1;
+  for (let i = start; i < from.length; i++) {
+    const ch = from[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end < 0) return null;
+  // Strip leading indentation that printResult adds to each extra line.
+  const raw = from
+    .slice(start, end + 1)
+    .split("\n")
+    .map((l) => l.replace(/^\s{2,}/, "").replace(/^\s+/, ""))
+    .join("\n");
+  // Re-join may have broken indentation; parse via de-indent of common prefix.
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Fallback: pull balanced braces and strip only line-leading spaces.
+    const compact = from
+      .slice(start, end + 1)
+      .replace(/^[ \t]+/gm, "");
+    return JSON.parse(compact);
+  }
+}
+
+scenario("paste-ready remediation: real secret → NO-GO + paste-ready secrets.ignore with exact auth id", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "paste-ready-block");
+    initRepo(repo);
+    const liveKey = "sk_live_" + "p1a2s3t4e5r6e7a8d9y0r1e2m3";
+    const auth = hashOf(liveKey);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-block", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "src/app.js", `export const KEY = "${liveKey}";\n`);
+    commitAll(repo, "chore: real stripe-shaped secret");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `real secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const blob = `${secret.detail || ""}\n${(secret.extra || []).join("\n")}\n${r.stdout}`;
+    assert.ok(/secrets\.ignore|getadvantage\/config\.json/i.test(blob), `must name the secrets.ignore hatch\n${blob}`);
+    assert.ok(/deliberate|tracked|reviewable|disclosed/i.test(blob), `must disclose deliberate tracked decision\n${blob}`);
+    assert.ok(blob.includes(auth), `must carry this finding's exact auth id\n${blob}`);
+    assert.ok(/Smallest safe next edit/i.test(blob), blob);
+    assert.ok(/src\/app\.js/i.test(blob), blob);
+    // Full secret must never appear.
+    assert.ok(!JSON.stringify(doc).includes(liveKey), "full secret must never be echoed");
+
+    const snip = extractPasteReadyIgnoreSnippet(blob);
+    assert.ok(snip, `must emit parseable paste-ready JSON\n${blob}`);
+    assert.equal(snip.version, 1);
+    assert.ok(snip.secrets && snip.secrets.ignore, JSON.stringify(snip));
+    assert.deepEqual(snip.secrets.ignore.hashes, [auth]);
+    assert.ok(!snip.secrets.ignore.patternIds, "normal finding must not force patternIds form");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("paste-ready remediation: applied snippet suppresses AND still disclosed; exit GO when no other blockers", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "paste-ready-apply");
+    initRepo(repo);
+    const liveKey = "sk_live_" + "a1p2p3l4y5s6n7i8p9p0e1t2xx";
+    const auth = hashOf(liveKey);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-apply", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "lib/keys.js", `export const K = "${liveKey}";\n`);
+    commitAll(repo, "chore: secret before allowlist");
+
+    const r0 = run(["check", "--json"], repo);
+    assert.equal(r0.code, 1, "pre-snippet must NO-GO");
+    const pre = parseJson(r0);
+    const preSec = pre.checks.find((c) => c.label === "Secret scan");
+    const preBlob = `${(preSec.extra || []).join("\n")}\n${r0.stdout}`;
+    const snip = extractPasteReadyIgnoreSnippet(preBlob);
+    assert.ok(snip, "pre-snippet must emit paste-ready JSON");
+    assert.deepEqual(snip.secrets.ignore.hashes, [auth]);
+
+    // Apply the emitted snippet verbatim as tracked config.
+    write(repo, path.join(".getadvantage", "config.json"), JSON.stringify(snip, null, 2) + "\n");
+    commitAll(repo, "chore: apply paste-ready secrets.ignore");
+
+    const r1 = run(["check", "--json"], repo);
+    assert.equal(r1.code, 0, `applied snippet must GO when no other blockers\n${r1.stderr}\n${r1.stdout}`);
+    const doc = parseJson(r1);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "pass");
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "suppressed hit must still be disclosed");
+    assert.ok(/policy: hash/i.test(extra), extra);
+    assert.ok(extra.includes("lib/keys.js") || /auth /i.test(extra), "finding must still be named");
+    assert.ok(!JSON.stringify(doc).includes(liveKey), "full secret must never be echoed after suppress");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("paste-ready remediation: different secret + stale secrets.ignore still blocks (per-auth, not blanket)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "paste-ready-stale");
+    initRepo(repo);
+    const oldKey = "sk_live_" + "o1l2d3s4t5a6l7e8k9e0y1x2yy";
+    const newKey = "sk_live_" + "n1e2w3s4e5c6r7e8t9k0e1y2zz";
+    assert.notEqual(hashOf(oldKey), hashOf(newKey));
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-stale", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "src/old.js", `export const OLD = "${oldKey}";\n`);
+    write(repo, "src/new.js", `export const NEW = "${newKey}";\n`);
+    write(
+      repo,
+      path.join(".getadvantage", "config.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          secrets: { ignore: { hashes: [hashOf(oldKey)] } },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: stale allowlist for old key only");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `new secret must still NO-GO under stale ignore\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(extra.includes("src/new.js") || extra.includes(hashOf(newKey)), `new key must block\n${extra}`);
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "old key should be disclosed as allowlisted");
+    assert.ok(/policy: hash/i.test(extra), extra);
+    // New finding's remediation must carry the NEW auth id, not only the old one.
+    assert.ok(extra.includes(hashOf(newKey)), `remediation must name new auth id\n${extra}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("paste-ready remediation: clean repo → GO exit 0, no remediation noise", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `clean repo must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret, "secret scan should run");
+    assert.equal(secret.status, "pass");
+    const blob = `${secret.detail || ""}\n${(secret.extra || []).join("\n")}\n${r.stdout}`;
+    assert.ok(!/Smallest safe next edit/i.test(blob), `no remediation noise on clean GO\n${blob}`);
+    assert.ok(!/Paste-ready \.getadvantage\/config\.json secrets\.ignore/i.test(blob), blob);
+    assert.ok(!/"hashes"\s*:\s*\[/.test(blob), `no paste-ready hashes block on clean GO\n${blob}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("paste-ready remediation: emitted JSON is valid and parses exactly as written (Windows path safety)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "paste-ready-roundtrip");
+    initRepo(repo);
+    const liveKey = "sk_live_" + "r1o2u3n4d5t6r7i8p9t0x1y2zz";
+    const auth = hashOf(liveKey);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-roundtrip", version: "1.0.0", private: true }, null, 2) + "\n");
+    // Nested path exercises path separators on Windows.
+    write(repo, path.join("src", "nested", "keys.js"), `export const KEY = "${liveKey}";\n`);
+    commitAll(repo, "chore: nested path secret for path safety");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, "must NO-GO");
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    const extra = (secret.extra || []).join("\n");
+    const snip = extractPasteReadyIgnoreSnippet(extra);
+    assert.ok(snip, `emitted JSON must parse\n${extra}`);
+    assert.equal(snip.version, 1);
+    assert.deepEqual(snip.secrets.ignore.hashes, [auth]);
+    // Round-trip: stringify → parse yields the same structure (no Windows \\ leaks).
+    const again = JSON.parse(JSON.stringify(snip));
+    assert.deepEqual(again, snip);
+    const dumped = JSON.stringify(snip);
+    assert.ok(!dumped.includes("\\\\"), `snippet must not embed Windows backslash escapes as path noise: ${dumped}`);
+    assert.ok(dumped.includes(auth));
+
+    // Finding remediation array (structured) must also be paste-ready JSON-safe.
+    const finding = (secret.findings || []).find((f) => f.authId === auth || (f.file && f.file.includes("keys.js")));
+    if (finding && Array.isArray(finding.remediation)) {
+      const joined = finding.remediation.join("\n");
+      const fromFinding = extractPasteReadyIgnoreSnippet(joined);
+      assert.ok(fromFinding, joined);
+      assert.deepEqual(fromFinding.secrets.ignore.hashes, [auth]);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("paste-ready remediation: private-key-incomplete uses paths/patternIds NOT hashes; apply suppresses; still disclosed", () => {
+  const base = freshBase();
+  try {
+    const truncated =
+      "-----BEGIN RSA PRIVATE KEY-----\n" +
+      "MIIEowIBAAKCAQEA1111PASTEREADYTRUNC11111111111111111111111111111\n" +
+      "AAAA1111PRTRUNC1AAAA\n";
+    const headerOnly = "-----BEGIN RSA PRIVATE KEY-----";
+    const headerHash = hashOf(headerOnly);
+
+    const repo = path.join(base, "paste-ready-incomplete");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-incomplete", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "keys/trunc.pem", truncated);
+    commitAll(repo, "chore: incomplete PEM only blocker");
+
+    const r0 = run(["check", "--json"], repo);
+    assert.equal(r0.code, 1, `incomplete PEM must NO-GO\n${r0.stderr}\n${r0.stdout}`);
+    const pre = parseJson(r0);
+    assert.equal(pre.verdict, "NO-GO");
+    const preSec = pre.checks.find((c) => c.label === "Secret scan");
+    assert.equal(preSec.status, "fail");
+    const preBlob = `${(preSec.extra || []).join("\n")}\n${r0.stdout}`;
+    assert.ok(/Incomplete private key block/i.test(preBlob), preBlob);
+    assert.ok(/not unique|refused|cannot|paths|patternIds/i.test(preBlob), `must explain why hash cannot be used\n${preBlob}`);
+
+    const snip = extractPasteReadyIgnoreSnippet(preBlob);
+    assert.ok(snip, `must emit paste-ready JSON for incomplete PEM\n${preBlob}`);
+    assert.equal(snip.version, 1);
+    const ign = snip.secrets && snip.secrets.ignore;
+    assert.ok(ign, JSON.stringify(snip));
+    // THE TRAP: never emit hashes for private-key-incomplete.
+    assert.ok(!ign.hashes, `must NEVER emit hashes for private-key-incomplete: ${JSON.stringify(snip)}`);
+    assert.ok(!ign.values, `must NEVER emit values for private-key-incomplete: ${JSON.stringify(snip)}`);
+    assert.ok(
+      (Array.isArray(ign.paths) && ign.paths.length > 0) ||
+        (Array.isArray(ign.patternIds) && ign.patternIds.length > 0),
+      `must use paths and/or patternIds: ${JSON.stringify(snip)}`,
+    );
+    if (Array.isArray(ign.paths)) {
+      assert.ok(
+        ign.paths.some((p) => String(p).replace(/\\/g, "/").includes("keys/trunc.pem")),
+        `path should name the finding file: ${JSON.stringify(ign.paths)}`,
+      );
+    }
+    if (Array.isArray(ign.patternIds)) {
+      assert.ok(ign.patternIds.includes("private-key-incomplete"), JSON.stringify(ign.patternIds));
+    }
+    // Snippet must not smuggle the colliding header hash either.
+    const dumped = JSON.stringify(snip);
+    assert.ok(!dumped.includes(headerHash), `snippet must not contain header hash ${headerHash}`);
+
+    // Apply verbatim → suppress, still disclosed, GO when only this blocker.
+    write(repo, path.join(".getadvantage", "config.json"), JSON.stringify(snip, null, 2) + "\n");
+    commitAll(repo, "chore: apply incomplete-PEM paste-ready ignore");
+
+    const r1 = run(["check", "--json"], repo);
+    assert.equal(r1.code, 0, `applied paths/patternIds snippet must GO\n${r1.stderr}\n${r1.stdout}`);
+    const doc = parseJson(r1);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "pass");
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "suppressed incomplete PEM must still be disclosed");
+    assert.ok(/policy: (path|patternId)/i.test(extra), extra);
+    assert.ok(!/policy: hash|policy: value/i.test(extra), `must not claim hash/value allow for incomplete:\n${extra}`);
   } finally {
     cleanup(base);
   }

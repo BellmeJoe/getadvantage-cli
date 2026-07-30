@@ -11,7 +11,11 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import path from "node:path";
 import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl, scrubCredentialEnv } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
-import { loadPolicy, secretAllowDecision } from "./policy.mjs";
+import {
+  loadPolicy,
+  secretAllowDecision,
+  isNonUniqueAuthPatternId,
+} from "./policy.mjs";
 
 // ===========================================================================
 // a. DIRTY-TREE GUARD
@@ -573,27 +577,103 @@ export function checkSecrets(cwd) {
   );
   // Structured findings for SARIF (and optional --json consumers). Never carry
   // the raw match — only fingerprint, auth id, path, patternId, region.
-  const findings = hitList.map((h) => ({
-    ruleId: `secret/${h.patternId || "unknown"}`,
-    patternId: h.patternId,
-    label: h.label,
-    file: h.file,
-    fp: h.fp,
-    authId: h.authId,
-    count: h.count,
-    ...(typeof h.startLine === "number" ? { startLine: h.startLine } : {}),
-    ...(typeof h.startColumn === "number" ? { startColumn: h.startColumn } : {}),
-    ...(typeof h.endColumn === "number" ? { endColumn: h.endColumn } : {}),
-    message: `${h.label}: ${h.fp}${h.authId ? ` · auth ${h.authId}` : ""}`,
-  }));
+  const findings = hitList.map((h) => {
+    const remediation = secretHitRemediation(h);
+    return {
+      ruleId: `secret/${h.patternId || "unknown"}`,
+      patternId: h.patternId,
+      label: h.label,
+      file: h.file,
+      fp: h.fp,
+      authId: h.authId,
+      count: h.count,
+      ...(typeof h.startLine === "number" ? { startLine: h.startLine } : {}),
+      ...(typeof h.startColumn === "number" ? { startColumn: h.startColumn } : {}),
+      ...(typeof h.endColumn === "number" ? { endColumn: h.endColumn } : {}),
+      message: `${h.label}: ${h.fp}${h.authId ? ` · auth ${h.authId}` : ""}`,
+      remediation,
+    };
+  });
+  // Paste-ready remediation is additive only — never changes verdict/exit.
+  const remediationNote = [];
+  for (const h of hitList.slice(0, 30)) {
+    remediationNote.push(...secretHitRemediation(h));
+  }
+  if (hitList.length > 30) {
+    remediationNote.push(
+      `…and ${hitList.length - 30} more blocking secret${pl(hitList.length - 30)} (same remedy shape: remove+rotate, or pattern-aware secrets.ignore).`,
+    );
+  }
   const r = result(
     "fail",
     "Secret scan",
     `${lines.length} possible secret${pl(lines.length)} in committed/staged files — remove + rotate before shipping.`,
-    [...lines.slice(0, 30), ...allowedNote, ...policyNote, ...partialNote],
+    [...lines.slice(0, 30), ...remediationNote, ...allowedNote, ...policyNote, ...partialNote],
   );
   r.findings = findings;
   return r;
+}
+
+/**
+ * Plain-language smallest-safe-next-edit for one blocking secret hit, including
+ * a pattern-aware paste-ready `.getadvantage/config.json` `secrets.ignore`
+ * snippet. Non-unique pattern ids (e.g. private-key-incomplete) never get a
+ * hashes snippet — only paths/patternIds.
+ *
+ * @param {{ file: string, label: string, patternId?: string, authId?: string, fp?: string, startLine?: number }} h
+ * @returns {string[]}
+ */
+function secretHitRemediation(h) {
+  const filePosix = String(h.file || "").replace(/\\/g, "/");
+  const loc =
+    typeof h.startLine === "number"
+      ? `${filePosix}:${h.startLine}`
+      : filePosix;
+  const patternId = h.patternId || "unknown";
+  const nonUnique = isNonUniqueAuthPatternId(patternId);
+
+  const lines = [
+    `Smallest safe next edit — ${h.label} at ${loc}:`,
+    `  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.`,
+    `  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.`,
+    `  Escape hatch (deliberate, tracked, reviewable — suppressed hits stay printed as disclosed, never invisible): if this is an intentional fixture/sample, merge the paste-ready snippet below into tracked .getadvantage/config.json and commit it. Authorization reads the git index only.`,
+  ];
+
+  let ignore;
+  if (nonUnique) {
+    lines.push(
+      `  Hash/value ignore is refused for pattern "${patternId}" because the match is not unique across keys (e.g. a constant PEM header collides). Use paths and/or patternIds only — never hashes for this pattern:`,
+    );
+    ignore = {
+      paths: [filePosix],
+      patternIds: [patternId],
+    };
+  } else if (h.authId) {
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (carries this finding's own auth id ${h.authId}):`,
+    );
+    ignore = {
+      hashes: [h.authId],
+    };
+  } else {
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (path-scoped; no auth id available for this hit):`,
+    );
+    ignore = {
+      paths: [filePosix],
+    };
+  }
+
+  const doc = {
+    version: 1,
+    secrets: { ignore },
+  };
+  // JSON.stringify emits stable forward-slash paths (filePosix) — safe on Windows.
+  const json = JSON.stringify(doc, null, 2);
+  for (const jl of json.split("\n")) {
+    lines.push(`  ${jl}`);
+  }
+  return lines;
 }
 
 /** 1-based line + column for a byte/char offset into a decoded UTF-16-or-UTF-8 string. */

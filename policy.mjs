@@ -355,8 +355,16 @@ export function loadPolicy(cwd) {
  * PEM header). Value/hash allowlisting would reintroduce cross-key authorization
  * because every incomplete key of that type shares the same match string.
  * path and patternId remains explicit and honest.
+ *
+ * Exported so remediation emitters stay in sync with authorization rules —
+ * never emit a `hashes`/`values` snippet for these pattern ids.
  */
-const NON_UNIQUE_AUTH_PATTERN_IDS = new Set(["private-key-incomplete"]);
+export const NON_UNIQUE_AUTH_PATTERN_IDS = new Set(["private-key-incomplete"]);
+
+/** @param {string} patternId */
+export function isNonUniqueAuthPatternId(patternId) {
+  return NON_UNIQUE_AUTH_PATTERN_IDS.has(patternId);
+}
 
 /**
  * @param {string} match - full matched string (never printed by callers)
