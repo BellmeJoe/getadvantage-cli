@@ -223,9 +223,9 @@ If evidence is red, **do not post**.
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.11.0`) + SARIF upload path (**live 0.11.0**) |
+| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.11.1`) + SARIF upload path (**live 0.11.1**) |
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
-| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.11.0** · `@v1` / `@v0.11.0`) |
+| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.11.1** · `@v1` / `@v0.11.1`) |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.
