@@ -10,18 +10,19 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.11.0** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | **0.11.0** (matches npm after pull) | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.11.1** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | **0.11.1** (matches npm after pull) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | Full suite via CI on release (Intent merge-train + prior) | `npm test` |
+| Tests grün? | Full suite via CI on release (paste-ready B1 + Intent merge-train + prior) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **Live npm is 0.11.0.** Intent Contract in merge-train `gateTree` (product
-> fingerprint `cef3491`; release `96fb5f8`); Intent on `check` still LIVE;
-> map client orientation from 0.10.1 still LIVE; Supabase RLS **parked and
+> **Live npm is 0.11.1.** Paste-ready remediation on secret-scan NO-GO only
+> (product fingerprint `25f0e54`; release `66ffb9b`) — no new check, no verdict
+> or exit-code change. Intent Contract in merge-train `gateTree` (0.11.0) still
+> LIVE; map client orientation from 0.10.1 still LIVE; Supabase RLS **parked and
 > unexposed** (not a shipped check). Secret scan covers committed
-> `.next/static/**`; first-party Action `@v1` / `@v0.11.0`. Registry
-> `gitHead` `96fb5f8`. Rollback: **0.10.1** / `v0.10.1` / `7592004`.
+> `.next/static/**`; first-party Action `@v1` / `@v0.11.1`. Registry
+> `gitHead` `66ffb9b`. Rollback: **0.11.0** / `v0.11.0` / `96fb5f8`.
 
 ---
 

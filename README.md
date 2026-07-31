@@ -152,7 +152,7 @@ Deny overrides allow. Renames check both old and new paths. Committed work after
 | Typecheck | **BLOCKS** | `tsc --noEmit`, only when the project actually has a `tsconfig.json` plus a local TypeScript dependency (project-aware, via the same detection `fan-in`'s combined-tree gate uses). Plain-JS projects get an honest skip, not a fake failure. |
 | Build | **BLOCKS** | Runs the project's own `build` script, only with `--build` and only if one exists. |
 | Schema-bump check | **WARNS** | DDL changed without a `SCHEMA_VERSION` bump (skipped honestly if the project doesn't carry that convention). |
-| Supabase RLS / ungated mutations | **not part of the shipped check set** · present in-tree, **parked** (`PARKED_INSUFFICIENT`) | Implementation exists in-tree (`checkSupabaseRls`) and is covered by tests, but it is **not** wired into `runChecks` / `gateTree` and does **not** appear on CLI, JSON, MCP, Action, or SARIF surfaces. Open defects (including function-body `ALTER POLICY … USING (true)` fail-open) make a green pass on an unprotected public table unacceptable under the product's "not checkable ≠ GO" rule. Not advertised as live. npm **0.11.0** does **not** check Supabase RLS. |
+| Supabase RLS / ungated mutations | **not part of the shipped check set** · present in-tree, **parked** (`PARKED_INSUFFICIENT`) | Implementation exists in-tree (`checkSupabaseRls`) and is covered by tests, but it is **not** wired into `runChecks` / `gateTree` and does **not** appear on CLI, JSON, MCP, Action, or SARIF surfaces. Open defects (including function-body `ALTER POLICY … USING (true)` fail-open) make a green pass on an unprotected public table unacceptable under the product's "not checkable ≠ GO" rule. Not advertised as live. npm **0.11.x** does **not** check Supabase RLS. |
 | Overview maps | **WARNS** | Read-only maps of your API surface, integrations, and schedules. Informational, never blocking. |
 
 - The database-URL pattern deliberately ignores placeholder passwords
@@ -397,7 +397,7 @@ Or paste the consumer step yourself after checkout:
 
 **Tag architecture:** floating git tag `v1` is the Action API major (moved on each
 shipped action-compatible release). Exact source/npm release tags remain
-`v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, `v0.11.0`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.11.0` when you
+`v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, `v0.11.0`, `v0.11.1`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.11.1` when you
 need bit-for-bit reproducibility. npm installs use package versions / dist-tags,
 not the floating `v1` git tag.
 
