@@ -172,6 +172,12 @@ ${c.bold("Commands")}
            history); each ${c.bold("handoff")} adds an entry.
   ${c.cyan("init")}     Wire the brain into your agent's instructions file (CLAUDE.md / AGENTS.md /
            .cursorrules / .windsurfrules / .clinerules) so the brief + handoff load at session start.
+           ${c.bold("Invisible mode:")} ${c.bold("--claude-code")} installs automatic gate hooks
+           (Claude Code settings + git pre-commit + Intent auto-capture + proof receipt);
+           ${c.bold("--cursor")} detect-and-refuse until schema verified;
+           ${c.bold("--uninstall-invisible")} removes only what we wrote;
+           ${c.bold("--invisible-status")} reports whether the gate is actually enforcing;
+           ${c.bold("--force")} overwrites a foreign pre-commit hook.
   ${c.cyan("switch")}   Switch tools/models without losing context: saves your place, wires every
            AI-tool file, and prints the prompt to start the new session. ${c.dim("(switch <tool>)")}
   ${c.cyan("models")}   A plain-language playbook for choosing + switching AI models (which model
@@ -268,6 +274,9 @@ ${c.bold("Examples")}
   ${bin}                        run the pre-deploy checks (GO / NO-GO)
   ${bin} brief                  generate / refresh the project brain
   ${bin} init                   auto-load the brain at every session start
+  ${bin} init --claude-code     invisible mode: automatic gate hooks + receipt
+  ${bin} init --uninstall-invisible   remove invisible-mode hooks (only ours)
+  ${bin} init --invisible-status      is the automatic gate actually enforcing?
   ${bin} handoff                save your place for the next session
   ${bin} switch cursor          move to a new tool/model without losing context
   ${bin} gauge                  is this session getting heavy?
@@ -646,7 +655,16 @@ async function main() {
 
   if (cmd === "init") {
     header();
-    process.exit(runInit({ cwd }));
+    process.exit(
+      runInit({
+        cwd,
+        claudeCode: !!flags["claude-code"],
+        cursor: !!flags.cursor,
+        uninstallInvisible: !!flags["uninstall-invisible"],
+        invisibleStatus: !!flags["invisible-status"],
+        force: !!flags.force,
+      }),
+    );
   }
 
   // Intent Contract: local change-scope proof (init + check).

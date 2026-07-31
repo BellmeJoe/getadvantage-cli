@@ -159,6 +159,11 @@
 //                                     SCHEMA rename bulk relocate (top-level + DO-
 //                                     wrapped hostile/safe/quoted); public."Bar" ≠
 //                                     public.bar; public."bar" merges with public.bar
+//  52. Invisible mode (B2 / 0.12.x)   — init --claude-code installs Claude settings
+//                                     hooks + git pre-commit + intent auto-capture
+//                                     + INVISIBLE-MODE.md receipt; --cursor refuse;
+//                                     uninstall; status not-gating on hook removal;
+//                                     settings.json never corrupted; hostiles
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -11178,6 +11183,490 @@ scenario('supabase-rls: public."bar" merges with public.bar — ENABLE on unquot
 
     const rls = checkSupabaseRls(repo);
     assert.ok(rls && rls.status === "pass", JSON.stringify(rls));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 52. Invisible mode (B2 / 0.12.x) — automatic gate hooks + receipt
+// ---------------------------------------------------------------------------
+// Cold path + ship blockers + hostiles. Filtered via TEST_FILTER=invisible.
+
+import {
+  buildManagedClaudeHooks,
+  checkEditorCompatibility,
+  detectEditors,
+  isManagedHookHandler,
+  looksLikeJsoncOrNonStrict,
+  mergeManagedHooksIntoSettings,
+  planSettingsWrite,
+  planSettingsUninstall,
+  invisibleStatus,
+  MANAGED_ID as INV_MANAGED_ID,
+  RECEIPT_HEADER as INV_RECEIPT_HEADER,
+  RECEIPT_REL as INV_RECEIPT_REL,
+} from "../invisible.mjs";
+
+scenario("invisible: cold install --claude-code + first gate + receipt + idempotent", () => {
+  const base = freshBase();
+  try {
+    const t0 = Date.now();
+    const repo = path.join(base, "inv-cold");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-cold", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, `init failed:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout + r.stderr, /Invisible mode installed|already installed/i);
+
+    // Settings schema (verified Claude Code shape)
+    const settingsAbs = path.join(repo, ".claude", "settings.json");
+    assert.ok(existsSync(settingsAbs), "settings.json missing");
+    const settings = JSON.parse(readFileSync(settingsAbs, "utf8"));
+    assert.ok(settings.hooks, "hooks key missing");
+    assert.ok(Array.isArray(settings.hooks.PreToolUse), "PreToolUse missing");
+    assert.ok(Array.isArray(settings.hooks.SessionStart), "SessionStart missing");
+    assert.ok(Array.isArray(settings.hooks.PostToolUse), "PostToolUse missing");
+    const preCmd = JSON.stringify(settings.hooks.PreToolUse);
+    assert.ok(preCmd.includes(INV_MANAGED_ID) || preCmd.includes("invisible-hook"), "managed id missing in PreToolUse");
+
+    // Runner + receipt + intent
+    assert.ok(existsSync(path.join(repo, ".getadvantage", "invisible-hook.mjs")), "runner missing");
+    assert.ok(existsSync(path.join(repo, INV_RECEIPT_REL)), "receipt missing");
+    const receipt = readFileSync(path.join(repo, INV_RECEIPT_REL), "utf8");
+    assert.ok(receipt.includes(INV_RECEIPT_HEADER), "receipt header missing");
+    assert.ok(!/sk_live_|ghp_|api[_-]?key|password/i.test(receipt), "receipt must not contain secret-shaped text");
+    assert.ok(existsSync(path.join(repo, ".getadvantage", "intent.json")), "intent auto-capture missing");
+    const intent = JSON.parse(readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8"));
+    assert.equal(intent.schemaVersion, 1);
+    assert.ok(intent.goal && intent.goal.length > 10, "intent goal too short");
+    assert.ok(Array.isArray(intent.allow) && intent.allow.length > 0, "intent allow empty");
+    assert.match(intent.baselineCommit, /^[0-9a-f]{40}$/);
+
+    // First gate via installed runner (no typing getadvantage check)
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    const g1 = spawnSync(process.execPath, [hook, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(g1.status, 0, `first gate should GO on clean tree:\n${g1.stdout}\n${g1.stderr}`);
+
+    // Secret fixture → NO-GO
+    write(repo, "leak.js", 'const k = "sk_live_1234567890abcdefghijklmnop";\n');
+    // Need it tracked/staged for secret scan of committed+staged? check scans committed and more.
+    // commit would be blocked — stage it so dirty/secret scan sees it, or just leave untracked?
+    // Secret scan covers committed/staged; untracked may still be covered for non-ignored.
+    // Safer: stage it.
+    g(["add", "leak.js"], repo);
+    const g2 = spawnSync(process.execPath, [hook, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.notEqual(g2.status, 0, `secret should NO-GO:\n${g2.stdout}\n${g2.stderr}`);
+    const out2 = g2.stdout + g2.stderr;
+    assert.match(out2, /NO-GO|secret/i);
+    // B1 paste-ready remediation should surface on secret NO-GO
+    assert.ok(
+      /smallest safe next edit|secrets\.ignore|paste-ready|auth-id|hashes/i.test(out2),
+      `expected B1 remediation block:\n${out2}`,
+    );
+
+    // Deliberate bypass
+    const g3 = spawnSync(process.execPath, [hook, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv({ GETADVANTAGE_INVISIBLE_BYPASS: "1" }),
+      timeout: 60_000,
+    });
+    assert.equal(g3.status, 0, `bypass should exit 0:\n${g3.stdout}\n${g3.stderr}`);
+    assert.match(g3.stderr + g3.stdout, /BYPASS|deliberate/i);
+
+    // Idempotent re-init
+    const r2 = run(["init", "--claude-code"], repo);
+    assert.equal(r2.code, 0, `re-init failed:\n${r2.stdout}\n${r2.stderr}`);
+    assert.match(r2.stdout + r2.stderr, /already installed|nothing changed|gating/i);
+
+    const elapsed = (Date.now() - t0) / 1000;
+    assert.ok(elapsed < 60, `activation contract <60s failed: ${elapsed.toFixed(1)}s`);
+    // Stash measurement on global for the summary line.
+    globalThis.__INV_ACTIVATION_S = elapsed;
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: uninstall removes only ours; foreign settings keys survive", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-un");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-un", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+
+    // Pre-existing settings with foreign key + foreign hook
+    write(
+      repo,
+      ".claude/settings.json",
+      JSON.stringify(
+        {
+          permissions: { defaultMode: "acceptEdits" },
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: "Bash",
+                hooks: [{ type: "command", command: "echo foreign-hook" }],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const mid = JSON.parse(readFileSync(path.join(repo, ".claude", "settings.json"), "utf8"));
+    assert.equal(mid.permissions.defaultMode, "acceptEdits");
+    assert.ok(mid.hooks.PreToolUse.some((g) => JSON.stringify(g).includes("foreign-hook")));
+    assert.ok(mid.hooks.PreToolUse.some((g) => groupHasManaged(g)));
+
+    const u = run(["init", "--uninstall-invisible"], repo);
+    assert.equal(u.code, 0, u.stdout + u.stderr);
+    const after = JSON.parse(readFileSync(path.join(repo, ".claude", "settings.json"), "utf8"));
+    assert.equal(after.permissions.defaultMode, "acceptEdits");
+    assert.ok(after.hooks.PreToolUse.some((g) => JSON.stringify(g).includes("foreign-hook")));
+    assert.ok(!after.hooks.PreToolUse.some((g) => groupHasManaged(g)), "managed hooks must be gone");
+    assert.ok(!existsSync(path.join(repo, ".getadvantage", "invisible-hook.mjs")));
+    assert.ok(!existsSync(path.join(repo, INV_RECEIPT_REL)));
+  } finally {
+    cleanup(base);
+  }
+});
+
+function groupHasManaged(g) {
+  return (g.hooks || []).some((h) => isManagedHookHandler(h));
+}
+
+scenario("invisible: ship blocker — hook removal reports not gating", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-rm");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-rm", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    // Remove Claude settings hooks + git pre-commit out from under install.
+    rmSync(path.join(repo, ".claude", "settings.json"), { force: true });
+    const gitDir = g(["rev-parse", "--git-dir"], repo);
+    const pre = path.join(repo, gitDir, "hooks", "pre-commit");
+    if (existsSync(pre)) rmSync(pre, { force: true });
+
+    const st = run(["init", "--invisible-status"], repo);
+    const out = st.stdout + st.stderr;
+    assert.match(out, /not gating/i);
+    assert.ok(!/status: gating/i.test(out) || /not gating/i.test(out));
+    // Status should not claim still gating.
+    const live = invisibleStatus(repo);
+    assert.equal(live.gating, false);
+    assert.equal(live.summary, "not gating");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: ship blocker — wrong-editor detection", () => {
+  const base = freshBase();
+  try {
+    // Cursor-only repo
+    const repo = path.join(base, "inv-cursor-only");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-co", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, ".cursorrules", "# cursor only\n");
+    commitAll(repo, "chore: initial");
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.notEqual(r.code, 0, "must refuse --claude-code on cursor-only");
+    assert.match(r.stdout + r.stderr, /Wrong editor|Cursor-only|cursor/i);
+    assert.ok(!existsSync(path.join(repo, ".claude", "settings.json")), "must not write settings");
+
+    // Claude-only repo + --cursor
+    const repo2 = path.join(base, "inv-claude-only");
+    initRepo(repo2);
+    write(repo2, "package.json", JSON.stringify({ name: "inv-cl", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo2, "CLAUDE.md", "# claude only\n");
+    commitAll(repo2, "chore: initial");
+    const r2 = run(["init", "--cursor"], repo2);
+    assert.notEqual(r2.code, 0, "must refuse --cursor on claude-only");
+    assert.match(r2.stdout + r2.stderr, /Wrong editor|Claude-Code-only|claude/i);
+
+    // Neutral cold repo: --cursor still refuses (schema unverified), not wrong-editor
+    const repo3 = path.join(base, "inv-neutral");
+    initRepo(repo3);
+    write(repo3, "package.json", JSON.stringify({ name: "inv-n", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo3, "chore: initial");
+    const r3 = run(["init", "--cursor"], repo3);
+    assert.notEqual(r3.code, 0);
+    assert.match(r3.stdout + r3.stderr, /not verified|schema|Claude Code is fully supported/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: ship blocker — settings.json never corrupted (JSONC/invalid/foreign)", () => {
+  const base = freshBase();
+  try {
+    // JSONC with comments
+    const repo = path.join(base, "inv-jsonc");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-jsonc", version: "1.0.0", private: true }, null, 2) + "\n");
+    const jsoncBody = '{\n  // comment\n  "permissions": { "defaultMode": "acceptEdits" },\n}\n';
+    write(repo, ".claude/settings.json", jsoncBody);
+    commitAll(repo, "chore: initial");
+    const before = readFileSync(path.join(repo, ".claude", "settings.json"), "utf8");
+    const r = run(["init", "--claude-code"], repo);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /JSONC|comment|Refusing|not valid JSON|trailing/i);
+    const after = readFileSync(path.join(repo, ".claude", "settings.json"), "utf8");
+    assert.equal(after, before, "JSONC settings must survive byte-exact");
+
+    // Invalid JSON
+    const repo2 = path.join(base, "inv-badjson");
+    initRepo(repo2);
+    write(repo2, "package.json", JSON.stringify({ name: "inv-bad", version: "1.0.0", private: true }, null, 2) + "\n");
+    const bad = '{ "permissions": { "defaultMode": "acceptEdits", } BROKEN';
+    write(repo2, ".claude/settings.json", bad);
+    commitAll(repo2, "chore: initial");
+    const before2 = readFileSync(path.join(repo2, ".claude", "settings.json"), "utf8");
+    const r2 = run(["init", "--claude-code"], repo2);
+    assert.notEqual(r2.code, 0);
+    assert.match(r2.stdout + r2.stderr, /not valid JSON|invalid JSON|Refusing/i);
+    assert.equal(readFileSync(path.join(repo2, ".claude", "settings.json"), "utf8"), before2);
+
+    // Unit: looksLikeJsonc
+    assert.ok(looksLikeJsoncOrNonStrict('{ "a": 1, }'));
+    assert.ok(looksLikeJsoncOrNonStrict('{ // x\n"a": 1 }'));
+    assert.equal(looksLikeJsoncOrNonStrict('{ "a": 1 }'), null);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: foreign git hook refused; --force overwrites", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-foreign");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-f", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    const gitDir = g(["rev-parse", "--git-dir"], repo);
+    const hooksDir = path.join(repo, gitDir, "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const pre = path.join(hooksDir, "pre-commit");
+    writeFileSync(pre, "#!/bin/sh\necho foreign\nexit 0\n", "utf8");
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /already exists|not managed|Not overwriting|foreign/i);
+    assert.equal(readFileSync(pre, "utf8"), "#!/bin/sh\necho foreign\nexit 0\n");
+
+    const r2 = run(["init", "--claude-code", "--force"], repo);
+    assert.equal(r2.code, 0, r2.stdout + r2.stderr);
+    const body = readFileSync(pre, "utf8");
+    assert.ok(body.includes(INV_MANAGED_ID) || body.includes("getadvantage:invisible-mode"));
+    assert.match(r2.stdout + r2.stderr, /force|replaced|foreign/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: husky present → refuse git fight; print line to add", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-husky");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-h", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, ".husky/pre-commit", "#!/bin/sh\nnpm test\n");
+    commitAll(repo, "chore: initial");
+
+    const r = run(["init", "--claude-code"], repo);
+    // Claude settings should still install; husky is a soft skip for git hook.
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout + r.stderr, /husky/i);
+    assert.ok(existsSync(path.join(repo, ".claude", "settings.json")));
+    // Default .git/hooks/pre-commit should NOT be our managed one fighting husky.
+    // (husky uses its own path; we simply skip writing)
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: core.hooksPath respected; no stray write to .git/hooks", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-hookspath");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-hp", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    const custom = path.join(repo, "custom-hooks");
+    mkdirSync(custom, { recursive: true });
+    g(["config", "core.hooksPath", "custom-hooks"], repo);
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.ok(existsSync(path.join(custom, "pre-commit")), "hook must land in core.hooksPath");
+    const gitDir = g(["rev-parse", "--git-dir"], repo);
+    const stray = path.join(repo, gitDir, "hooks", "pre-commit");
+    if (existsSync(stray)) {
+      const body = readFileSync(stray, "utf8");
+      assert.ok(!body.includes(INV_MANAGED_ID), "must not write managed hook to default .git/hooks when hooksPath set");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: no commits yet → clear message, no crash", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-zero");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-z", version: "1.0.0", private: true }, null, 2) + "\n");
+    // no commit
+    const r = run(["init", "--claude-code"], repo);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stdout + r.stderr, /no commits|initial commit/i);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: intent already in ancestry → skip with message, no crash", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-intent");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-i", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    // Create + commit a real intent first
+    const ir = run(
+      ["intent", "init", "--goal", "pre-existing", "--allow", "src/**"],
+      repo,
+    );
+    assert.equal(ir.code, 0, ir.stdout + ir.stderr);
+    g(["add", ".getadvantage/intent.json"], repo);
+    g(["commit", "-q", "-m", "chore: intent contract"], repo);
+
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout + r.stderr, /already exists|skipping auto-capture|ancestry|leaving it/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: receipt tamper / delete does not claim still gating falsely", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-receipt");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-r", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    // Delete receipt — still gating if hooks present
+    rmSync(path.join(repo, INV_RECEIPT_REL), { force: true });
+    let live = invisibleStatus(repo);
+    assert.equal(live.gating, true, "hooks still present → still gating even if receipt deleted");
+
+    // Hand-edit receipt
+    write(repo, INV_RECEIPT_REL, "# totally unrelated file\n");
+    live = invisibleStatus(repo);
+    assert.equal(live.receiptTampered, true);
+    assert.equal(live.gating, true); // still gating; tamper is disclosed not a false claim
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: Windows spaces + non-ASCII path segment", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "proj ect-über");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-unicode", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    const g1 = spawnSync(process.execPath, [hook, "gate", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(g1.status, 0, g1.stdout + g1.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: unit — merge preserves foreign hooks; managed detection", () => {
+  const managed = buildManagedClaudeHooks();
+  const existing = {
+    permissions: { allow: ["Bash"] },
+    hooks: {
+      PreToolUse: [
+        { matcher: "Bash", hooks: [{ type: "command", command: "echo other" }] },
+      ],
+    },
+  };
+  const m = mergeManagedHooksIntoSettings(existing);
+  assert.ok(m.ok && m.changed);
+  assert.equal(m.json.permissions.allow[0], "Bash");
+  assert.ok(m.json.hooks.PreToolUse.some((g) => JSON.stringify(g).includes("echo other")));
+  assert.ok(m.json.hooks.PreToolUse.some((g) => groupHasManaged(g)));
+  assert.ok(m.json.hooks.SessionStart);
+  // Idempotent
+  const m2 = mergeManagedHooksIntoSettings(m.json);
+  assert.ok(m2.ok);
+  assert.equal(m2.changed, false);
+  // isManagedHookHandler
+  const h = managed.PreToolUse[0].hooks[0];
+  assert.ok(isManagedHookHandler(h));
+  assert.ok(!isManagedHookHandler({ type: "command", command: "echo hi" }));
+});
+
+scenario("invisible: worktree / detached HEAD no crash no fatal leak", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-wt");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-wt", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: initial");
+    // detached
+    const sha = g(["rev-parse", "HEAD"], repo);
+    g(["checkout", "--detach", sha], repo);
+    const r = run(["init", "--claude-code"], repo);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr));
+
+    // worktree
+    g(["checkout", "-B", "main"], repo);
+    const wt = path.join(base, "inv-wt-lane");
+    g(["worktree", "add", "-q", wt, "HEAD"], repo);
+    const r2 = run(["init", "--claude-code"], wt);
+    assert.equal(r2.code, 0, r2.stdout + r2.stderr);
+    assert.ok(!/fatal:/i.test(r2.stdout + r2.stderr));
   } finally {
     cleanup(base);
   }

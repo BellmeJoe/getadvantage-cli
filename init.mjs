@@ -10,10 +10,14 @@
 // Idempotent: it upserts its own marked block (never duplicates), so re-running
 // after the brief changes is safe. If NO entry file exists, it creates AGENTS.md
 // (the emerging cross-tool standard). Node built-ins only. ESM.
+//
+// Invisible mode (B2): `init --claude-code` / `--cursor` / `--uninstall-invisible`
+// / `--invisible-status` install automatic gate enforcement. See invisible.mjs.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { binName, c, relPath } from "./util.mjs";
+import { runInvisible } from "./invisible.mjs";
 
 const START = "<!-- getadvantage:auto-load -->";
 const END = "<!-- /getadvantage:auto-load -->";
@@ -67,8 +71,31 @@ function upsertBlock(abs) {
   return action;
 }
 
+/**
+ * @param {object} o
+ * @param {string} o.cwd
+ * @param {string} [o.preferFile]
+ * @param {boolean} [o.claudeCode]  invisible mode for Claude Code
+ * @param {boolean} [o.cursor]      invisible mode for Cursor (detect-and-refuse until verified)
+ * @param {boolean} [o.uninstallInvisible]
+ * @param {boolean} [o.invisibleStatus]
+ * @param {boolean} [o.force]
+ * @returns {number} exit code
+ */
 export function runInit(o) {
   const cwd = o.cwd;
+
+  // Invisible mode paths take precedence over the instruction-file brain wire.
+  if (o.uninstallInvisible || o.invisibleStatus || o.claudeCode || o.cursor) {
+    return runInvisible({
+      cwd,
+      editor: o.claudeCode ? "claude-code" : o.cursor ? "cursor" : null,
+      uninstall: !!o.uninstallInvisible,
+      status: !!o.invisibleStatus,
+      force: !!o.force,
+    });
+  }
+
   // o.preferFile: the entry file the tool being switched TO actually reads
   // (e.g. CLAUDE.md for `switch claude`). Wired even when absent, so the
   // per-tool tip ("X reads Y at startup") is always true.
@@ -91,6 +118,11 @@ export function runInit(o) {
   console.log(c.green(`✓ Wired the project brain in: ${done.join(", ")}`));
   console.log(c.gray("  Your AI reads these at session start — so PROJECT-BRIEF.md + HANDOFF.md load automatically."));
   console.log(c.gray("  Re-run anytime; it updates its own marked block and never duplicates."));
+  console.log(
+    c.gray(
+      `  For automatic gate enforcement (invisible mode): \`${binName()} init --claude-code\`.`,
+    ),
+  );
   if (!existsSync(path.join(cwd, "PROJECT-BRIEF.md"))) {
     console.log(c.gray(`  (Don't forget to run \`${binName()} brief\` once so the brain file exists.)`));
   }
