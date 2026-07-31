@@ -37,11 +37,13 @@
 //                                     and never value/hash-allowlistable
 //  9g. paste-ready remediation (B1) — blocking secret names secrets.ignore hatch
 //                                     with pattern-aware paste-ready snippet
-//                                     (hashes for normal; paths/patternIds only
-//                                     for private-key-incomplete); applied
-//                                     snippet suppresses + still disclosed;
-//                                     per-auth not blanket; clean GO quiet;
-//                                     emitted JSON round-trips parse
+//                                     (hashes for normal; paths-only for
+//                                     private-key-incomplete / non-unique auth);
+//                                     applied snippet suppresses + still disclosed;
+//                                     per-auth not blanket; sibling non-unique
+//                                     files not suppressed by one path snippet;
+//                                     later-added same-pattern files still block;
+//                                     clean GO quiet; emitted JSON round-trips parse
 //  10. fan-out lane branches        — namespaced ga/lane-N; re-run idempotent
 //  11. branch never silently reused — pre-existing ga/lane-N → clear error
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
@@ -1887,7 +1889,7 @@ scenario("paste-ready remediation: emitted JSON is valid and parses exactly as w
   }
 });
 
-scenario("paste-ready remediation: private-key-incomplete uses paths/patternIds NOT hashes; apply suppresses; still disclosed", () => {
+scenario("paste-ready remediation: private-key-incomplete uses paths-only NOT hashes/patternIds; apply suppresses; still disclosed", () => {
   const base = freshBase();
   try {
     const truncated =
@@ -1911,30 +1913,23 @@ scenario("paste-ready remediation: private-key-incomplete uses paths/patternIds 
     assert.equal(preSec.status, "fail");
     const preBlob = `${(preSec.extra || []).join("\n")}\n${r0.stdout}`;
     assert.ok(/Incomplete private key block/i.test(preBlob), preBlob);
-    assert.ok(/not unique|refused|cannot|paths|patternIds/i.test(preBlob), `must explain why hash cannot be used\n${preBlob}`);
+    assert.ok(/not unique|refused|cannot|paths/i.test(preBlob), `must explain why hash cannot be used\n${preBlob}`);
 
     const snip = extractPasteReadyIgnoreSnippet(preBlob);
     assert.ok(snip, `must emit paste-ready JSON for incomplete PEM\n${preBlob}`);
     assert.equal(snip.version, 1);
     const ign = snip.secrets && snip.secrets.ignore;
     assert.ok(ign, JSON.stringify(snip));
-    // THE TRAP: never emit hashes for private-key-incomplete.
+    // THE TRAP: never emit hashes/values/patternIds for private-key-incomplete.
+    // patternIds alone would authorize the entire pattern class repo-wide.
     assert.ok(!ign.hashes, `must NEVER emit hashes for private-key-incomplete: ${JSON.stringify(snip)}`);
     assert.ok(!ign.values, `must NEVER emit values for private-key-incomplete: ${JSON.stringify(snip)}`);
+    assert.ok(!ign.patternIds, `must NEVER emit patternIds for non-unique auth (over-broad): ${JSON.stringify(snip)}`);
+    assert.ok(Array.isArray(ign.paths) && ign.paths.length > 0, `must use paths only: ${JSON.stringify(snip)}`);
     assert.ok(
-      (Array.isArray(ign.paths) && ign.paths.length > 0) ||
-        (Array.isArray(ign.patternIds) && ign.patternIds.length > 0),
-      `must use paths and/or patternIds: ${JSON.stringify(snip)}`,
+      ign.paths.some((p) => String(p).replace(/\\/g, "/").includes("keys/trunc.pem")),
+      `path should name the finding file: ${JSON.stringify(ign.paths)}`,
     );
-    if (Array.isArray(ign.paths)) {
-      assert.ok(
-        ign.paths.some((p) => String(p).replace(/\\/g, "/").includes("keys/trunc.pem")),
-        `path should name the finding file: ${JSON.stringify(ign.paths)}`,
-      );
-    }
-    if (Array.isArray(ign.patternIds)) {
-      assert.ok(ign.patternIds.includes("private-key-incomplete"), JSON.stringify(ign.patternIds));
-    }
     // Snippet must not smuggle the colliding header hash either.
     const dumped = JSON.stringify(snip);
     assert.ok(!dumped.includes(headerHash), `snippet must not contain header hash ${headerHash}`);
@@ -1944,15 +1939,174 @@ scenario("paste-ready remediation: private-key-incomplete uses paths/patternIds 
     commitAll(repo, "chore: apply incomplete-PEM paste-ready ignore");
 
     const r1 = run(["check", "--json"], repo);
-    assert.equal(r1.code, 0, `applied paths/patternIds snippet must GO\n${r1.stderr}\n${r1.stdout}`);
+    assert.equal(r1.code, 0, `applied paths-only snippet must GO\n${r1.stderr}\n${r1.stdout}`);
     const doc = parseJson(r1);
     assert.equal(doc.verdict, "GO");
     const secret = doc.checks.find((c) => c.label === "Secret scan");
     assert.equal(secret.status, "pass");
     const extra = (secret.extra || []).join("\n");
     assert.ok(/allowlisted/i.test(secret.detail + "\n" + extra), "suppressed incomplete PEM must still be disclosed");
-    assert.ok(/policy: (path|patternId)/i.test(extra), extra);
-    assert.ok(!/policy: hash|policy: value/i.test(extra), `must not claim hash/value allow for incomplete:\n${extra}`);
+    assert.ok(/policy: path/i.test(extra), extra);
+    assert.ok(!/policy: hash|policy: value|policy: patternId/i.test(extra), `must not claim hash/value/patternId allow for incomplete:\n${extra}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Hostile: applying fileA's paths-only snippet must NOT suppress a sibling file
+// with the same non-unique auth id (patternIds would have blanketed both).
+scenario("paste-ready remediation: non-unique sibling file still blocks after applying fileA paths-only snippet", () => {
+  const base = freshBase();
+  try {
+    // Bare PEM headers collide on auth id (header-only match) — same non-unique pattern.
+    const bareHeader = "-----BEGIN RSA PRIVATE KEY-----\n";
+    const repo = path.join(base, "paste-ready-sibling");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-sibling", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "keys/fileA.pem", bareHeader);
+    write(repo, "keys/fileB.pem", bareHeader);
+    commitAll(repo, "chore: two incomplete PEM siblings");
+
+    const r0 = run(["check", "--json"], repo);
+    assert.equal(r0.code, 1, `both siblings must NO-GO pre-snippet\n${r0.stderr}\n${r0.stdout}`);
+    const pre = parseJson(r0);
+    assert.equal(pre.verdict, "NO-GO");
+    const preSec = pre.checks.find((c) => c.label === "Secret scan");
+    assert.equal(preSec.status, "fail");
+    const preBlob = `${(preSec.extra || []).join("\n")}\n${r0.stdout}`;
+    assert.ok(/fileA\.pem/i.test(preBlob), `fileA must appear in findings\n${preBlob}`);
+    assert.ok(/fileB\.pem/i.test(preBlob), `fileB must appear in findings\n${preBlob}`);
+
+    // Extract the snippet emitted for fileA specifically (structured finding remediation).
+    const findings = preSec.findings || [];
+    const fileAFinding = findings.find((f) => f.file && String(f.file).replace(/\\/g, "/").includes("keys/fileA.pem"));
+    assert.ok(fileAFinding, `must have structured finding for fileA\n${JSON.stringify(findings.map((f) => f.file))}`);
+    assert.ok(Array.isArray(fileAFinding.remediation), "fileA finding must carry remediation lines");
+    const snip = extractPasteReadyIgnoreSnippet(fileAFinding.remediation.join("\n"));
+    assert.ok(snip, `must emit paste-ready JSON for fileA\n${fileAFinding.remediation.join("\n")}`);
+    const ign = snip.secrets && snip.secrets.ignore;
+    assert.ok(ign, JSON.stringify(snip));
+    assert.ok(!ign.patternIds, `sibling trap: must not emit patternIds: ${JSON.stringify(snip)}`);
+    assert.ok(!ign.hashes && !ign.values, `must not emit hashes/values: ${JSON.stringify(snip)}`);
+    assert.ok(Array.isArray(ign.paths) && ign.paths.length > 0, JSON.stringify(snip));
+    assert.ok(
+      ign.paths.every((p) => String(p).replace(/\\/g, "/").includes("fileA.pem")),
+      `fileA snippet must only path-scope fileA: ${JSON.stringify(ign.paths)}`,
+    );
+
+    // Apply the emitted fileA snippet verbatim as tracked config.
+    write(repo, path.join(".getadvantage", "config.json"), JSON.stringify(snip, null, 2) + "\n");
+    commitAll(repo, "chore: apply fileA paths-only secrets.ignore");
+
+    const r1 = run(["check", "--json"], repo);
+    assert.equal(r1.code, 1, `fileB must still block after fileA path ignore\n${r1.stderr}\n${r1.stdout}`);
+    const doc = parseJson(r1);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const extra = (secret.extra || []).join("\n");
+    const blob = `${secret.detail || ""}\n${extra}\n${r1.stdout}`;
+    assert.ok(/fileB\.pem/i.test(blob), `fileB must still be a blocking finding\n${blob}`);
+    // fileA should be disclosed as allowlisted via path, not still blocking alone.
+    assert.ok(/allowlisted/i.test(blob) || /policy: path/i.test(blob), `fileA should be disclosed allowlisted\n${blob}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Hostile: after a paths-only snippet is committed, a later-added same-pattern file still blocks.
+scenario("paste-ready remediation: non-unique later-added file still blocks after paths-only snippet", () => {
+  const base = freshBase();
+  try {
+    const bareHeader = "-----BEGIN RSA PRIVATE KEY-----\n";
+    const repo = path.join(base, "paste-ready-later");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-later", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "keys/fileA.pem", bareHeader);
+    commitAll(repo, "chore: incomplete PEM fileA");
+
+    const r0 = run(["check", "--json"], repo);
+    assert.equal(r0.code, 1, `fileA must NO-GO\n${r0.stderr}\n${r0.stdout}`);
+    const pre = parseJson(r0);
+    const preSec = pre.checks.find((c) => c.label === "Secret scan");
+    const preBlob = `${(preSec.extra || []).join("\n")}\n${r0.stdout}`;
+    const snip = extractPasteReadyIgnoreSnippet(preBlob);
+    assert.ok(snip, `must emit paste-ready JSON\n${preBlob}`);
+    assert.ok(!snip.secrets?.ignore?.patternIds, `must not emit patternIds: ${JSON.stringify(snip)}`);
+    assert.ok(Array.isArray(snip.secrets?.ignore?.paths), JSON.stringify(snip));
+    assert.ok(
+      snip.secrets.ignore.paths.some((p) => String(p).replace(/\\/g, "/").includes("fileA.pem")),
+      JSON.stringify(snip),
+    );
+
+    write(repo, path.join(".getadvantage", "config.json"), JSON.stringify(snip, null, 2) + "\n");
+    commitAll(repo, "chore: apply fileA paths-only secrets.ignore");
+
+    // Later-added third same-pattern file must still block (not authorized by pattern class).
+    write(repo, "keys/fileC.pem", bareHeader);
+    commitAll(repo, "chore: later-added incomplete PEM fileC");
+
+    const r1 = run(["check", "--json"], repo);
+    assert.equal(r1.code, 1, `later-added fileC must still NO-GO\n${r1.stderr}\n${r1.stdout}`);
+    const doc = parseJson(r1);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const blob = `${secret.detail || ""}\n${(secret.extra || []).join("\n")}\n${r1.stdout}`;
+    assert.ok(/fileC\.pem/i.test(blob), `fileC must still block\n${blob}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Control: unique-pattern hash snippets still suppress exactly one finding (not siblings).
+scenario("paste-ready remediation: unique-pattern hash snippet suppresses only that auth id (control)", () => {
+  const base = freshBase();
+  try {
+    const keyA = "sk_live_" + "u1n2i3q4u5e6c7o8n9t0r1o2lA";
+    const keyB = "sk_live_" + "u1n2i3q4u5e6c7o8n9t0r1o2lB";
+    assert.notEqual(hashOf(keyA), hashOf(keyB));
+    const authA = hashOf(keyA);
+
+    const repo = path.join(base, "paste-ready-unique-control");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-unique-control", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "src/a.js", `export const A = "${keyA}";\n`);
+    write(repo, "src/b.js", `export const B = "${keyB}";\n`);
+    commitAll(repo, "chore: two distinct stripe-shaped secrets");
+
+    const r0 = run(["check", "--json"], repo);
+    assert.equal(r0.code, 1, "both unique secrets must NO-GO");
+    const pre = parseJson(r0);
+    const preSec = pre.checks.find((c) => c.label === "Secret scan");
+
+    // Prefer finding remediation for keyA's file so the snippet carries authA verbatim.
+    const findings = preSec.findings || [];
+    const aFinding = findings.find((f) => f.file && String(f.file).replace(/\\/g, "/").includes("src/a.js"));
+    assert.ok(aFinding && Array.isArray(aFinding.remediation), "src/a.js finding must carry remediation");
+    const snip = extractPasteReadyIgnoreSnippet(aFinding.remediation.join("\n"));
+    assert.ok(snip, `must emit paste-ready JSON for keyA\n${aFinding.remediation.join("\n")}`);
+    assert.deepEqual(snip.secrets.ignore.hashes, [authA]);
+    assert.ok(!snip.secrets.ignore.patternIds, "unique pattern uses hashes, not patternIds");
+    assert.ok(!snip.secrets.ignore.paths, "unique pattern with authId uses hashes only");
+
+    write(repo, path.join(".getadvantage", "config.json"), JSON.stringify(snip, null, 2) + "\n");
+    commitAll(repo, "chore: apply unique authA hash secrets.ignore");
+
+    const r1 = run(["check", "--json"], repo);
+    assert.equal(r1.code, 1, `keyB must still block after authA hash ignore\n${r1.stderr}\n${r1.stdout}`);
+    const doc = parseJson(r1);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const extra = (secret.extra || []).join("\n");
+    const blob = `${secret.detail || ""}\n${extra}`;
+    assert.ok(/allowlisted/i.test(blob) && /policy: hash/i.test(blob), `authA must be disclosed allowlisted\n${blob}`);
+    assert.ok(
+      blob.includes("src/b.js") || blob.includes(hashOf(keyB)),
+      `keyB must still be the blocking finding\n${blob}`,
+    );
+    assert.ok(!JSON.stringify(doc).includes(keyA) && !JSON.stringify(doc).includes(keyB), "full secrets never echoed");
   } finally {
     cleanup(base);
   }

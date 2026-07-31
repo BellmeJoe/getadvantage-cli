@@ -618,7 +618,8 @@ export function checkSecrets(cwd) {
  * Plain-language smallest-safe-next-edit for one blocking secret hit, including
  * a pattern-aware paste-ready `.getadvantage/config.json` `secrets.ignore`
  * snippet. Non-unique pattern ids (e.g. private-key-incomplete) never get a
- * hashes snippet — only paths/patternIds.
+ * hashes/values/patternIds snippet — only a path-scoped ignore (patternIds
+ * would authorize the entire pattern class repo-wide, including future files).
  *
  * @param {{ file: string, label: string, patternId?: string, authId?: string, fp?: string, startLine?: number }} h
  * @returns {string[]}
@@ -642,11 +643,10 @@ function secretHitRemediation(h) {
   let ignore;
   if (nonUnique) {
     lines.push(
-      `  Hash/value ignore is refused for pattern "${patternId}" because the match is not unique across keys (e.g. a constant PEM header collides). Use paths and/or patternIds only — never hashes for this pattern:`,
+      `  Hash/value ignore is refused for pattern "${patternId}" because the match is not unique across keys (e.g. a constant PEM header collides). Use a path-scoped ignore only — never hashes, values, or patternIds for this pattern (patternIds would authorize every future file with the same detector):`,
     );
     ignore = {
       paths: [filePosix],
-      patternIds: [patternId],
     };
   } else if (h.authId) {
     lines.push(
