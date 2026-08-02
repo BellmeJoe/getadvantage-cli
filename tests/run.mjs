@@ -164,6 +164,10 @@
 //                                     + INVISIBLE-MODE.md receipt; --cursor refuse;
 //                                     uninstall; status not-gating on hook removal;
 //                                     settings.json never corrupted; hostiles
+//  52b. Invisible agent-trigger P1 repair — real commit through installed hook;
+//                                     PreToolUse allows ordinary edit; plain
+//                                     check --ci still Dirty-tree NO-GO; staged
+//                                     secret/.env/Intent still refuse; bypass honest
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -11667,6 +11671,216 @@ scenario("invisible: worktree / detached HEAD no crash no fatal leak", () => {
     const r2 = run(["init", "--claude-code"], wt);
     assert.equal(r2.code, 0, r2.stdout + r2.stderr);
     assert.ok(!/fatal:/i.test(r2.stdout + r2.stderr));
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 52b. Invisible agent-trigger P1 repair — real commit + Dirty-tree composition
+// ---------------------------------------------------------------------------
+
+scenario("invisible: hostile — real commit of real work through installed hook succeeds", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-real-commit");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-rc", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+
+    const inst = run(["init", "--claude-code"], repo);
+    assert.equal(inst.code, 0, `init failed:\n${inst.stdout}\n${inst.stderr}`);
+    // Prove the managed pre-commit is actually installed (not husky-skipped).
+    const gitDir = g(["rev-parse", "--git-dir"], repo);
+    const pre = path.join(repo, gitDir, "hooks", "pre-commit");
+    assert.ok(existsSync(pre), "managed pre-commit must exist for this hostile");
+    const preBody = readFileSync(pre, "utf8");
+    assert.ok(preBody.includes(INV_MANAGED_ID) || preBody.includes("invisible-hook"), preBody);
+
+    // Ordinary work inside the auto-captured allow list.
+    write(repo, "src/feature.js", "export const feature = true;\n");
+    g(["add", "src/feature.js"], repo);
+
+    // Real git commit through the installed hook (no --no-verify).
+    let commitErr = "";
+    try {
+      g(["commit", "-m", "feat: ordinary work lands under invisible mode"], repo);
+    } catch (e) {
+      commitErr = String(e && e.stderr ? e.stderr : e && e.message ? e.message : e);
+      if (e && e.stdout) commitErr += "\n" + e.stdout;
+    }
+    assert.equal(commitErr, "", `commit must land through installed hook:\n${commitErr}`);
+
+    const log = g(["log", "--oneline", "-5"], repo);
+    assert.match(log, /feat: ordinary work lands under invisible mode/);
+    // Feature blob is on HEAD.
+    const show = g(["show", "--name-only", "--pretty=format:", "HEAD"], repo);
+    assert.match(show, /src\/feature\.js/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hostile — PreToolUse allows ordinary edit (no deny on dirty tree)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-pretool-ok");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-pt", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    // Modified tracked file, no secret — the P1 was PreToolUse deny on this shape.
+    write(repo, "app.js", "console.log('edited');\n");
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    const r = spawnSync(process.execPath, [hook, "pre-tool", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    const out = (r.stdout || "") + (r.stderr || "");
+    assert.equal(r.status, 0, `pre-tool must allow ordinary edit:\n${out}`);
+    assert.ok(!/"permissionDecision"\s*:\s*"deny"/.test(out), `must not emit deny JSON:\n${out}`);
+    assert.match(out, /agent-trigger profile: omitting Dirty-tree guard/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hostile — plain check --ci still NO-GO on dirty-tree guard", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-check-dirty");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-cd", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    write(repo, "app.js", "console.log('dirty');\n");
+    // Same dirty tree: agent-trigger path is GO for dirty alone; plain check is NO-GO.
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    const pre = spawnSync(process.execPath, [hook, "pre-tool", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(pre.status, 0, `agent-trigger must not block dirty alone:\n${pre.stdout}\n${pre.stderr}`);
+
+    const plain = run(["check", "--ci", "--no-brief-check"], repo);
+    assert.equal(plain.code, 1, `plain check --ci must NO-GO on dirty tree:\n${plain.stdout}\n${plain.stderr}`);
+    const pout = plain.stdout + plain.stderr;
+    assert.match(pout, /Dirty-tree guard|dirty.?tree/i);
+    assert.match(pout, /NO-GO/);
+    assert.ok(!/agent-trigger profile: omitting Dirty-tree guard/.test(pout), "plain check must not use agent-trigger profile");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hostile — profile does not weaken real gate (secret / .env / Intent)", () => {
+  const base = freshBase();
+  try {
+    // --- staged secret → pre-commit refuses ---
+    const repoSec = path.join(base, "inv-secret-block");
+    initRepo(repoSec);
+    write(repoSec, "package.json", JSON.stringify({ name: "inv-sec", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repoSec, "app.js", "console.log('ok');\n");
+    commitAll(repoSec, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repoSec).code, 0);
+    write(repoSec, "leak.js", 'const k = "sk_live_1234567890abcdefghijklmnop";\n');
+    g(["add", "leak.js"], repoSec);
+    const hookSec = path.join(repoSec, ".getadvantage", "invisible-hook.mjs");
+    const sec = spawnSync(process.execPath, [hookSec, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repoSec,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(sec.status, 1, `staged secret must refuse pre-commit:\n${sec.stdout}\n${sec.stderr}`);
+    const secOut = (sec.stdout || "") + (sec.stderr || "");
+    assert.match(secOut, /NO-GO|secret/i);
+    assert.match(secOut, /agent-trigger profile: omitting Dirty-tree guard/);
+
+    // --- staged tracked .env → pre-commit refuses ---
+    const repoEnv = path.join(base, "inv-env-block");
+    initRepo(repoEnv);
+    write(repoEnv, "package.json", JSON.stringify({ name: "inv-env", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repoEnv, "app.js", "console.log('ok');\n");
+    commitAll(repoEnv, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repoEnv).code, 0);
+    write(repoEnv, ".env", "SECRET=not-a-pattern-but-still-leak\n");
+    g(["add", ".env"], repoEnv);
+    const hookEnv = path.join(repoEnv, ".getadvantage", "invisible-hook.mjs");
+    const envR = spawnSync(process.execPath, [hookEnv, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repoEnv,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(envR.status, 1, `staged .env must refuse pre-commit:\n${envR.stdout}\n${envR.stderr}`);
+    const envOut = (envR.stdout || "") + (envR.stderr || "");
+    assert.match(envOut, /NO-GO|\.env|Tracked/i);
+
+    // --- Intent Contract outside-allow → pre-commit refuses (repo has auto-captured contract) ---
+    const repoInt = path.join(base, "inv-intent-block");
+    initRepo(repoInt);
+    write(repoInt, "package.json", JSON.stringify({ name: "inv-int", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repoInt, "app.js", "console.log('ok');\n");
+    commitAll(repoInt, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repoInt).code, 0);
+    assert.ok(existsSync(path.join(repoInt, ".getadvantage", "intent.json")), "intent auto-capture required");
+    // Path outside auto-capture allow list (*.yml / .github/** not allowed).
+    write(repoInt, ".github/workflows/hostile.yml", "name: hostile\non: push\njobs: {}\n");
+    g(["add", ".github/workflows/hostile.yml"], repoInt);
+    const hookInt = path.join(repoInt, ".getadvantage", "invisible-hook.mjs");
+    const intR = spawnSync(process.execPath, [hookInt, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repoInt,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    assert.equal(intR.status, 1, `Intent outside-allow must refuse:\n${intR.stdout}\n${intR.stderr}`);
+    const intOut = (intR.stdout || "") + (intR.stderr || "");
+    assert.match(intOut, /NO-GO|Intent|outside-allow|outside allow/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hostile — bypass stays honest under agent-trigger profile", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-bypass-honest");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-by", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    // Secret would NO-GO without bypass.
+    write(repo, "leak.js", 'const k = "sk_live_1234567890abcdefghijklmnop";\n');
+    g(["add", "leak.js"], repo);
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    const r = spawnSync(process.execPath, [hook, "pre-commit", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv({ GETADVANTAGE_INVISIBLE_BYPASS: "1" }),
+      timeout: 60_000,
+    });
+    assert.equal(r.status, 0, `bypass must exit 0:\n${r.stdout}\n${r.stderr}`);
+    const out = (r.stdout || "") + (r.stderr || "");
+    assert.match(out, /BYPASS|deliberate/i);
+    assert.ok(
+      /GETADVANTAGE_INVISIBLE_BYPASS|escape hatch|not a silent skip/i.test(out),
+      `bypass message must stay honest:\n${out}`,
+    );
+    // Bypass must NOT pretend the gate ran cleanly under agent-trigger.
+    assert.ok(!/agent-trigger profile: omitting Dirty-tree guard/.test(out), "bypass should not run the profile");
   } finally {
     cleanup(base);
   }

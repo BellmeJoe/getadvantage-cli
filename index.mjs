@@ -226,6 +226,10 @@ ${c.bold("Flags")}
   --base-ref <ref>        Merge-base ref for the schema-bump diff (default: main).
   --no-overview           Skip the read-only overview maps (API surface, integrations, schedules).
   --no-brief-check        Skip the (non-blocking) brief-staleness warning in ${c.cyan("check")}.
+  --agent-trigger         (${c.cyan("check")}) Agent-trigger profile for invisible-mode hooks only: run the
+                          same gate but omit Dirty-tree (staging is expected at commit/edit time) and
+                          print a visible disclosure line. Not the default; not read from repo config.
+                          Plain ${c.cyan("check")} / ${c.cyan("check --ci")} still enforce Dirty-tree for pre-deploy.
   --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
@@ -448,6 +452,9 @@ async function main() {
     const GATE_FLAGS = new Set([
       "build", "base-ref", "no-overview", "no-brief-check", "json", "ci",
       "report", "report-required", "sarif", "help", "version",
+      // Explicit only — never default, never from repo config. Invisible-mode
+      // hooks pass this so agent/commit triggers omit Dirty-tree (with disclosure).
+      "agent-trigger",
     ]);
     const unknown = Object.keys(flags).filter((k) => !GATE_FLAGS.has(k));
     if (unknown.length > 0) {
@@ -555,6 +562,9 @@ async function main() {
       overview: !flags["no-overview"],
       // Brief-staleness warning is default-on; `--no-brief-check` turns it off.
       briefCheck: !flags["no-brief-check"],
+      // Agent-trigger profile: omit Dirty-tree only when the flag is explicit.
+      // Default path (no flag) is byte-stable — dirty-tree always runs.
+      omitDirtyTree: !!flags["agent-trigger"],
     });
     const intentCheck = results.find((r) => r && r.label === "Intent Contract" && r.intent);
     const doc = {

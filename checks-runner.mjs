@@ -23,6 +23,14 @@ import { architectureAdvisory } from "./architecture.mjs";
 import { checkIntent } from "./intent.mjs";
 
 /**
+ * Visible disclosure when the agent-trigger profile omits Dirty-tree guard.
+ * Suppressed ≠ invisible — every hook trigger that uses the profile must show this.
+ * Kept as an exported constant so tests and docs can pin the exact wording.
+ */
+export const AGENT_TRIGGER_OMIT_DIRTY_TREE_LINE =
+  "agent-trigger profile: omitting Dirty-tree guard — staged/modified tracked files are expected at pre-commit and agent-edit time; plain check / check --ci still enforces Dirty-tree for pre-deploy";
+
+/**
  * Run every check and print a clean summary.
  * @param {object} o
  * @param {string} o.cwd        repo root
@@ -34,6 +42,11 @@ import { checkIntent } from "./intent.mjs";
  * @param {boolean} [o.briefCheck] emit a NON-BLOCKING staleness warning if the
  *                               PROJECT BRAIN (PROJECT-BRIEF.md) is missing or
  *                               out of date. Defaults to ON. Never a fail.
+ * @param {boolean} [o.omitDirtyTree] when true, skip the Dirty-tree guard and print
+ *                               {@link AGENT_TRIGGER_OMIT_DIRTY_TREE_LINE}. Used only by the
+ *                               invisible-mode agent-trigger profile (`check --agent-trigger`).
+ *                               Default false — ordinary `check` / `check --ci` always runs the guard.
+ *                               Not read from repo config (cannot be turned off by a stray config).
  * @returns {Promise<{ exitCode: number, results: any[] }>}  exitCode 0=GO, 1=NO-GO
  */
 export async function runChecks(o) {
@@ -48,9 +61,17 @@ export async function runChecks(o) {
   section("Checks");
   console.log(`  ${c.gray("detected:")} ${c.bold(project.label)}`);
 
-  // a. Dirty-tree guard
-  results.push(safe(() => checkDirtyTree(cwd), "Dirty-tree guard"));
-  printResult(results[results.length - 1]);
+  // a. Dirty-tree guard — full pre-deploy default. The agent-trigger profile
+  // (invisible-mode pre-commit / PreToolUse / PostToolUse / SessionStart) omits
+  // it with a visible disclosure: staging is a precondition of committing, and
+  // an agent edit dirties the tree by design. Ordinary check / check --ci never
+  // take this branch unless the caller passes the explicit --agent-trigger flag.
+  if (o.omitDirtyTree) {
+    console.log(`  ${c.gray("·")} ${AGENT_TRIGGER_OMIT_DIRTY_TREE_LINE}`);
+  } else {
+    results.push(safe(() => checkDirtyTree(cwd), "Dirty-tree guard"));
+    printResult(results[results.length - 1]);
+  }
 
   // b. Secret scan
   results.push(safe(() => checkSecrets(cwd), "Secret scan"));

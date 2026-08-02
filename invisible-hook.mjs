@@ -7,7 +7,10 @@
 //
 // Responsibilities:
 //   1. Honour GETADVANTAGE_INVISIBLE_BYPASS=1 with an honest bypass message.
-//   2. Run the local GO/NO-GO gate (`check --ci`) without anyone typing getadvantage.
+//   2. Run the local GO/NO-GO gate under the **agent-trigger profile**
+//      (`check --ci --agent-trigger --no-brief-check`) — full gate minus Dirty-tree
+//      (staging/edits are expected here); disclosure line always printed.
+//      Plain `check --ci` (no flag) still enforces Dirty-tree for pre-deploy.
 //   3. Refresh the in-repo proof receipt (zero telemetry).
 //   4. On PreToolUse NO-GO: exit 2 + JSON deny so Claude blocks the tool.
 //   5. On git pre-commit NO-GO: exit 1 so the commit is refused.
@@ -158,13 +161,25 @@ export function writeReceipt(projectRoot, meta = {}) {
 }
 
 /**
- * Run the gate. Returns { code, stdout, stderr, verdict }.
+ * CLI args for the agent-trigger profile used by every invisible-mode hook trigger.
+ * Explicit `--agent-trigger` only — never the silent default of plain `check`.
+ */
+export const AGENT_TRIGGER_CHECK_ARGS = [
+  "check",
+  "--ci",
+  "--no-brief-check",
+  "--agent-trigger",
+];
+
+/**
+ * Run the gate under the agent-trigger profile.
+ * Returns { code, stdout, stderr, verdict }.
  */
 export function runGate(projectRoot, { quiet = false } = {}) {
   const cli = resolveCliIndex(projectRoot);
   let r;
   if (cli) {
-    r = spawnSync(process.execPath, [cli, "check", "--ci", "--no-brief-check"], {
+    r = spawnSync(process.execPath, [cli, ...AGENT_TRIGGER_CHECK_ARGS], {
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
@@ -176,7 +191,7 @@ export function runGate(projectRoot, { quiet = false } = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
   } else {
-    r = spawnSync("getadvantage", ["check", "--ci", "--no-brief-check"], {
+    r = spawnSync("getadvantage", [...AGENT_TRIGGER_CHECK_ARGS], {
       cwd: projectRoot,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
@@ -305,10 +320,15 @@ export function runInvisibleHook(argv = process.argv) {
     return 1;
   }
   // session-start / post-tool: report but do not hard-block session lifecycle.
+  // Composition is the agent-trigger profile (no Dirty-tree). Advisory must not
+  // promise a Dirty-tree block that this profile will not deliver.
   if (mode === "session-start" || mode === "post-tool") {
     console.error(
       `[getadvantage invisible-mode] gate NO-GO on ${mode} (exit ${gate.code}). ` +
-        `Subsequent PreToolUse / pre-commit will block until fixed.`,
+        `Subsequent PreToolUse / pre-commit use the same agent-trigger profile ` +
+        `(secrets, tracked .env, Intent Contract, and other non-dirty-tree checks) ` +
+        `and will refuse until those are fixed. Dirty-tree is not gated on agent ` +
+        `triggers — run plain check --ci before deploy.`,
     );
     return 0;
   }

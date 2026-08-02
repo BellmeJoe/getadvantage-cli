@@ -102,7 +102,7 @@ run getAdvantage.
 | `getadvantage map` | A read-only map of what your app has: project estate (including **Vite / React / Supabase client orientation** — evidence-only statuses and paths; **LIVE 0.10.1**), API surface (what is gated, what mutates — with a `⚠` on any mutating route that has no obvious gate), agents & integrations, schedules & jobs. Route mapping covers **Next.js** App Router, **Express/Fastify**, and **Flask/FastAPI** (best-effort regex parsing — no code is run); client SPAs get an honest “route mapping does not apply” line — never invented Express routes. Supabase SDK detection is not an RLS/auth verdict. Orientation, never a verdict — always exits `0`. |
 | `getadvantage brief` | Generate / refresh `PROJECT-BRIEF.md` — the **COLD** layer (what the project *is*). Hand-written notes between the `getadvantage:brief:notes` markers are preserved across regenerations. `--check` warns if it's stale; it never blocks. |
 | `getadvantage handoff` | Refresh the brief **and** write `HANDOFF.md` — the **HOT** layer (where you *left off*). Your notes are preserved across refreshes; it never overwrites a `HANDOFF.md` it didn't create. |
-| `getadvantage init` | Wire the brain into your agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `.clinerules`) so `PROJECT-BRIEF.md` + `HANDOFF.md` load automatically at session start. |
+| `getadvantage init` | Wire the brain into your agent's instructions file (`CLAUDE.md` / `AGENTS.md` / `.cursorrules` / `.windsurfrules` / `.clinerules`) so `PROJECT-BRIEF.md` + `HANDOFF.md` load automatically at session start. **`init --claude-code`** also installs **invisible mode** (automatic gate hooks — see below). `init --cursor` is detect-and-refuse until a Cursor hooks schema is verified. |
 | `getadvantage switch [tool]` | Switch tools/models without losing context — saves your place, wires every AI-tool file, and prints the prompt to start the new session. |
 | `getadvantage models` | A plain-language playbook for choosing + switching AI models (principles, not benchmarks). |
 | `getadvantage gauge` | A quick "is this session getting heavy?" read (repo activity since your last handoff) that nudges a reset before things slow down — a heuristic, not a token count. |
@@ -140,6 +140,46 @@ npx getadvantage intent check
 ```
 
 Deny overrides allow. Renames check both old and new paths. Committed work after the freeze is included (not only the dirty tree). Editing or re-committing a broader contract cannot self-authorize — the freeze blob remains the authorizer. Nested untracked git repos fail closed. Absolute paths, traversal, malformed schema, missing/non-ancestor baseline, non-dedicated freeze, and any `intent check --base-ref` fail closed. Local trust only: without signatures/protected remotes, history rewrite cannot be proven human.
+
+### Invisible mode (`init --claude-code`)
+
+Installs the same local gate as an **automatic hook** so you do not have to type
+`getadvantage check` on every agent turn:
+
+```bash
+npx getadvantage init --claude-code
+```
+
+What it installs (Claude Code project hooks + managed git pre-commit when safe):
+
+- **SessionStart / PreToolUse / PostToolUse** in `.claude/settings.json`
+- **git pre-commit** (skipped when husky is present; respects `core.hooksPath`)
+- Intent Contract auto-capture when none exists in ancestry
+- In-repo proof receipt `.getadvantage/INVISIBLE-MODE.md` (zero telemetry)
+
+**Agent-trigger profile (hooks only).** Every hook trigger runs
+`check --ci --agent-trigger --no-brief-check` — the full gate **minus** the
+Dirty-tree guard. Staging is a precondition of committing; an agent edit dirties
+the tree by design. Omitting Dirty-tree on those triggers is therefore the only
+composition that keeps ordinary commit-after-edit satisfiable.
+
+- **Still enforced on hooks:** secret scan (including committed client-bundle
+  paths), tracked `.env`, Intent Contract when a trusted freeze is present, and
+  the other non-dirty-tree checks (`check` would run on a clean tree).
+- **Explicitly omitted on hooks only:** Dirty-tree guard. Each run prints a
+  visible line: `agent-trigger profile: omitting Dirty-tree guard — …` (suppressed
+  ≠ invisible). Plain `getadvantage check` / `check --ci` **never** omit
+  Dirty-tree unless you pass `--agent-trigger` yourself; the profile is not
+  readable from repo config.
+- **PreToolUse** still hard-blocks on real NO-GO (secrets / `.env` / Intent …)
+  with Claude's `permissionDecision: "deny"`. **SessionStart / PostToolUse**
+  stay advisory (non-blocking lifecycle); they use the same profile and do not
+  promise a Dirty-tree block.
+- **Bypass:** `GETADVANTAGE_INVISIBLE_BYPASS=1` — honest message, gate not run.
+- **Status / uninstall:** `init --invisible-status` · `init --uninstall-invisible`.
+
+Cursor: `init --cursor` is **detect-and-refuse** until a hooks schema is verified
+on a real install (disclosed narrowing). Prefer Claude Code for the automatic path.
 
 ## The gate (what `check` actually does)
 
