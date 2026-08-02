@@ -1571,6 +1571,52 @@ export function checkIntent(cwd, opts = {}) {
       lines.push(`${v.path} — ${v.reason}`);
     }
   }
+
+  // B1-quality paste-ready next action: name the contract file and give exact
+  // commands. Never present bypass as the only exit. Frozen contracts cannot
+  // self-authorize via worktree edit (unsigned local mode: one freeze per lineage).
+  const outsidePaths = violations
+    .filter((v) => v.reason === "outside-allow" && v.path && v.path !== "(none)" && v.path !== "(count)")
+    .map((v) => v.path);
+  const deniedPaths = violations
+    .filter((v) => v.reason === "denied" && v.path && v.path !== "(none)" && v.path !== "(count)")
+    .map((v) => v.path);
+  const nextActionLines = [];
+  if (outsidePaths.length > 0) {
+    const sample = outsidePaths.slice(0, 5).join(", ");
+    const more = outsidePaths.length > 5 ? ` (+${outsidePaths.length - 5} more)` : "";
+    nextActionLines.push(
+      `Smallest safe next edit — path(s) outside Intent Contract allow list (${sample}${more}):`,
+      `  Preferred: unstage/remove the out-of-scope path(s) so the commit stays inside the frozen envelope at ${INTENT_REL}.`,
+      `  Example: git restore --staged --worktree -- ${outsidePaths[0]}`,
+      `  To authorize a wider envelope: start a branch from a trusted base with NO intent history, then:`,
+      `    ${binName()} intent init --goal "…" --allow "relevant/**" --allow "…"`,
+      `    git add ${INTENT_REL} && git commit -m "chore: intent contract"`,
+      `  Note: editing a frozen ${INTENT_REL} cannot self-authorize (unsigned local mode: one freeze per clean lineage).`,
+    );
+  } else if (deniedPaths.length > 0) {
+    nextActionLines.push(
+      `Smallest safe next edit — path(s) matched DENY in ${INTENT_REL} (${deniedPaths.slice(0, 5).join(", ")}):`,
+      `  Preferred: unstage/remove the denied path(s), or start a clean-lineage branch and freeze a contract without that deny rule.`,
+      `    ${binName()} intent init --goal "…" --allow "…"   # on a base with no prior intent history`,
+      `    git add ${INTENT_REL} && git commit -m "chore: intent contract"`,
+    );
+  } else if (violations.some((v) => v.reason === "later-contract-change")) {
+    nextActionLines.push(
+      `Smallest safe next edit — Intent Contract lineage tamper on ${INTENT_REL}:`,
+      `  Restore the original freeze blob: git checkout HEAD -- ${INTENT_REL}  (or the freeze commit blob).`,
+      `  Replacement/broadened contracts never authorize on this lineage. Start a branch from a trusted clean base with no intent history, then:`,
+      `    ${binName()} intent init --goal "…" --allow "…"`,
+      `    git add ${INTENT_REL} && git commit -m "chore: intent contract"`,
+    );
+  } else if (violations.some((v) => v.reason === "required-missing" || v.reason === "max-files")) {
+    nextActionLines.push(
+      `Smallest safe next edit — Intent Contract require/maxFiles not satisfied (see ${INTENT_REL}):`,
+      `  Preferred: add the required path(s) or reduce the change set to fit maxFiles.`,
+      `  To freeze a different envelope: branch from a clean base (no intent history) → ${binName()} intent init … → git add ${INTENT_REL} && git commit -m "chore: intent contract".`,
+    );
+  }
+
   const extras = [
     `goal: ${receipt.goal}`,
     `contract: ${receipt.contractHash}`,
@@ -1579,6 +1625,7 @@ export function checkIntent(cwd, opts = {}) {
     `freeze: ${(loaded.freezeSha || "").slice(0, 12)}`,
     ...lines.slice(0, 40),
     ...(lines.length > 40 ? [`…and ${lines.length - 40} more violations`] : []),
+    ...nextActionLines,
     INTENT_LIMITATION,
   ];
   if (loaded.worktreeDiffers || loaded.laterContractChange) {

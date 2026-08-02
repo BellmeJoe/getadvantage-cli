@@ -678,32 +678,22 @@ export function autoCaptureIntent(cwd) {
     };
   }
 
+  // Project-tree-wide envelope: match the stated goal ("keep agent changes
+  // inside the project tree"). Escapes (.git/**, nested git, gitlink, symlink,
+  // absolute/`..` paths) stay fail-closed via structural checks in intent.mjs,
+  // not via a JS/TS-shaped allow list that blocks ordinary first commits of
+  // main.py / Dockerfile / .github/** / public/* / etc.
   const draft = {
     schemaVersion: 1,
     goal:
       "Invisible-mode auto-capture: keep agent changes inside the project tree until a tighter task contract is frozen on a clean lineage.",
-    allow: [
-      "src/**",
-      "app/**",
-      "lib/**",
-      "tests/**",
-      "test/**",
-      "docs/**",
-      "*.md",
-      "*.json",
-      "*.mjs",
-      "*.js",
-      "*.ts",
-      "*.tsx",
-      "*.css",
-      "package.json",
-      ".getadvantage/**",
-      ".claude/**",
-    ],
+    allow: ["**"],
     deny: [],
     baselineCommit: baseRes.sha,
     acceptanceNotes:
       "Auto-captured by getadvantage init --claude-code / invisible mode. " +
+      "Envelope allows every repo-relative path; structural checks still refuse " +
+      ".git/**, nested git, gitlinks, symlinks, and path traversal. " +
       "For a tighter envelope, start a branch from a trusted base with no intent history and run intent init.",
   };
 
@@ -783,6 +773,9 @@ export function autoCaptureIntent(cwd) {
         `(${detail}). Run: git add ${INTENT_REL} && git commit --no-verify -m "chore: intent contract"`,
       path: abs,
       freezeFailed: true,
+      allow: check.contract.allow,
+      deny: check.contract.deny,
+      goal: check.contract.goal,
     };
   }
 
@@ -794,6 +787,9 @@ export function autoCaptureIntent(cwd) {
       `${freezeSha ? `; freeze ${freezeSha.slice(0, 12)}` : ""})`,
     path: abs,
     freezeSha,
+    allow: check.contract.allow,
+    deny: check.contract.deny,
+    goal: check.contract.goal,
   };
 }
 
@@ -1035,6 +1031,28 @@ export function installClaudeCode(o) {
         INTENT_REL + (intent.freezeSha ? " (auto-captured + freeze commit)" : " (auto-captured)"),
       );
       console.log(c.green(`✓ Intent: ${intent.message}`));
+      // Disclose the auto-captured envelope on screen at install time so operators
+      // know ordinary project-tree paths are in scope (not a JS/TS-only allow list).
+      const allowList = Array.isArray(intent.allow) ? intent.allow : ["**"];
+      const denyList = Array.isArray(intent.deny) ? intent.deny : [];
+      console.log(c.bold("  Intent envelope (auto-captured)"));
+      console.log(c.gray(`  file:  ${INTENT_REL}`));
+      console.log(c.gray(`  allow: ${JSON.stringify(allowList)}`));
+      console.log(c.gray(`  deny:  ${JSON.stringify(denyList)}`));
+      if (intent.goal) console.log(c.gray(`  goal:  ${intent.goal}`));
+      console.log(
+        c.gray(
+          "  scope: every repo-relative path; escapes (.git/**, nested git, gitlink, symlink, absolute/..) stay fail-closed",
+        ),
+      );
+      console.log(c.gray(`  limitation: scope verified; semantic correctness not proven`));
+      console.log(
+        c.gray(
+          `  tighter envelope later: branch from a clean base (no intent history) → ` +
+            `${binName()} intent init --goal "…" --allow "src/**" … → ` +
+            `git add ${INTENT_REL} && git commit -m "chore: intent contract"`,
+        ),
+      );
       if (intent.freezeFailed) {
         console.log(
           c.yellow(

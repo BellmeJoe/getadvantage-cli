@@ -6320,6 +6320,19 @@ scenario("intent: outside allowlist → NO-GO; names path only; no content leak"
     const all = r.stdout + r.stderr;
     assert.ok(/src\/other\/leak\.js/.test(all), "must name violating path");
     assert.ok(!all.includes(secretBody), "must not leak file contents");
+    // B1-quality next action: name contract + exact command; never bypass-as-only-exit.
+    assert.ok(
+      /\.getadvantage\/intent\.json/.test(all),
+      `must name .getadvantage/intent.json as next-action target:\n${all}`,
+    );
+    assert.ok(
+      /Smallest safe next edit|intent init|git restore|git add \.getadvantage\/intent\.json/i.test(all),
+      `must print usable next action (exact command or edit):\n${all}`,
+    );
+    assert.ok(
+      !/only.*GETADVANTAGE_INVISIBLE_BYPASS|only exit.*bypass/i.test(all),
+      "must not present bypass as the only exit",
+    );
   } finally {
     cleanup(base);
   }
@@ -11248,7 +11261,20 @@ scenario("invisible: cold install --claude-code + first gate + receipt + idempot
     assert.equal(intent.schemaVersion, 1);
     assert.ok(intent.goal && intent.goal.length > 10, "intent goal too short");
     assert.ok(Array.isArray(intent.allow) && intent.allow.length > 0, "intent allow empty");
+    // Auto-capture must be project-tree-wide (not a JS/TS-shaped allow list).
+    assert.ok(
+      intent.allow.some((g) => g === "**" || g === "/**" || g === "**/*"),
+      `auto-captured allow must cover project tree, got: ${JSON.stringify(intent.allow)}`,
+    );
     assert.match(intent.baselineCommit, /^[0-9a-f]{40}$/);
+    // Init discloses the envelope on screen at install time.
+    const initOut = r.stdout + r.stderr;
+    assert.match(initOut, /Intent envelope|allow:\s*\[/i);
+    assert.ok(
+      /scope verified; semantic correctness not proven/.test(initOut) ||
+        /limitation/i.test(initOut),
+      `init must disclose limitation / envelope:\n${initOut}`,
+    );
 
     // First gate via installed runner (no typing getadvantage check)
     const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
@@ -11826,7 +11852,8 @@ scenario("invisible: hostile — profile does not weaken real gate (secret / .en
     const envOut = (envR.stdout || "") + (envR.stderr || "");
     assert.match(envOut, /NO-GO|\.env|Tracked/i);
 
-    // --- Intent Contract outside-allow → pre-commit refuses (repo has auto-captured contract) ---
+    // --- Intent Contract structural escape (nested git) → pre-commit refuses
+    // even under project-tree-wide auto-captured allow=["**"] ---
     const repoInt = path.join(base, "inv-intent-block");
     initRepo(repoInt);
     write(repoInt, "package.json", JSON.stringify({ name: "inv-int", version: "1.0.0", private: true }, null, 2) + "\n");
@@ -11834,9 +11861,16 @@ scenario("invisible: hostile — profile does not weaken real gate (secret / .en
     commitAll(repoInt, "chore: initial");
     assert.equal(run(["init", "--claude-code"], repoInt).code, 0);
     assert.ok(existsSync(path.join(repoInt, ".getadvantage", "intent.json")), "intent auto-capture required");
-    // Path outside auto-capture allow list (*.yml / .github/** not allowed).
-    write(repoInt, ".github/workflows/hostile.yml", "name: hostile\non: push\njobs: {}\n");
-    g(["add", ".github/workflows/hostile.yml"], repoInt);
+    const autoIntent = JSON.parse(readFileSync(path.join(repoInt, ".getadvantage", "intent.json"), "utf8"));
+    assert.ok(
+      autoIntent.allow.some((g) => g === "**" || g === "**/*"),
+      `auto-capture must be tree-wide so this tests structural fail-closed, got: ${JSON.stringify(autoIntent.allow)}`,
+    );
+    // Nested untracked git repo hides unauthorized files — structural refuse.
+    const nested = path.join(repoInt, "nested-evil");
+    initRepo(nested);
+    write(nested, "hidden.js", "export const secret = 'hide-me';\n");
+    assert.ok(existsSync(path.join(nested, ".git")));
     const hookInt = path.join(repoInt, ".getadvantage", "invisible-hook.mjs");
     const intR = spawnSync(process.execPath, [hookInt, "pre-commit", "--managed", INV_MANAGED_ID], {
       cwd: repoInt,
@@ -11844,9 +11878,9 @@ scenario("invisible: hostile — profile does not weaken real gate (secret / .en
       env: buildEnv(),
       timeout: 120_000,
     });
-    assert.equal(intR.status, 1, `Intent outside-allow must refuse:\n${intR.stdout}\n${intR.stderr}`);
+    assert.equal(intR.status, 1, `nested-git under auto-capture ** must refuse:\n${intR.stdout}\n${intR.stderr}`);
     const intOut = (intR.stdout || "") + (intR.stderr || "");
-    assert.match(intOut, /NO-GO|Intent|outside-allow|outside allow/i);
+    assert.match(intOut, /NO-GO|nested|repo boundary|\.git|refuse|ambiguous|Intent/i);
   } finally {
     cleanup(base);
   }
@@ -11884,6 +11918,255 @@ scenario("invisible: hostile — bypass stays honest under agent-trigger profile
   } finally {
     cleanup(base);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 52c. Auto-capture envelope: project-tree-wide (not JS/TS-shaped)
+// ---------------------------------------------------------------------------
+
+scenario("invisible: auto-capture allow is project-tree-wide; ordinary first-commit files LAND", () => {
+  // Defect: allow was JS/TS-shaped → main.py / Dockerfile / .github/** etc. NO-GO.
+  // After fix: allow=["**"] so ordinary project-tree paths commit through the hook.
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-treewide");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-treewide", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "README.md", "# inv-treewide\n");
+    commitAll(repo, "chore: initial");
+
+    const inst = run(["init", "--claude-code"], repo);
+    assert.equal(inst.code, 0, `init failed:\n${inst.stdout}\n${inst.stderr}`);
+    const initOut = inst.stdout + inst.stderr;
+    assert.match(initOut, /Intent envelope|allow:\s*\[/i);
+    assert.ok(
+      /"\*\*"/.test(initOut) || /allow:\s*\["\*\*"\]/.test(initOut) || /allow: \["\*\*"\]/.test(initOut),
+      `init must disclose tree-wide allow:\n${initOut}`,
+    );
+    assert.match(initOut, /scope verified; semantic correctness not proven/);
+
+    const intent = JSON.parse(readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8"));
+    assert.deepEqual(intent.allow, ["**"]);
+    assert.ok(Array.isArray(intent.deny));
+    assert.match(intent.goal, /project tree/i);
+
+    // Ordinary first-commit shapes that previously failed under the JS/TS allow list.
+    const files = {
+      "main.py": "print('hello')\n",
+      "main.go": "package main\nfunc main() {}\n",
+      Dockerfile: "FROM alpine:3.19\n",
+      "deploy.yml": "apiVersion: v1\nkind: ConfigMap\n",
+      "index.html": "<!doctype html><title>x</title>\n",
+      "run.sh": "#!/bin/sh\necho ok\n",
+      "style.scss": "$c: #111;\nbody { color: $c; }\n",
+      ".github/workflows/ci.yml": "name: ci\non: push\njobs: {}\n",
+      "public/favicon.ico": "not-a-real-ico\n",
+    };
+    for (const [rel, body] of Object.entries(files)) {
+      write(repo, rel, body);
+      g(["add", "--", rel], repo);
+    }
+
+    let commitErr = "";
+    try {
+      g(["commit", "-m", "feat: ordinary multi-language first commit lands"], repo);
+    } catch (e) {
+      commitErr = String(e && e.stderr ? e.stderr : e && e.message ? e.message : e);
+      if (e && e.stdout) commitErr += "\n" + e.stdout;
+    }
+    assert.equal(commitErr, "", `ordinary project-tree files must land through installed hook:\n${commitErr}`);
+
+    const show = g(["show", "--name-only", "--pretty=format:", "HEAD"], repo);
+    for (const rel of Object.keys(files)) {
+      const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      assert.match(show, new RegExp(escaped.replace(/\//g, "[\\\\/]")));
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: auto-capture ** still fail-closes nested git / .git path / gitlink", () => {
+  const base = freshBase();
+  try {
+    // --- nested untracked git repo ---
+    const repoNest = path.join(base, "inv-escape-nest");
+    initRepo(repoNest);
+    write(repoNest, "package.json", JSON.stringify({ name: "inv-esc-n", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repoNest, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repoNest).code, 0);
+    const nestIntent = JSON.parse(readFileSync(path.join(repoNest, ".getadvantage", "intent.json"), "utf8"));
+    assert.deepEqual(nestIntent.allow, ["**"]);
+
+    const nested = path.join(repoNest, "vendor-evil");
+    initRepo(nested);
+    write(nested, "pwn.js", "export const x = 1;\n");
+    assert.ok(existsSync(path.join(nested, ".git")));
+
+    const rNest = run(["intent", "check", "--json"], repoNest);
+    assert.equal(rNest.code, 1, `nested git under ** must NO-GO:\n${rNest.stdout}\n${rNest.stderr}`);
+    const nestAll = rNest.stdout + rNest.stderr + JSON.stringify(parseJson(rNest));
+    assert.match(nestAll, /nested|repo boundary|\.git|refuse|ambiguous|NO-GO/i);
+
+    // --- staged embedded .git path (if git will index it) ---
+    const repoDotGit = path.join(base, "inv-escape-dotgit");
+    initRepo(repoDotGit);
+    write(repoDotGit, "package.json", JSON.stringify({ name: "inv-esc-g", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repoDotGit, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repoDotGit).code, 0);
+    // Create a nested dir that looks like an embedded .git via a path segment.
+    write(repoDotGit, "pkg/.git/config", "[core]\n\trepositoryformatversion = 0\n");
+    // git may refuse to add .git paths; try and treat either refuse-to-add or gate NO-GO as success.
+    let addedDotGit = false;
+    try {
+      g(["add", "--force", "--", "pkg/.git/config"], repoDotGit);
+      addedDotGit = true;
+    } catch {
+      addedDotGit = false;
+    }
+    if (addedDotGit) {
+      const rDot = run(["intent", "check", "--json"], repoDotGit);
+      assert.equal(rDot.code, 1, `embedded .git path under ** must NO-GO:\n${rDot.stdout}\n${rDot.stderr}`);
+      const dotAll = rDot.stdout + rDot.stderr;
+      assert.match(dotAll, /\.git|repo boundary|refuse|NO-GO|ambiguous/i);
+    }
+
+    // --- committed gitlink under ** allow → still NO-GO ---
+    // Plant auto-captured-shaped contract via commitIntent (no invisible hook),
+    // then --no-verify the gitlink in so we can prove intent check fail-closes
+    // (pre-commit would also refuse; this isolates Intent structural checks).
+    const repoLink = path.join(base, "inv-escape-gitlink");
+    initRepo(repoLink);
+    write(repoLink, "package.json", JSON.stringify({ name: "inv-esc-l", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repoLink, "chore: initial");
+    commitIntent(repoLink, {
+      schemaVersion: 1,
+      goal: "Invisible-mode auto-capture: keep agent changes inside the project tree until a tighter task contract is frozen on a clean lineage.",
+      allow: ["**"],
+      deny: [],
+    });
+
+    const payload = path.join(base, "gitlink-payload");
+    initRepo(payload);
+    write(payload, "hidden/evil.js", "export const secret = 'hide-me';\n");
+    g(["add", "-A"], payload);
+    g(["commit", "-q", "-m", "nested payload"], payload);
+    const payloadSha = g(["rev-parse", "HEAD"], payload);
+
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `160000,${payloadSha},vendor/payload`],
+      { cwd: repoLink, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    // --no-verify: plant the hostile blob so Intent evaluation (not pre-commit) is under test.
+    g(["commit", "-q", "--no-verify", "-m", "add gitlink under tree-wide allow"], repoLink);
+    const modeLine = g(["ls-tree", "HEAD", "vendor/payload"], repoLink);
+    assert.match(modeLine, /^160000\s/, `expected gitlink mode, got: ${modeLine}`);
+
+    const rLink = run(["intent", "check", "--json"], repoLink);
+    assert.equal(rLink.code, 1, `gitlink under ** must NO-GO:\n${rLink.stdout}\n${rLink.stderr}`);
+    const linkAll = rLink.stdout + rLink.stderr + JSON.stringify(parseJson(rLink));
+    assert.match(linkAll, /gitlink|submodule|160000|ambiguous|repo boundary|refuse/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hand-authored narrow allow still refuses out-of-scope; next action names intent.json", () => {
+  // Hand-authored contracts must not move: deliberate narrow envelopes still NO-GO.
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-hand-narrow");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-hand", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "src/auth/ok.js", "export const ok = 1;\n");
+    commitAll(repo, "chore: initial");
+
+    // Deliberate hand-authored freeze (not auto-capture).
+    commitIntent(repo, {
+      schemaVersion: 1,
+      goal: "auth only",
+      allow: ["src/auth/**"],
+      deny: [],
+    });
+
+    write(repo, "main.py", "print('out of scope')\n");
+    write(repo, "Dockerfile", "FROM alpine\n");
+    write(repo, ".github/workflows/ci.yml", "name: ci\non: push\njobs: {}\n");
+
+    const r = run(["intent", "check", "--json"], repo);
+    assert.equal(r.code, 1, `hand-authored narrow must NO-GO out-of-scope:\n${r.stdout}\n${r.stderr}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const reasons = (doc.intent.violations || []).map((v) => v.reason);
+    assert.ok(reasons.includes("outside-allow"), `expected outside-allow: ${JSON.stringify(doc.intent.violations)}`);
+    const paths = (doc.intent.violations || []).map((v) => String(v.path || "").replace(/\\/g, "/"));
+    assert.ok(paths.some((p) => p === "main.py" || p === "Dockerfile" || p.startsWith(".github/")), paths.join(","));
+
+    const all = r.stdout + r.stderr;
+    assert.ok(/\.getadvantage\/intent\.json/.test(all), `must name contract file:\n${all}`);
+    assert.ok(
+      /Smallest safe next edit|intent init|git restore|git add \.getadvantage\/intent\.json/i.test(all),
+      `must print usable next action:\n${all}`,
+    );
+    assert.match(all, /scope verified; semantic correctness not proven/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("intent: absolute / traversal globs still rejected at parse; pathMatchesGlob ** covers tree", async () => {
+  // Contract-level escapes stay fail-closed; path matcher accepts tree-wide **.
+  const { pathMatchesGlob } = await import("../policy.mjs");
+  const { parseAndValidateContract, isUnsafePathOrGlob } = await import("../intent.mjs");
+
+  assert.equal(pathMatchesGlob("main.py", "**"), true);
+  assert.equal(pathMatchesGlob("src/a/b.go", "**"), true);
+  assert.equal(pathMatchesGlob(".github/workflows/ci.yml", "**"), true);
+  assert.equal(pathMatchesGlob("public/x.html", "**"), true);
+  assert.equal(pathMatchesGlob("Dockerfile", "**"), true);
+  // Narrow allow still selective
+  assert.equal(pathMatchesGlob("main.py", "src/**"), false);
+  assert.equal(pathMatchesGlob("src/auth/x.js", "src/auth/**"), true);
+
+  assert.equal(isUnsafePathOrGlob("/etc/passwd"), true);
+  assert.equal(isUnsafePathOrGlob("../../secrets/**"), true);
+  assert.equal(isUnsafePathOrGlob("C:\\Windows\\system32"), true);
+  assert.equal(isUnsafePathOrGlob("**"), false);
+
+  const abs = parseAndValidateContract(
+    JSON.stringify({
+      schemaVersion: 1,
+      goal: "abs",
+      allow: ["/etc/passwd"],
+      deny: [],
+      baselineCommit: "a".repeat(40),
+    }),
+  );
+  assert.equal(abs.ok, false, "absolute allow must fail validation");
+
+  const trav = parseAndValidateContract(
+    JSON.stringify({
+      schemaVersion: 1,
+      goal: "trav",
+      allow: ["../../secrets/**"],
+      deny: [],
+      baselineCommit: "a".repeat(40),
+    }),
+  );
+  assert.equal(trav.ok, false, "traversal allow must fail validation");
+
+  const ok = parseAndValidateContract(
+    JSON.stringify({
+      schemaVersion: 1,
+      goal: "tree",
+      allow: ["**"],
+      deny: [],
+      baselineCommit: "a".repeat(40),
+    }),
+  );
+  assert.equal(ok.ok, true, `** must be a valid allow glob: ${ok.error || ""}`);
+  assert.deepEqual(ok.contract.allow, ["**"]);
 });
 
 // ---------------------------------------------------------------------------
