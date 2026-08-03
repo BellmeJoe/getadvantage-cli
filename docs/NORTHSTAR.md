@@ -49,7 +49,7 @@ that real CI time improves.
 
 ## Retained-team detector (the north-star measurement method)
 
-`PENDING_B2` — activates the cycle `0.12.x-invisible-mode` ships.
+**LIVE 0.12.0** — activated the cycle `0.12.x-invisible-mode` shipped.
 
 Retention is counted with **zero telemetry**, from public data only. Invisible
 mode writes an in-repo receipt (`.getadvantage/INVISIBLE-MODE.md`) whose stable
@@ -124,14 +124,14 @@ lane ships or is killed. Only one implementation lane may be open.
 7b. **Invisible mode** — `init --claude-code` installs the gate as an automatic
    hook so every agent session is gated by default; the hook writes the in-repo
    proof receipt that makes week-two reuse publicly countable with zero telemetry.
-   **Status (2026-08-03):** **`REVIEW_GO (lane-scoped)`** at product fingerprint
-   **`fe9e2ad`** (`fe9e2add5d9ecc4a4ee59403f8741e4cce51abaf`); 0 open P1, 0 open
-   P2; audit evidence 218/218 tests, 8/8 evidence, 34-file pack. Agent-trigger
-   profile (`check --agent-trigger`) visibly omits Dirty-tree on hooks only;
-   plain `check` / `check --ci` still enforce Dirty-tree. Cursor remains
-   **detect-and-refuse**. Same-shape stop-loss **2 of 3**. **Sole open lane**
-   (releasing as **0.12.0**). Open P3 post-release: symlink mode `120000`
-   hostile regression coverage (runtime protection already confirmed).
+   **Status (2026-08-03):** **LIVE 0.12.0** — product fingerprint **`fe9e2ad`**;
+   release **`b8be10c`**; registry `gitHead` `b8be10c`; tags `v0.12.0` + `v1`.
+   Agent-trigger profile (`check --agent-trigger`) visibly omits Dirty-tree on
+   hooks only; plain `check` / `check --ci` still enforce Dirty-tree. Cursor
+   remains **detect-and-refuse**. Cold published GO ~5.3s; activation
+   cold→first gate ~11.3s. Rollback: **0.11.1** / `v0.11.1` / `66ffb9b`.
+   Open P3 (first post-release same-lane): symlink mode `120000` hostile
+   regression coverage (runtime protection already confirmed).
 
 ### P2 — make proof portable and shareable
 

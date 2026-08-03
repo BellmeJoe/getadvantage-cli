@@ -10,19 +10,20 @@ Ziel: In **2 Minuten** wissen: *Kann das Tool etwas? Wohin gehen wir? Was ist li
 
 | Frage | Antwort | Befehl |
 |-------|---------|--------|
-| Was ist **live auf npm**? | **0.11.1** | `npm view getadvantage version` |
-| Was kann ich lokal laufen lassen? | **0.11.1** (matches npm after pull) | `node index.mjs --version` |
+| Was ist **live auf npm**? | **0.12.0** | `npm view getadvantage version` |
+| Was kann ich lokal laufen lassen? | **0.12.0** (matches npm after pull) | `node index.mjs --version` |
 | Funktioniert der Kern noch? | Scoreboard | `npm run evidence` → **8/8 GREEN** oder ROT |
-| Tests grün? | Full suite via CI on release (paste-ready B1 + Intent merge-train + prior) | `npm test` |
+| Tests grün? | Full suite via CI on release (invisible mode B2 + paste-ready B1 + Intent merge-train + prior) | `npm test` |
 | Alles auf einmal? | Live-Version vs. lokal **+** Scoreboard | `npm run owner` |
 
-> **Live npm is 0.11.1.** Paste-ready remediation on secret-scan NO-GO only
-> (product fingerprint `25f0e54`; release `66ffb9b`) — no new check, no verdict
-> or exit-code change. Intent Contract in merge-train `gateTree` (0.11.0) still
-> LIVE; map client orientation from 0.10.1 still LIVE; Supabase RLS **parked and
-> unexposed** (not a shipped check). Secret scan covers committed
-> `.next/static/**`; first-party Action `@v1` / `@v0.11.1`. Registry
-> `gitHead` `66ffb9b`. Rollback: **0.11.0** / `v0.11.0` / `96fb5f8`.
+> **Live npm is 0.12.0.** Invisible mode (`init --claude-code`) — automatic Claude
+> Code hooks + in-repo receipt, zero telemetry (product fingerprint `fe9e2ad`;
+> release `b8be10c`). Cursor = detect-and-refuse. Paste-ready remediation (0.11.1)
+> and Intent in merge-train `gateTree` (0.11.0) still LIVE; map client orientation
+> from 0.10.1 still LIVE; Supabase RLS **parked and unexposed** (not a shipped
+> check). Secret scan covers committed `.next/static/**`; first-party Action
+> `@v1` / `@v0.12.0`. Registry `gitHead` `b8be10c`. Cold published GO ~5.3s;
+> activation ~11.3s. Rollback: **0.11.1** / `v0.11.1` / `66ffb9b`.
 
 ---
 
