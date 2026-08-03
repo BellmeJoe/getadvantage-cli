@@ -168,6 +168,9 @@
 //                                     PreToolUse allows ordinary edit; plain
 //                                     check --ci still Dirty-tree NO-GO; staged
 //                                     secret/.env/Intent still refuse; bypass honest
+//  52d. Symlink mode 120000 escape (P3 coverage) — staged escaping symlink
+//                                     refuses real commit through installed hook;
+//                                     pre-tool emits permissionDecision deny
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -12067,6 +12070,140 @@ scenario("invisible: auto-capture ** still fail-closes nested git / .git path / 
     assert.equal(rLink.code, 1, `gitlink under ** must NO-GO:\n${rLink.stdout}\n${rLink.stderr}`);
     const linkAll = rLink.stdout + rLink.stderr + JSON.stringify(parseJson(rLink));
     assert.match(linkAll, /gitlink|submodule|160000|ambiguous|repo boundary|refuse/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 52d. Symlink mode 120000 escape — pre-commit + pre-tool regression coverage
+// ---------------------------------------------------------------------------
+// P3: sibling structural detectors (nested .git, gitlink 160000, absolute/..)
+// already have hostiles; mode-120000 symlink escape had zero automated coverage.
+// Runtime protection is already correct — coverage only (no product change).
+
+scenario("invisible: hostile — staged symlink mode 120000 refuse real commit through installed hook", () => {
+  // Pre-commit path: auto-captured allow=["**"] must still fail-close a planted
+  // mode-120000 symlink whose target escapes the project tree.
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-symlink-precommit");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-sl-pc", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+
+    const inst = run(["init", "--claude-code"], repo);
+    assert.equal(inst.code, 0, `init failed:\n${inst.stdout}\n${inst.stderr}`);
+
+    // Managed pre-commit must actually be installed (not husky-skipped).
+    const gitDir = g(["rev-parse", "--git-dir"], repo);
+    const pre = path.join(repo, gitDir, "hooks", "pre-commit");
+    assert.ok(existsSync(pre), "managed pre-commit must exist for this hostile");
+    const preBody = readFileSync(pre, "utf8");
+    assert.ok(preBody.includes(INV_MANAGED_ID) || preBody.includes("invisible-hook"), preBody);
+
+    // Auto-capture is tree-wide so this isolates structural fail-closed, not allow shape.
+    assert.ok(existsSync(path.join(repo, ".getadvantage", "intent.json")), "intent auto-capture required");
+    const autoIntent = JSON.parse(readFileSync(path.join(repo, ".getadvantage", "intent.json"), "utf8"));
+    assert.ok(
+      autoIntent.allow.some((glob) => glob === "**" || glob === "**/*"),
+      `auto-capture must be tree-wide so this tests structural fail-closed, got: ${JSON.stringify(autoIntent.allow)}`,
+    );
+
+    const headBefore = g(["rev-parse", "HEAD"], repo);
+    const linkPath = "evil-link";
+    const target = "../../etc/passwd";
+
+    // Plant mode-120000 index entry (symlink target escapes project tree).
+    // g() has no stdin — use execFileSync with input for hash-object.
+    const blobSha = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: repo,
+      input: target,
+      encoding: "utf8",
+    }).trim();
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `120000,${blobSha},${linkPath}`],
+      { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const staged = g(["ls-files", "-s", linkPath], repo);
+    assert.match(staged, /^120000\s/, `expected staged symlink mode, got: ${staged}`);
+
+    // Real git commit through the installed hook (no --no-verify).
+    const commitR = spawnSync("git", ["commit", "-m", "hostile: plant symlink escape"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    const commitOut = (commitR.stdout || "") + (commitR.stderr || "");
+    assert.equal(commitR.status, 1, `symlink 120000 must refuse commit (exit 1):\n${commitOut}`);
+    assert.match(commitOut, /symlink|120000|refuse/i);
+    assert.match(
+      commitOut,
+      new RegExp(linkPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `refuse output must name the offending path:\n${commitOut}`,
+    );
+
+    // Commit must not land — HEAD unchanged and symlink path absent from tree.
+    const headAfter = g(["rev-parse", "HEAD"], repo);
+    assert.equal(headAfter, headBefore, "HEAD must not advance after refused commit");
+    const tree = g(["ls-tree", "HEAD", "--", linkPath], repo);
+    assert.equal(tree, "", `symlink path must be absent from HEAD tree, got: ${tree}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("invisible: hostile — staged symlink mode 120000 denied by pre-tool", () => {
+  // Pre-tool path: same kind of staged symlink under invisible mode → deny JSON.
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "inv-symlink-pretool");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "inv-sl-pt", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log('ok');\n");
+    commitAll(repo, "chore: initial");
+    assert.equal(run(["init", "--claude-code"], repo).code, 0);
+
+    const linkPath = "evil-link";
+    const target = "../../etc";
+    const blobSha = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: repo,
+      input: target,
+      encoding: "utf8",
+    }).trim();
+    execFileSync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `120000,${blobSha},${linkPath}`],
+      { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const staged = g(["ls-files", "-s", linkPath], repo);
+    assert.match(staged, /^120000\s/, `expected staged symlink mode, got: ${staged}`);
+
+    const hook = path.join(repo, ".getadvantage", "invisible-hook.mjs");
+    assert.ok(existsSync(hook), "invisible-hook.mjs must be installed");
+    const r = spawnSync(process.execPath, [hook, "pre-tool", "--managed", INV_MANAGED_ID], {
+      cwd: repo,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 120_000,
+    });
+    const out = (r.stdout || "") + (r.stderr || "");
+    // PreToolUse NO-GO: exit 2 + JSON deny (hook contract).
+    assert.equal(r.status, 2, `pre-tool must exit 2 on symlink escape:\n${out}`);
+    assert.ok(
+      /"permissionDecision"\s*:\s*"deny"/.test(out),
+      `must emit permissionDecision deny JSON:\n${out}`,
+    );
+    // Gate stdout/stderr must disclose the structural refuse (not silent deny).
+    assert.match(out, /symlink|120000|refuse/i);
+    assert.match(
+      out,
+      new RegExp(linkPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `deny path must include the offending path:\n${out}`,
+    );
   } finally {
     cleanup(base);
   }
