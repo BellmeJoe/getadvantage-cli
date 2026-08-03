@@ -2124,6 +2124,91 @@ scenario("paste-ready remediation: unique-pattern hash snippet suppresses only t
   }
 });
 
+// Hostile multi-finding density (0.12.x remediation-output-density): many
+// unique secrets must still each be named with their own auth id, while human
+// extra densifies (shared boilerplate once + one merged paste-ready block).
+scenario("paste-ready remediation: multi-finding density — every auth id named, boilerplate once, one paste-ready block", () => {
+  const base = freshBase();
+  try {
+    const keys = [
+      "sk_live_" + "m1u2l3t4i5f6i7n8d9a0a1a2aA",
+      "sk_live_" + "m1u2l3t4i5f6i7n8d9a0a1a2aB",
+      "sk_live_" + "m1u2l3t4i5f6i7n8d9a0a1a2aC",
+      "sk_live_" + "m1u2l3t4i5f6i7n8d9a0a1a2aD",
+      "sk_live_" + "m1u2l3t4i5f6i7n8d9a0a1a2aE",
+    ];
+    const auths = keys.map((k) => hashOf(k));
+    assert.equal(new Set(auths).size, keys.length, "fixture keys must produce distinct auth ids");
+
+    const repo = path.join(base, "paste-ready-multi-density");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "paste-ready-multi-density", version: "1.0.0", private: true }, null, 2) + "\n");
+    for (let i = 0; i < keys.length; i++) {
+      write(repo, `src/key${i}.js`, `export const K${i} = "${keys[i]}";\n`);
+    }
+    commitAll(repo, "chore: five distinct stripe-shaped secrets");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `multi secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    // Density is a human-terminal concern: measure only check.extra (not
+    // findings[].remediation, which stays per-hit for SARIF/JSON consumers).
+    const extra = secret.extra || [];
+    const human = `${secret.detail || ""}\n${extra.join("\n")}`;
+
+    // Every finding still individually named with its own auth id (finding lines).
+    for (let i = 0; i < keys.length; i++) {
+      assert.ok(human.includes(`src/key${i}.js`), `must name src/key${i}.js\n${human}`);
+      assert.ok(human.includes(auths[i]), `must name auth id for key${i}\n${human}`);
+    }
+    // Full secrets never echoed.
+    for (const k of keys) {
+      assert.ok(!JSON.stringify(doc).includes(k), "full secret must never be echoed");
+    }
+
+    // Density: shared boilerplate once in human extra (not once-per-finding).
+    const whyCount = (human.match(/Why it matters:/g) || []).length;
+    const preferredCount = (human.match(/Preferred remedy:/g) || []).length;
+    const escapeCount = (human.match(/Escape hatch \(deliberate, tracked, reviewable/g) || []).length;
+    assert.equal(whyCount, 1, `Why it matters must appear once in human extra, got ${whyCount}\n${human}`);
+    assert.equal(preferredCount, 1, `Preferred remedy must appear once in human extra, got ${preferredCount}\n${human}`);
+    assert.equal(escapeCount, 1, `Escape hatch must appear once in human extra, got ${escapeCount}\n${human}`);
+    assert.ok(/Smallest safe next edit/i.test(human), human);
+    assert.ok(/deliberate|tracked|reviewable|disclosed/i.test(human), human);
+
+    // One merged paste-ready block carrying all auth ids (not five separate JSON docs).
+    const snip = extractPasteReadyIgnoreSnippet(human);
+    assert.ok(snip, `must emit parseable merged paste-ready JSON\n${human}`);
+    assert.equal(snip.version, 1);
+    assert.ok(Array.isArray(snip.secrets?.ignore?.hashes), JSON.stringify(snip));
+    const hashSet = new Set(snip.secrets.ignore.hashes);
+    for (const a of auths) {
+      assert.ok(hashSet.has(a), `merged hashes must include ${a}: ${JSON.stringify(snip)}`);
+    }
+    assert.equal(snip.secrets.ignore.hashes.length, keys.length, `exactly ${keys.length} hashes, no dups`);
+    assert.ok(!snip.secrets.ignore.patternIds, "must not emit patternIds");
+    // Human extra should not re-print N separate version:1 docs.
+    const versionOnes = (extra.join("\n").match(/"version"\s*:\s*1/g) || []).length;
+    assert.equal(versionOnes, 1, `human extra must have one paste-ready JSON, got ${versionOnes}\n${extra.join("\n")}`);
+
+    // Structured per-finding remediation still carries single-finding snippets (machine surface).
+    const findings = secret.findings || [];
+    assert.ok(findings.length >= keys.length, `structured findings for each hit: ${findings.length}`);
+    for (const f of findings) {
+      if (!f.authId || !auths.includes(f.authId)) continue;
+      assert.ok(Array.isArray(f.remediation) && f.remediation.length > 0, `finding ${f.file} needs remediation`);
+      const fSnip = extractPasteReadyIgnoreSnippet(f.remediation.join("\n"));
+      assert.ok(fSnip, `per-finding remediation JSON for ${f.file}`);
+      assert.deepEqual(fSnip.secrets.ignore.hashes, [f.authId]);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 10. fan-out — namespaced branches, idempotent re-run
 // ---------------------------------------------------------------------------

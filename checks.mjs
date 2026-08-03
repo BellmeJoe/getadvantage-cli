@@ -595,15 +595,9 @@ export function checkSecrets(cwd) {
     };
   });
   // Paste-ready remediation is additive only — never changes verdict/exit.
-  const remediationNote = [];
-  for (const h of hitList.slice(0, 30)) {
-    remediationNote.push(...secretHitRemediation(h));
-  }
-  if (hitList.length > 30) {
-    remediationNote.push(
-      `…and ${hitList.length - 30} more blocking secret${pl(hitList.length - 30)} (same remedy shape: remove+rotate, or pattern-aware secrets.ignore).`,
-    );
-  }
+  // Human terminal: densify (boilerplate once + one merged paste-ready block).
+  // Structured findings[].remediation stays per-hit for SARIF/JSON consumers.
+  const remediationNote = secretHitsRemediationNote(hitList);
   const r = result(
     "fail",
     "Secret scan",
@@ -620,6 +614,10 @@ export function checkSecrets(cwd) {
  * snippet. Non-unique pattern ids (e.g. private-key-incomplete) never get a
  * hashes/values/patternIds snippet — only a path-scoped ignore (patternIds
  * would authorize the entire pattern class repo-wide, including future files).
+ *
+ * Used on structured `findings[].remediation` (SARIF / --json / tests that
+ * parse per-finding remediation). Human-terminal `extra` uses the densified
+ * multi-hit form in `secretHitsRemediationNote` instead.
  *
  * @param {{ file: string, label: string, patternId?: string, authId?: string, fp?: string, startLine?: number }} h
  * @returns {string[]}
@@ -672,6 +670,114 @@ function secretHitRemediation(h) {
   const json = JSON.stringify(doc, null, 2);
   for (const jl of json.split("\n")) {
     lines.push(`  ${jl}`);
+  }
+  return lines;
+}
+
+/**
+ * Densified human-terminal remediation for N blocking secret hits.
+ * Shared why/preferred/escape-hatch boilerplate prints once; all unique-pattern
+ * auth ids merge into one paste-ready `hashes` array; non-unique patterns
+ * contribute path-scoped entries only (never hashes/values/patternIds).
+ * Each finding remains individually named on the finding lines (with its own
+ * auth id). Does not change verdict or exit code.
+ *
+ * @param {Array<{ file: string, label: string, patternId?: string, authId?: string, startLine?: number }>} hitList
+ * @returns {string[]}
+ */
+function secretHitsRemediationNote(hitList) {
+  const capped = hitList.slice(0, 30);
+  const hashes = [];
+  const paths = [];
+  const seenHashes = new Set();
+  const seenPaths = new Set();
+  const nonUniquePatternIds = new Set();
+
+  for (const h of capped) {
+    const filePosix = String(h.file || "").replace(/\\/g, "/");
+    const patternId = h.patternId || "unknown";
+    if (isNonUniqueAuthPatternId(patternId)) {
+      nonUniquePatternIds.add(patternId);
+      if (!seenPaths.has(filePosix)) {
+        seenPaths.add(filePosix);
+        paths.push(filePosix);
+      }
+    } else if (h.authId) {
+      if (!seenHashes.has(h.authId)) {
+        seenHashes.add(h.authId);
+        hashes.push(h.authId);
+      }
+    } else if (!seenPaths.has(filePosix)) {
+      seenPaths.add(filePosix);
+      paths.push(filePosix);
+    }
+  }
+
+  const n = hitList.length;
+  let header;
+  if (n === 1) {
+    const h = capped[0];
+    const filePosix = String(h.file || "").replace(/\\/g, "/");
+    const loc =
+      typeof h.startLine === "number" ? `${filePosix}:${h.startLine}` : filePosix;
+    header = `Smallest safe next edit — ${h.label} at ${loc}:`;
+  } else {
+    header = `Smallest safe next edit — ${n} blocking secret finding${pl(n)} (same remedy for each; every finding named above with its own auth id):`;
+  }
+
+  const lines = [
+    header,
+    `  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.`,
+    `  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.`,
+    `  Escape hatch (deliberate, tracked, reviewable — suppressed hits stay printed as disclosed, never invisible): if this is an intentional fixture/sample, merge the paste-ready snippet below into tracked .getadvantage/config.json and commit it. Authorization reads the git index only.`,
+  ];
+
+  if (nonUniquePatternIds.size > 0) {
+    const pids = [...nonUniquePatternIds].map((p) => `"${p}"`).join(", ");
+    lines.push(
+      `  Hash/value ignore is refused for pattern ${pids} because the match is not unique across keys (e.g. a constant PEM header collides). Use a path-scoped ignore only — never hashes, values, or patternIds for this pattern (patternIds would authorize every future file with the same detector):`,
+    );
+  }
+
+  if (hashes.length === 1 && paths.length === 0) {
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (carries this finding's own auth id ${hashes[0]}):`,
+    );
+  } else if (hashes.length > 1 && paths.length === 0) {
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (carries each finding's own auth id — ${hashes.length} unique hashes):`,
+    );
+  } else if (hashes.length > 0 && paths.length > 0) {
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (unique-pattern auth ids in hashes; non-unique patterns path-scoped only — never hashes for those):`,
+    );
+  } else if (hashes.length === 0 && paths.length > 0 && nonUniquePatternIds.size === 0) {
+    // Path-scoped fallback when no auth id is available (and not the non-unique case,
+    // which already printed the refused-for-pattern cue that extractPasteReady uses).
+    lines.push(
+      `  Paste-ready .getadvantage/config.json secrets.ignore (path-scoped; no auth id available for this hit):`,
+    );
+  }
+  // non-unique-only: refused cue above is enough for extractPasteReadyIgnoreSnippet.
+
+  const ignore = {};
+  if (hashes.length > 0) ignore.hashes = hashes;
+  if (paths.length > 0) ignore.paths = paths;
+
+  const doc = {
+    version: 1,
+    secrets: { ignore },
+  };
+  // JSON.stringify emits stable forward-slash paths — safe on Windows.
+  const json = JSON.stringify(doc, null, 2);
+  for (const jl of json.split("\n")) {
+    lines.push(`  ${jl}`);
+  }
+
+  if (hitList.length > 30) {
+    lines.push(
+      `…and ${hitList.length - 30} more blocking secret${pl(hitList.length - 30)} (same remedy shape: remove+rotate, or pattern-aware secrets.ignore).`,
+    );
   }
   return lines;
 }
