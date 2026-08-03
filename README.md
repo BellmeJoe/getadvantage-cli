@@ -474,6 +474,37 @@ self-test that plants leaks in a throwaway fixture repo — a committed `.env`,
 an oversized file with a trailing key, docs/CSS false-positive bait — and
 asserts the gate catches every real leak while staying quiet on the rest).
 
+### Dogfood on this repository (expected NO-GO — disclosed)
+
+This product repository **ships adversarial secret-shaped fixtures on purpose**
+inside `tests/run.mjs` (and related unit/contract strings). They exist so the
+suite can prove the gate **blocks** real leak shapes — not so the product root
+looks clean under its own scanner.
+
+**Therefore:** running `getadvantage check` (or the Action) against the
+**product root of this repository** is expected to return **NO-GO** with
+multiple blocking secret findings. That is the suite working as designed. It
+is **not** a product defect, and it is **not** a reason to weaken, skip, or
+suppress the secret scan.
+
+**Narrow policy (this repository only):**
+
+| Surface | Expected result | Why |
+|---|---|---|
+| Product root of `getadvantage-cli` (this repo) | **NO-GO** on self-check | Intentional hostile fixtures in `tests/` |
+| Clean customer repos / `fixtures/publish-self-gate` | **GO** when clean | No adversarial product fixtures |
+| Customer repo with a real leak | **NO-GO** | Findings must stay real and blocking |
+
+Publish CI **never** gates the product root for this reason. It materializes
+the clean nested fixture at `fixtures/publish-self-gate` and runs the Action
+there (`uses: ./` with `working-directory`). We do **not** allowlist
+`tests/run.mjs` hostiles in committed policy, dilute the scanner, or treat a
+self-check NO-GO on this repo as permission to ignore findings elsewhere.
+
+If you are evaluating getAdvantage on **your** repository, a NO-GO means a real
+finding until proven otherwise. The disclosed expectation above applies **only**
+to this product repo’s own test fixtures.
+
 ### 0.6.0: secret-scan hardening
 
 - **Committed `.env` files are no longer skipped by the secret scan.** Earlier

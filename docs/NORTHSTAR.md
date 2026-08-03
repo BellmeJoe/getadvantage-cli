@@ -6,31 +6,65 @@ implementation lane next.
 
 ## The destination
 
-**Make getAdvantage the default pre-merge proof layer for AI-built software and
-reach 1,000,000 cumulative npm downloads without fake traffic or founder labor.**
+**Make getAdvantage the default pre-merge proof layer for AI-built software,
+measured by one number: retained external teams — teams still running the gate
+in week two.**
 
 The product loop must become:
 
 `one command -> catches a real ship risk -> gives a usable fix -> lives in every PR -> emits shareable proof -> earns the next install`
 
-Downloads are the north-star reach metric. They are not sufficient proof alone.
-The companion metric is **retained automation**: public repositories, known
-teams, or opted-in installations that run getAdvantage again after the first
-week. No hidden telemetry and no manufactured downloads.
+The only leading indicators are **evaluator conversations** and **named
+installs**. Retention means public repositories, known teams, or opted-in
+installations that run getAdvantage again after the first week. No hidden
+telemetry and no manufactured downloads.
+
+> **Retired 2026-08-02, permanently** (`DEC-WEEK-PLAN-2026-07-30`, THE STOP
+> DECISION; mirrored here 2026-08-02): the 1,000,000-download north star, all
+> download-delta reporting, weekly-download targets, and every audience-follower
+> floor. Evidence that closed it, `agent-ops\DOWNLOAD-ATTRIBUTION-LEDGER.md`:
+> 2026-08-01 had no release, no CI and no agent cycle of any kind, and the
+> counter still read 18; 69.7% of that week's downloads fell on the two release
+> days. **Downloads are a labelled context footnote only.** They never appear
+> near the word progress, are never a leading indicator, and never raise a score.
+> Release counts, test counts, and engineering quality are hygiene, reported
+> separately, and likewise never raise a goal grade.
 
 ## Starting line and milestone ladder
 
-Registry baseline captured 2026-07-20:
-
-| Metric | Baseline | 30-day target | 90-day target | 12-month target |
+| Metric | Baseline (2026-08-02) | 30-day target | 90-day target | 12-month target |
 |---|---:|---:|---:|---:|
-| npm downloads / trailing 7 days | 780 | 2,500 | 10,000 | 50,000 |
-| cumulative npm downloads | measure daily | increasing | increasing | 1,000,000 |
-| retained public/known automated repos | establish baseline | 25 | 250 | 1,000 |
-| cold path: install -> useful result | measure | < 2 minutes | < 90 seconds | < 60 seconds |
+| **retained external teams (NORTH STAR)** | 0 | 0-2 | 10 | 100 |
+| evaluator conversations (leading) | 0 | 1-3 | 15 | 150 |
+| named installs (leading) | 0 | 1-3 | 20 | 200 |
+| cold path: install -> useful result | **4.14s** (measured 2026-08-02, `npx getadvantage@0.11.1 check`, fresh repo, isolated npm cache, exit 0) | hold < 60s | hold < 60s | hold < 60s |
 
 These are trajectory targets, not claims. Every weekly review records the actual
-number, delta, source, and uncertainty.
+number, delta, source, and uncertainty. The 30-day figures are the honest
+expectation adopted in the week plan, not an ambition.
+
+**Cold path is met and held, not optimized.** At 4.14s it is 14x inside the
+12-month target; further latency work is not fundable without profiling evidence
+that real CI time improves.
+
+## Retained-team detector (the north-star measurement method)
+
+`PENDING_B2` — activates the cycle `0.12.x-invisible-mode` ships.
+
+Retention is counted with **zero telemetry**, from public data only. Invisible
+mode writes an in-repo receipt (`.getadvantage/INVISIBLE-MODE.md`) whose stable
+header is publicly searchable.
+
+- Query: GitHub code search for the receipt header string, excluding `BellmeJoe/*`.
+- First run vs retained: a repository counts as **retained** only when its
+  receipt carries entries in **two distinct calendar weeks**.
+- Every weekly review runs the identical query and records the result.
+- Validity control: a positive-control code search must return hits in the same
+  session, otherwise a zero is a broken query and not an observed absence.
+  Validated 2026-08-02 — control returned 3 real third-party repositories while
+  the receipt header returned 0.
+- Never infer attribution beyond what the query shows, and never count
+  agent-generated verification traffic as adoption.
 
 ## Portfolio order
 
@@ -83,27 +117,61 @@ lane ships or is killed. Only one implementation lane may be open.
    advertised. Not an end-to-end auth seal.
 7. **Paste-ready deterministic remediation** — what failed, exact location, why
    it matters, and the smallest safe next edit for every wedge finding.
+   **Status (2026-07-31):** **LIVE 0.11.1** — every blocking secret finding names
+   the smallest safe next edit and emits a pattern-aware `secrets.ignore`
+   snippet; suppression always disclosed. Additive only, no verdict change.
+   Registry `gitHead` `66ffb9b`. Rollback: **0.11.0** / `v0.11.0`.
+7b. **Invisible mode** — `init --claude-code` installs the gate as an automatic
+   hook so every agent session is gated by default; the hook writes the in-repo
+   proof receipt that makes week-two reuse publicly countable with zero telemetry.
+   **Status (2026-08-03):** **`REVIEW_GO (lane-scoped)`** at product fingerprint
+   **`fe9e2ad`** (`fe9e2add5d9ecc4a4ee59403f8741e4cce51abaf`); 0 open P1, 0 open
+   P2; audit evidence 218/218 tests, 8/8 evidence, 34-file pack. Agent-trigger
+   profile (`check --agent-trigger`) visibly omits Dirty-tree on hooks only;
+   plain `check` / `check --ci` still enforce Dirty-tree. Cursor remains
+   **detect-and-refuse**. Same-shape stop-loss **2 of 3**. **Sole open lane**
+   (releasing as **0.12.0**). Open P3 post-release: symlink mode `120000`
+   hostile regression coverage (runtime protection already confirmed).
 
 ### P2 — make proof portable and shareable
 
 8. **Gate proof receipt** — commit, tool version, policy identity, checks,
    verdicts, and hashes in a stable local record.
+   **Status (2026-08-02):** **SUBSUMED by 7b** — invisible mode already writes
+   `.getadvantage/INVISIBLE-MODE.md`. A standalone bet would duplicate an
+   existing capability, which is an explicit ineligibility criterion below. What
+   survives of it is the retained-team detector that *counts* those receipts.
 9. **CI attestation recipe** — bind proof receipts to the workflow/repository/
    commit using GitHub artifact attestations; keep the CLI local-first.
+   *Deprioritized (2026-07-26, held 2026-08-02): zero demand evidence, zero
+   dogfood friction, and it depends on the receipt existing first.*
 10. **Shareable verified summary** — honest Markdown/JSON output for PRs,
     handoffs, and badges. Never turn a partial check into a security seal.
 11. **Agent-native parity** — every stable read-only capability is available
     through the MCP surface with the same result and policy semantics.
+    *Split (2026-08-02): the MCP-registry listing of the existing `mcp.mjs`
+    surface moves into 16; full parity stays here.*
 
 ### P3 — retention and ecosystem
 
 12. **Framework policy packs** selected by detected stack, with safe defaults and
-    explicit overrides.
+    explicit overrides. *Deprioritized: zero demand evidence.*
 13. **Fast repeat runs** using deterministic caching only after profiling proves
     it improves real CI time.
+    **Status (2026-08-02): KILLED on measured evidence.** True cold path is
+    **4.14s** against a 60-second 12-month target. There is no CI time to
+    recover, so this bet's own admission condition can never be met. Reopen only
+    if a real consumer repository profiles a slow run.
 14. **Evaluator feedback loop** — generated issue/discussion link containing
     redacted environment and result metadata, never secrets.
 15. **GitLab and audit exports** only after observed buyer or repository demand.
+16. **Free-shelf distribution** *(added 2026-08-02)* — GitHub Actions Marketplace
+    listing plus MCP registry listing. Verified absent this review: the Action is
+    `@v1`-tagged across 13 releases and `github.com/marketplace/actions/…`
+    returns 404 at every plausible slug, because bot-created API releases cannot
+    set the marketplace-publish flag. The only reach surface in the portfolio
+    that requires no outbound message to anyone; needs one founder account action
+    (the Marketplace developer agreement) and one release-workflow change.
 
 ## Selection score
 
@@ -123,6 +191,18 @@ A candidate is eligible only when it:
 Kill or split a lane when it cannot show a useful cold path, has no measurable
 link to activation/retention/distribution, needs an unsupported marketing claim,
 or remains too broad for hostile independent review.
+
+## Dogfood self-check on this product repository (disclosed)
+
+The getadvantage-cli product tree **intentionally ships adversarial secret
+fixtures** in `tests/run.mjs` so the integration suite can prove blocking
+behavior. Running the gate on **this repository's product root** is therefore
+**expected to NO-GO**. That expectation is **narrow and disclosed**: it applies
+only to this product repo’s own test fixtures. It is never a reason to suppress
+findings, dilute the secret scan, or treat a customer-repository NO-GO as a
+false block. Publish CI dogfoods a clean nested fixture
+(`fixtures/publish-self-gate`), not the product root. See README:
+“Dogfood on this repository (expected NO-GO — disclosed)”.
 
 ## Anti-idle protocol
 
@@ -145,8 +225,15 @@ already running.
 
 ## Weekly portfolio review
 
-Once per week Codex reconciles registry downloads, public/known recurring CI
-uses, GitHub stars/issues/discussions, cold-path time, releases, review escapes,
-and user feedback. It may reorder or kill bets. Grok owns implementation and
-product truth; Claude owns independent review; Codex owns portfolio priority and
-outcome accounting. Benjamin receives the result but is not a routine gate.
+Once per week `getadvantage-northstar-weekly` (Claude since 2026-07-26)
+reconciles retained external teams, evaluator conversations, named installs, the
+retained-team detector query, public/known recurring CI uses, GitHub
+stars/issues/discussions, cold-path time, releases, and review escapes. Downloads
+appear only as a labelled context footnote. It may reorder or kill bets, and it
+scores every bet against the harvested market-signal ledger: a bet supported by
+repeated verbatim external pain evidence outranks an equal-scoring bet without
+it, and a bet with zero demand and zero dogfood-friction evidence must carry an
+explicit written justification or be deprioritized. Grok owns implementation and
+product truth; the audit lane owns independent review; the weekly review owns
+portfolio priority and outcome accounting. Benjamin receives the result but is
+not a routine gate.
