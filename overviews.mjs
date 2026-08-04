@@ -764,17 +764,8 @@ function emptyRouteDetail(kind, stack, dynamicCount) {
   return `No routes parsed — ${what} routes aren't parsed yet (this lane reads Next.js, Node, and Python web apps).`;
 }
 
-export function overviewApiSurface(cwd, stack = null) {
-  const scan = scanRoutes(cwd, stack);
-  const { rows, gatedCount, mutatingCount, dangerous } = scan;
-  const kind = scan.stackKind;
-  const dynamicCount = scan.dynamicCount || 0;
-
-  if (rows.length === 0) {
-    return result("pass", "API surface map", emptyRouteDetail(kind, stack, dynamicCount));
-  }
-
-  // Build the listing (capped so a big app stays readable).
+/** Route table lines for the full API map (capped at 60). Pure builder. */
+function buildApiRouteLines(rows, dynamicCount = 0) {
   const lines = [];
   const CAP = 60;
   for (const r of rows.slice(0, CAP)) {
@@ -785,32 +776,84 @@ export function overviewApiSurface(cwd, stack = null) {
   if (dynamicCount > 0) {
     lines.push(`(${dynamicCount} route${dynamicCount === 1 ? "" : "s"} with computed paths not shown)`);
   }
+  return lines;
+}
+
+/**
+ * Danger-flag lines for ungated mutating routes.
+ * Map mode caps at 20 (historical density); check mode lists all so truncation
+ * boundaries never hide a ⚠ on the first screen.
+ */
+function buildDangerFlagLines(dangerous, { cap = 20 } = {}) {
+  const limited = cap == null || cap === Infinity ? dangerous : dangerous.slice(0, cap);
+  const flagged = limited.map(
+    (r) => `⚠ ${r.url} [${r.methods.join(",")}] — mutates but no auth/session check found`,
+  );
+  if (cap != null && cap !== Infinity && dangerous.length > cap) {
+    flagged.push(`…and ${dangerous.length - cap} more flagged`);
+  }
+  return flagged;
+}
+
+const API_DANGER_GUIDANCE = [
+  "Confirm each ⚠ route is meant to be public (some, like a rate-limited lead/contact",
+  "endpoint, legitimately are) — and that the others authenticate the caller before writing.",
+];
+
+/** One-line pointer from compact check presentation to the full `map` command. */
+function apiMapPointerLine() {
+  return `Run ${binName()} map for the full API surface (gated/mutating tags).`;
+}
+
+/**
+ * API surface map presentation.
+ * @param {string} cwd
+ * @param {object|null} [stack]
+ * @param {{ forMap?: boolean }} [opts]  forMap:true → full route dump (map command /
+ *   MCP map). Default false → compact check presentation: header + all ⚠ + guidance
+ *   + one-line pointer to `map` (no inline full table).
+ */
+export function overviewApiSurface(cwd, stack = null, { forMap = false } = {}) {
+  const scan = scanRoutes(cwd, stack);
+  const { rows, gatedCount, mutatingCount, dangerous } = scan;
+  const kind = scan.stackKind;
+  const dynamicCount = scan.dynamicCount || 0;
+
+  if (rows.length === 0) {
+    // Empty: identical for check and map (no pointer, no full-map dump).
+    return result("pass", "API surface map", emptyRouteDetail(kind, stack, dynamicCount));
+  }
 
   const detail =
     `${rows.length} route${pl(rows.length)} · ${gatedCount} look gated (session or cron secret) · ` +
     `${mutatingCount} mutate (write) · ${dangerous.length} mutate without any obvious gate.`;
 
-  if (dangerous.length > 0) {
-    // Surface the dangerous ones FIRST, then the full map below them.
-    const flagged = dangerous
-      .slice(0, 20)
-      .map((r) => `⚠ ${r.url} [${r.methods.join(",")}] — mutates but no auth/session check found`);
-    return result(
-      "warn",
-      "API surface map",
-      detail,
-      [
-        ...flagged,
-        ...(dangerous.length > 20 ? [`…and ${dangerous.length - 20} more flagged`] : []),
-        "Confirm each ⚠ route is meant to be public (some, like a rate-limited lead/contact",
-        "endpoint, legitimately are) — and that the others authenticate the caller before writing.",
+  if (forMap) {
+    // Full map command presentation — structure byte-stable vs pre-density-lane.
+    const lines = buildApiRouteLines(rows, dynamicCount);
+    if (dangerous.length > 0) {
+      // Surface the dangerous ones FIRST, then the full map below them.
+      return result("warn", "API surface map", detail, [
+        ...buildDangerFlagLines(dangerous, { cap: 20 }),
+        ...API_DANGER_GUIDANCE,
         "— full map —",
         ...lines,
-      ],
-    );
+      ]);
+    }
+    return result("pass", "API surface map", detail, lines);
   }
 
-  return result("pass", "API surface map", detail, lines);
+  // Compact check presentation: keep header + every ⚠ + guidance; point at map.
+  if (dangerous.length > 0) {
+    return result("warn", "API surface map", detail, [
+      ...buildDangerFlagLines(dangerous, { cap: Infinity }),
+      ...API_DANGER_GUIDANCE,
+      apiMapPointerLine(),
+    ]);
+  }
+
+  // Pass with routes: no route table inline — single pointer to full map.
+  return result("pass", "API surface map", detail, [apiMapPointerLine()]);
 }
 
 // ===========================================================================
@@ -1233,10 +1276,11 @@ export function overviewEstate(cwd) {
 }
 
 // ---------------------------------------------------------------------------
-// The full map, rendered — ONE implementation for both entry points.
-// The CLI `map` command and the MCP `map` tool both call this (no second
-// suite). Prints the stack line + all four lanes + the footer to stdout and
-// returns { stack, lanes } so callers can emit --json.
+// The full map, rendered — ONE entry for CLI `map` and MCP `map` (no second
+// suite). API surface uses forMap:true so the dedicated map command keeps the
+// full route dump; `check` calls overviewApiSurface without forMap (compact).
+// Prints the stack line + all four lanes + the footer to stdout and returns
+// { stack, lanes } so callers can emit --json.
 // ---------------------------------------------------------------------------
 export function renderMap(cwd) {
   section("Map — what your app has (read-only)");
@@ -1264,7 +1308,8 @@ export function renderMap(cwd) {
   let clientOrientation = null;
   for (const [fn, label] of [
     [overviewEstate, "Project estate"],
-    [overviewApiSurface, "API surface map"],
+    // forMap:true keeps the full route table on the dedicated map command.
+    [(dir, st) => overviewApiSurface(dir, st, { forMap: true }), "API surface map"],
     [overviewIntegrations, "Agents & integrations map"],
     [overviewSchedules, "Schedules & jobs map"],
   ]) {

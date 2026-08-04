@@ -171,6 +171,11 @@
 //  52d. Symlink mode 120000 escape (P3 coverage) — staged escaping symlink
 //                                     refuses real commit through installed hook;
 //                                     pre-tool emits permissionDecision deny
+//  53. API map density (0.12.x)       — check drops inline full route dump; keeps
+//                                     header + all ⚠ + guidance + one-line map
+//                                     pointer; dedicated map keeps full routes;
+//                                     zero-route has no pointer; all-gated pass
+//                                     with no ⚠; >60 routes lists every ⚠ on check
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -12389,6 +12394,315 @@ scenario("intent: absolute / traversal globs still rejected at parse; pathMatche
   );
   assert.equal(ok.ok, true, `** must be a valid allow glob: ${ok.error || ""}`);
   assert.deepEqual(ok.contract.allow, ["**"]);
+});
+
+// ---------------------------------------------------------------------------
+// 53. API map density (0.12.x) — check compact; map full routes byte-stable
+// ---------------------------------------------------------------------------
+// Hostile coverage for presentation split:
+//   • map still emits the full route table (methods + tags)
+//   • zero-route check has neither map pointer nor "— full map —"
+//   • all-gated pass: no ⚠ lines; pointer optional
+//   • >60 routes with several ungated POST: every ⚠ url on check (no 20-cap)
+// Filtered via TEST_FILTER=api-map-density
+
+scenario("api-map-density: map still emits full route table; check drops dump, keeps ⚠ + pointer", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "density-map");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "density-map",
+          version: "1.0.0",
+          private: true,
+          dependencies: { next: "15.0.0", react: "19.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Public GET + ungated POST (⚠) + a second read-only route for multi-method table.
+    write(
+      repo,
+      "app/api/hello/route.ts",
+      [
+        "export async function GET() { return Response.json({ ok: true }); }",
+        "export async function POST() { return Response.json({ ok: true }); }",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "app/api/health/route.ts",
+      "export async function GET() { return Response.json({ ok: true }); }\n",
+    );
+    commitAll(repo, "chore: density sample routes");
+
+    // --- map: full routes must still be emitted (ship-blocker for this lane) ---
+    const mapJson = run(["map", "--json"], repo);
+    assert.equal(mapJson.code, 0, mapJson.stderr);
+    const mapDoc = parseJson(mapJson);
+    const mapApi = (mapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(mapApi, "map JSON must include API surface lane");
+    assert.equal(mapApi.status, "warn", "ungated POST must warn on map");
+    assert.ok(/2 route/.test(mapApi.detail), `map detail counts: ${mapApi.detail}`);
+    const mapExtra = mapApi.extra || [];
+    assert.ok(mapExtra.some((l) => l === "— full map —"), `map must keep full-map separator:\n${mapExtra.join("\n")}`);
+    // Route-looking lines with methods (not only the ⚠ line).
+    const mapRouteLines = mapExtra.filter((l) => /\/api\/\S+\s+\[(GET|POST|PUT|PATCH|DELETE)/.test(l));
+    assert.ok(mapRouteLines.length >= 2, `map must list multiple route table lines:\n${mapExtra.join("\n")}`);
+    assert.ok(mapRouteLines.some((l) => /\/api\/hello/.test(l) && /POST/.test(l)), mapExtra.join("\n"));
+    assert.ok(mapRouteLines.some((l) => /\/api\/health/.test(l) && /GET/.test(l)), mapExtra.join("\n"));
+    assert.ok(
+      mapExtra.some((l) => /⚠\s+\/api\/hello\s+\[GET,POST\]/.test(l) || /⚠\s+\/api\/hello\s+\[POST,GET\]/.test(l) || /⚠ \/api\/hello \[/.test(l)),
+      `map must flag ungated POST:\n${mapExtra.join("\n")}`,
+    );
+    // Pointer is check-only; map uses the full dump instead.
+    assert.ok(!mapExtra.some((l) => /Run \S+ map for the full API surface/.test(l)), "map must not use the check pointer");
+
+    const mapHuman = run(["map"], repo);
+    assert.equal(mapHuman.code, 0, mapHuman.stderr);
+    assert.ok(/— full map —/.test(mapHuman.stdout), `human map full separator:\n${mapHuman.stdout}`);
+    assert.ok(/\/api\/hello/.test(mapHuman.stdout) && /\/api\/health/.test(mapHuman.stdout), mapHuman.stdout);
+    assert.ok(/mutates but no auth\/session check found/.test(mapHuman.stdout), mapHuman.stdout);
+
+    // --- check: compact — ⚠ + guidance + pointer; no full dump ---
+    const checkJson = run(["check", "--json", "--no-brief-check"], repo);
+    assert.equal(checkJson.code, 0, checkJson.stderr);
+    const checkDoc = parseJson(checkJson);
+    const checkApi = (checkDoc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(checkApi, "check must include API surface overview");
+    assert.equal(checkApi.status, "warn");
+    assert.equal(
+      mapApi.detail.replace(/\s+/g, " "),
+      checkApi.detail.replace(/\s+/g, " "),
+      "header counts must match between map and check",
+    );
+    const checkExtra = checkApi.extra || [];
+    assert.ok(checkExtra.some((l) => /⚠ \/api\/hello \[/.test(l)), `check must keep ⚠:\n${checkExtra.join("\n")}`);
+    assert.ok(
+      checkExtra.some((l) => /Confirm each ⚠ route is meant to be public/.test(l)),
+      `check must keep guidance:\n${checkExtra.join("\n")}`,
+    );
+    assert.ok(
+      checkExtra.some((l) => /Run getadvantage map for the full API surface \(gated\/mutating tags\)\./.test(l)),
+      `check must point at map:\n${checkExtra.join("\n")}`,
+    );
+    assert.ok(!checkExtra.some((l) => l === "— full map —"), `check must not dump full map:\n${checkExtra.join("\n")}`);
+    // No route-table rows (url + [METHOD] + tag) — only ⚠ / guidance / pointer.
+    const checkRouteTable = checkExtra.filter(
+      (l) => !l.startsWith("⚠") && /\/api\/\S+\s+\[(GET|POST|PUT|PATCH|DELETE)/.test(l),
+    );
+    assert.equal(checkRouteTable.length, 0, `check must not list route table rows:\n${checkExtra.join("\n")}`);
+
+    const checkHuman = run(["check", "--no-brief-check"], repo);
+    assert.ok(/⚠/.test(checkHuman.stdout) && /\/api\/hello/.test(checkHuman.stdout), checkHuman.stdout);
+    assert.ok(/Run getadvantage map for the full API surface/.test(checkHuman.stdout), checkHuman.stdout);
+    assert.ok(!/— full map —/.test(checkHuman.stdout), `human check must drop full map:\n${checkHuman.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("api-map-density: zero-route check has no map pointer and no full-map dump", () => {
+  const base = freshBase();
+  try {
+    // Plain Node scaffold — no Express registrations, no App Router routes.
+    const repo = scaffold(base);
+    const checkJson = run(["check", "--json", "--no-brief-check"], repo);
+    assert.equal(checkJson.code, 0, checkJson.stderr);
+    const doc = parseJson(checkJson);
+    const api = (doc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(api, "API surface check present");
+    assert.equal(api.status, "pass");
+    const extra = api.extra || [];
+    assert.ok(
+      !extra.some((l) => /Run \S+ map for the full API surface/.test(l)),
+      `zero-route must not add map pointer:\n${extra.join("\n")}`,
+    );
+    assert.ok(!extra.some((l) => l === "— full map —"), `zero-route must not have full-map:\n${extra.join("\n")}`);
+    assert.ok(
+      /No (server routes|Next\.js App Router routes|routes parsed)/i.test(api.detail) ||
+        /none matched|aren't parsed yet/i.test(api.detail),
+      `empty detail expected:\n${api.detail}`,
+    );
+
+    // Map empty path stays free of the check-only pointer too.
+    const mapJson = run(["map", "--json"], repo);
+    const mapDoc = parseJson(mapJson);
+    const mapApi = (mapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.ok(mapApi);
+    const mapExtra = mapApi.extra || [];
+    assert.ok(!mapExtra.some((l) => /Run \S+ map for the full API surface/.test(l)));
+    assert.ok(!mapExtra.some((l) => l === "— full map —"));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("api-map-density: all-gated routes pass with no ⚠; map pointer optional", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "all-gated");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "all-gated",
+          version: "1.0.0",
+          private: true,
+          dependencies: { next: "15.0.0", react: "19.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Mutating but gated via getSession — must NOT be ⚠.
+    write(
+      repo,
+      "app/api/profile/route.ts",
+      [
+        "import { getSession } from 'next-auth';",
+        "export async function POST() {",
+        "  const session = await getSession();",
+        "  if (!session) return new Response('no', { status: 401 });",
+        "  return Response.json({ ok: true });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    write(
+      repo,
+      "app/api/me/route.ts",
+      [
+        "import { getSession } from 'next-auth';",
+        "export async function GET() {",
+        "  const session = await getSession();",
+        "  return Response.json({ session });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: gated routes only");
+
+    const checkJson = run(["check", "--json", "--no-brief-check"], repo);
+    assert.equal(checkJson.code, 0, checkJson.stderr);
+    const doc = parseJson(checkJson);
+    const api = (doc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(api, "API surface present");
+    assert.equal(api.status, "pass", `all-gated must pass, got ${api.status}: ${api.detail}\n${(api.extra || []).join("\n")}`);
+    assert.ok(/0 mutate without any obvious gate/.test(api.detail), api.detail);
+    const extra = api.extra || [];
+    assert.ok(!extra.some((l) => l.startsWith("⚠")), `no ⚠ lines on all-gated:\n${extra.join("\n")}`);
+    // Pointer is OK (and expected) when routes exist but none are dangerous.
+    // Full dump is not.
+    assert.ok(!extra.some((l) => l === "— full map —"), extra.join("\n"));
+    assert.ok(
+      !extra.some((l) => !l.startsWith("⚠") && /\/api\/\S+\s+\[(GET|POST)/.test(l) && !/Run /.test(l)),
+      `no route table on check:\n${extra.join("\n")}`,
+    );
+
+    const mapJson = run(["map", "--json"], repo);
+    const mapDoc = parseJson(mapJson);
+    const mapApi = (mapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.equal(mapApi.status, "pass");
+    const mapExtra = mapApi.extra || [];
+    assert.ok(mapExtra.some((l) => /\/api\/profile/.test(l) && /auth-gated/.test(l)), mapExtra.join("\n"));
+    assert.ok(!mapExtra.some((l) => l.startsWith("⚠")), "map all-gated: no danger flags");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("api-map-density: >60 routes with many ungated POST — check lists every ⚠ (no 20-cap)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "trunc");
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        {
+          name: "trunc",
+          version: "1.0.0",
+          private: true,
+          dependencies: { next: "15.0.0", react: "19.0.0" },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    // 55 read-only GET routes + 25 ungated POST routes = 80 total (>60 CAP).
+    // Danger count 25 > historical map flag cap of 20; check must list ALL 25.
+    const dangerousUrls = [];
+    for (let i = 0; i < 55; i++) {
+      const n = String(i).padStart(2, "0");
+      write(
+        repo,
+        `app/api/ro/r${n}/route.ts`,
+        `export async function GET() { return Response.json({ i: ${i} }); }\n`,
+      );
+    }
+    for (let i = 0; i < 25; i++) {
+      const n = String(i).padStart(2, "0");
+      const url = `/api/write/w${n}`;
+      dangerousUrls.push(url);
+      write(
+        repo,
+        `app/api/write/w${n}/route.ts`,
+        `export async function POST() { return Response.json({ wrote: ${i} }); }\n`,
+      );
+    }
+    commitAll(repo, "chore: many routes for truncation hostile");
+
+    const checkJson = run(["check", "--json", "--no-brief-check"], repo);
+    assert.equal(checkJson.code, 0, checkJson.stderr);
+    const doc = parseJson(checkJson);
+    const api = (doc.checks || []).find((c) => /API surface/i.test(c.label));
+    assert.ok(api);
+    assert.equal(api.status, "warn");
+    assert.ok(/80 route/.test(api.detail), `expect 80 routes: ${api.detail}`);
+    assert.ok(/25 mutate without any obvious gate/.test(api.detail), api.detail);
+    const extra = api.extra || [];
+    const flagLines = extra.filter((l) => l.startsWith("⚠ "));
+    assert.equal(flagLines.length, 25, `check must list all 25 ⚠ (no 20-cap):\n${flagLines.length} flags\n${extra.join("\n")}`);
+    for (const url of dangerousUrls) {
+      assert.ok(
+        flagLines.some((l) => l.includes(url)),
+        `check must flag every dangerous url including ${url}:\n${flagLines.join("\n")}`,
+      );
+    }
+    assert.ok(!extra.some((l) => /…and \d+ more flagged/.test(l)), "check must not truncate flags");
+    assert.ok(!extra.some((l) => l === "— full map —"), "check has no full map dump");
+    assert.ok(
+      extra.some((l) => /Run getadvantage map for the full API surface/.test(l)),
+      `pointer required:\n${extra.join("\n")}`,
+    );
+
+    // Map retains historical 20-cap on flags + full route dump (capped at 60 rows).
+    const mapJson = run(["map", "--json"], repo);
+    const mapDoc = parseJson(mapJson);
+    const mapApi = (mapDoc.lanes || []).find((l) => /API surface/i.test(l.label));
+    assert.equal(mapApi.status, "warn");
+    const mapExtra = mapApi.extra || [];
+    const mapFlags = mapExtra.filter((l) => l.startsWith("⚠ "));
+    assert.equal(mapFlags.length, 20, `map keeps 20-flag cap: got ${mapFlags.length}`);
+    assert.ok(mapExtra.some((l) => /…and 5 more flagged/.test(l)), mapExtra.join("\n"));
+    assert.ok(mapExtra.some((l) => l === "— full map —"), "map keeps full map separator");
+    const mapRouteLines = mapExtra.filter((l) => /\/api\/\S+\s+\[(GET|POST)/.test(l) && !l.startsWith("⚠"));
+    assert.ok(mapRouteLines.length >= 60, `map route table should hit CAP 60: ${mapRouteLines.length}`);
+    assert.ok(mapExtra.some((l) => /…and 20 more route/.test(l)), `map route CAP remainder:\n${mapExtra.join("\n")}`);
+  } finally {
+    cleanup(base);
+  }
 });
 
 // ---------------------------------------------------------------------------
