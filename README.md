@@ -437,7 +437,7 @@ Or paste the consumer step yourself after checkout:
 
 **Tag architecture:** floating git tag `v1` is the Action API major (moved on each
 shipped action-compatible release). Exact source/npm release tags remain
-`v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, `v0.11.0`, `v0.11.1`, `v0.12.0`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.12.0` when you
+`v0.9.0`, `v0.9.1`, `v0.10.0`, `v0.10.1`, `v0.11.0`, `v0.11.1`, `v0.12.0`, `v0.12.1`, … — pin `uses: BellmeJoe/getadvantage-cli@v0.12.1` when you
 need bit-for-bit reproducibility. npm installs use package versions / dist-tags,
 not the floating `v1` git tag.
 
