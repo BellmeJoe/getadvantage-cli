@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.12.0 LIVE**
+# Social / advertising pack — getadvantage **0.12.1 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,23 +6,31 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Live:** **getadvantage@0.12.0** (2026-08-03). Independent **REVIEW_GO
-> (lane-scoped)** at product fingerprint `fe9e2ad`; 0 open P1/P2 on the B2 lane.
-> Registry `gitHead` = `b8be10c` (release commit), tags `v0.12.0` + floating
-> `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.0),
-> cold published package verified (clean GO ~5.3s exit 0; no Supabase/RLS line;
-> zero raw git/fatal noise). Invisible-mode activation on published package:
-> cold `init --claude-code` → installed hook → first gate **~11.3s** (under 60s).
-> Prefer leading with the eight core GO/NO-GO claims below; Intent remains the
-> trust-layer follow-on — always *scope verified; semantic correctness not proven*.
+> **Live:** **getadvantage@0.12.1** (2026-08-05). Train-scoped independent
+> **REVIEW_GO (release-eligible)** at product fingerprint `4b69b51`; 0 open
+> P1/P2/P3. Registry `gitHead` = `e2f8665` (release commit), tags `v0.12.1` +
+> floating `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1),
+> cold published package verified (clean GO **~5.0s** exit 0; no Supabase/RLS
+> line; zero raw git/fatal noise). Actions run
+> [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656)
+> success. Prefer leading with the eight core GO/NO-GO claims below; Intent
+> remains the trust-layer follow-on — always *scope verified; semantic
+> correctness not proven*.
 >
-> **What 0.12.0 ships:** `getadvantage init --claude-code` installs the gate as an
-> **automatic hook** so every Claude Code agent session is gated by default;
-> agent-trigger profile visibly omits Dirty-tree on hooks only; plain `check` /
-> `check --ci` unchanged; in-repo proof receipt `.getadvantage/INVISIBLE-MODE.md`
-> with **zero telemetry**. **Cursor remains detect-and-refuse** (disclosed
-> narrowing — never claim Cursor automatic hooks). Auto-captured Intent uses
-> project-tree-wide `allow: ["**"]` (tree seal, not a tight task envelope).
+> **What 0.12.1 ships (patch — legibility only):** denser human `check` output so
+> the verdict sits on a short first screen, plus symlink-escape mode `120000`
+> regression coverage. Measured: **CLI `check` 109 → 56 lines** (verdict header
+> 106 → 53); **site `check` 143 → 82 lines** (verdict header 140 → 79). No new
+> check, no changed verdict, no changed exit code; `--json` findings[] and SARIF
+> unchanged. **Not an adoption event** — named evaluators / installs / first
+> gates / week-two reuse / retained external teams remain **0**.
+>
+> **Still live from 0.12.0:** `getadvantage init --claude-code` installs the gate
+> as an **automatic hook** so every Claude Code agent session is gated by
+> default; agent-trigger profile visibly omits Dirty-tree on hooks only; plain
+> `check` / `check --ci` unchanged; in-repo proof receipt
+> `.getadvantage/INVISIBLE-MODE.md` with **zero telemetry**. **Cursor remains
+> detect-and-refuse** (disclosed narrowing — never claim Cursor automatic hooks).
 >
 > **Still live from 0.11.x:** Paste-ready secret remediation (0.11.1); Intent on
 > fan-in merge-train `gateTree` (0.11.0). **0.12.x does not check Supabase RLS** —
@@ -32,7 +40,7 @@
 > **Also still live (from 0.10.x):** Vite/React/Supabase **client orientation**
 > on `map` (Supabase SDK ≠ RLS seal); Intent Contract (`intent init` /
 > `intent check` / `check` when freeze trusted); first-party GitHub Action + PR
-> summary (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.12.0`); secret scan of
+> summary (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.12.1`); secret scan of
 > committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
 > Rollback: **getadvantage@0.11.1** / tag `v0.11.1` / `66ffb9b`.
 
@@ -47,12 +55,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.12.0` |
-| **Checkout** | Live **0.12.0** (invisible mode Claude hooks + paste-ready secret remediation + Intent in merge-train gate + map client orientation + client-bundle scan + Action + SARIF) |
-| **Install** | `npx getadvantage` or `npx getadvantage@0.12.0` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.0](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.0) · Action `@v1` / `@v0.12.0` |
+| **npm (live)** | `getadvantage@0.12.1` |
+| **Checkout** | Live **0.12.1** (legibility patch on invisible-mode stack: denser check output + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF) |
+| **Install** | `npx getadvantage` or `npx getadvantage@0.12.1` (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1) · Action `@v1` / `@v0.12.1` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI binding gate on release run · product fingerprint `fe9e2ad` · release `b8be10c` · cold published path verified (2026-08-03) · activation ~11.3s · registry `gitHead` `b8be10c` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656) success · product fingerprint `4b69b51` · release `e2f8665` · cold published path verified (2026-08-05, ~5.0s GO exit 0) · registry `gitHead` `e2f8665` · tags `v0.12.1` + `v1` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
