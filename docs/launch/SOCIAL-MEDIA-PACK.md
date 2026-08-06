@@ -10,8 +10,9 @@
 > **REVIEW_GO (release-eligible)** at product fingerprint `4b69b51`; 0 open
 > P1/P2/P3. Registry `gitHead` = `e2f8665` (release commit), tags `v0.12.1` +
 > floating `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1),
-> cold published package verified (clean GO **~5.0s** exit 0; no Supabase/RLS
-> line; zero raw git/fatal noise). Actions run
+> cold published package verified (clean GO **~4.3–7.2s** across logged cold
+> paths: 7.24s release routine / ~5.7s independent audit / 4.34s 2026-08-06
+> dispatch; no Supabase/RLS line; zero raw git/fatal noise). Actions run
 > [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656)
 > success. Prefer leading with the eight core GO/NO-GO claims below; Intent
 > remains the trust-layer follow-on — always *scope verified; semantic
@@ -31,6 +32,8 @@
 > `check` / `check --ci` unchanged; in-repo proof receipt
 > `.getadvantage/INVISIBLE-MODE.md` with **zero telemetry**. **Cursor remains
 > detect-and-refuse** (disclosed narrowing — never claim Cursor automatic hooks).
+> Auto-captured Intent uses project-tree-wide `allow: ["**"]` — a **tree seal,
+> not a tight task envelope**.
 >
 > **Still live from 0.11.x:** Paste-ready secret remediation (0.11.1); Intent on
 > fan-in merge-train `gateTree` (0.11.0). **0.12.x does not check Supabase RLS** —
@@ -60,7 +63,7 @@ windows.
 | **Install** | `npx getadvantage` or `npx getadvantage@0.12.1` (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1) · Action `@v1` / `@v0.12.1` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656) success · product fingerprint `4b69b51` · release `e2f8665` · cold published path verified (2026-08-05, ~5.0s GO exit 0) · registry `gitHead` `e2f8665` · tags `v0.12.1` + `v1` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656) success · product fingerprint `4b69b51` · release `e2f8665` · cold published path verified (2026-08-05/06, **~4.3–7.2s** GO exit 0 across logged runs: 7.24s / ~5.7s / 4.34s) · registry `gitHead` `e2f8665` · tags `v0.12.1` + `v1` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -109,7 +112,7 @@ windows.
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
 | **CI** | Same gate on every PR. SARIF upload to code scanning on public repos (private needs Code Security + `actions: read`). Not a security seal. | `github-action` · `check --sarif` · publish pipeline runs tests + evidence |
-| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.12.0`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.12.0** · tags `v1`/`v0.12.0` |
+| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.12.1`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.12.1** · tags `v1`/`v0.12.1` |
 | **Invisible mode (Claude Code)** | One command installs the gate as an **automatic hook** so every agent session is gated by default; writes in-repo proof receipt with **zero telemetry**. Cursor is **detect-and-refuse** (not automatic). | `npx getadvantage init --claude-code` · status/uninstall/bypass · receipt `.getadvantage/INVISIBLE-MODE.md` | product `fe9e2ad` · cold published activation ~11.3s · *scope verified; semantic correctness not proven* |
 
 ### D. Trust layer — advertise to builders who run agents (honest scope)
@@ -124,7 +127,7 @@ Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
 Commit only intent.json (dedicated freeze). After: intent check → every
 post-baseline change inside the human envelope? Fan-in also enforces the
 envelope on the combined tree when a freeze is present. Scope only — not
-semantics. (getadvantage@0.12.0 · LIVE)
+semantics. (getadvantage@0.12.1 · LIVE)
 ```
 
 ### E. Do **not** lead with (true but wrong first sentence)
