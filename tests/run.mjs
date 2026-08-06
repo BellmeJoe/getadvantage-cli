@@ -4326,6 +4326,181 @@ scenario("action summary: marker, redaction, injection, credential-shaped paths"
   }
 });
 
+scenario("action summary: multi-finding, remediation, line numbers, blocking-first, bounds", async () => {
+  const {
+    buildSummaryMarkdown,
+    sanitizeSummaryText,
+    isUnsafePathForSummary,
+    FINDING_CAP,
+    FINDINGS_PER_CHECK,
+    REMEDIATION_FINDING_CAP,
+    BODY_CHAR_CAP,
+    CHECK_CAP,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "action", "summary.mjs")).href);
+
+  assert.ok(FINDING_CAP >= 5, "FINDING_CAP must allow five findings on one check");
+  assert.ok(FINDINGS_PER_CHECK >= 5, "FINDINGS_PER_CHECK must allow five findings on one check");
+  assert.ok(BODY_CHAR_CAP > 0 && BODY_CHAR_CAP <= 50_000, `BODY_CHAR_CAP=${BODY_CHAR_CAP}`);
+  assert.ok(CHECK_CAP >= 1);
+  assert.ok(REMEDIATION_FINDING_CAP >= 1);
+
+  // --- Hostile: five secret findings all listed under the cap ---
+  const fiveFindings = [1, 2, 3, 4, 5].map((i) => ({
+    file: `src/keys${i}.js`,
+    startLine: 10 + i,
+    fp: `sk_live_…000${i} (40 chars)`,
+    authId: `a${i}`.repeat(8).slice(0, 16),
+    message: `Stripe live key ${i}`,
+    patternId: "stripe-live",
+    remediation: [
+      `Smallest safe next edit — Stripe live key at src/keys${i}.js:${10 + i}:`,
+      `  Preferred remedy: remove + rotate.`,
+      `  Paste-ready .getadvantage/config.json secrets.ignore:`,
+      `  {`,
+      `    "version": 1,`,
+      `    "secrets": { "ignore": { "hashes": ["${`a${i}`.repeat(8).slice(0, 16)}"] } }`,
+      `  }`,
+    ],
+  }));
+  const multi = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: [
+      {
+        status: "fail",
+        label: "Secret scan",
+        detail: "5 possible secrets",
+        findings: fiveFindings,
+      },
+    ],
+    version: "0.12.1",
+  });
+  for (let i = 1; i <= 5; i++) {
+    assert.ok(multi.includes(`src/keys${i}.js`), `finding ${i} file must appear\n${multi}`);
+    assert.ok(
+      multi.includes(`src/keys${i}.js:${10 + i}`) || multi.includes(`:${10 + i}`),
+      `finding ${i} line number must appear as file:line\n${multi}`,
+    );
+    assert.ok(multi.includes(`sk_live_…000${i}`) || multi.includes(`000${i}`), `fp ${i} should surface`);
+  }
+  // Line numbers present; all five under cap
+  assert.ok((multi.match(/src\/keys\d\.js:\d+/g) || []).length >= 5, `expected 5 file:line hits\n${multi}`);
+
+  // Remediation reaches the PR summary (paste-ready hashes)
+  assert.ok(/\*\*Remediation\*\*/i.test(multi), "remediation section present");
+  assert.ok(/secrets\.ignore|Paste-ready|hashes/i.test(multi), "paste-ready remediation surfaced");
+  for (let i = 1; i <= Math.min(5, REMEDIATION_FINDING_CAP); i++) {
+    const auth = `a${i}`.repeat(8).slice(0, 16);
+    assert.ok(multi.includes(auth), `auth id ${auth} from remediation should appear when under rem cap`);
+  }
+
+  // --- Credential-shaped filename still omitted (never fake-redacted) ---
+  const badName = "sk_live_FILENAMESECRET000000001.js";
+  assert.equal(isUnsafePathForSummary(badName), true);
+  const hostilePath = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: [
+      {
+        status: "fail",
+        label: "Secret scan",
+        detail: "leak",
+        findings: [
+          {
+            file: badName,
+            startLine: 7,
+            fp: "sk_live_…0001 (36 chars)",
+            message: "Stripe live key",
+            remediation: [
+              `Smallest safe next edit at ${badName}:7:`,
+              `  { "version": 1, "secrets": { "ignore": { "paths": ["${badName}"] } } }`,
+            ],
+          },
+          ...fiveFindings.slice(0, 4).map((f, idx) => ({
+            ...f,
+            file: `ok/file${idx + 1}.js`,
+            startLine: 20 + idx,
+          })),
+        ],
+      },
+    ],
+  });
+  assert.ok(!hostilePath.includes(badName), "credential-shaped filename must not appear in summary");
+  assert.ok(/path omitted|credential-shaped/i.test(hostilePath), "must omit rather than fake-redact");
+  // The other four safe findings still show
+  for (let i = 1; i <= 4; i++) {
+    assert.ok(hostilePath.includes(`ok/file${i}.js`), `safe finding ${i} still listed`);
+  }
+  // Remediation path content is sanitized (no raw credential-shaped filename)
+  assert.ok(!hostilePath.includes("FILENAMESECRET"), "remediation must not leak credential-shaped path");
+
+  // --- Blocking-first ordering: fail rows before warn rows ---
+  const ordered = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: [
+      { status: "warn", label: "Warn-First", detail: "w1", findings: [{ file: "w.js", message: "warn-msg" }] },
+      { status: "fail", label: "Fail-Second", detail: "f1", findings: [{ file: "f.js", startLine: 3, message: "fail-msg" }] },
+      { status: "warn", label: "Warn-Third", detail: "w2" },
+      { status: "fail", label: "Fail-Fourth", detail: "f2", findings: [{ file: "f2.js", message: "fail2" }] },
+    ],
+  });
+  const failPos = ordered.indexOf("Fail-Second");
+  const fail2Pos = ordered.indexOf("Fail-Fourth");
+  const warnPos = ordered.indexOf("Warn-First");
+  const warn2Pos = ordered.indexOf("Warn-Third");
+  assert.ok(failPos >= 0 && fail2Pos >= 0 && warnPos >= 0 && warn2Pos >= 0, ordered);
+  assert.ok(failPos < warnPos, "first fail must appear before first warn");
+  assert.ok(fail2Pos < warnPos, "second fail must appear before first warn");
+  assert.ok(ordered.includes("f.js:3"), "line number on fail finding");
+
+  // --- Body size bound on a many-findings repo ---
+  const manyChecks = [];
+  for (let c = 0; c < 40; c++) {
+    const findings = [];
+    for (let f = 0; f < 15; f++) {
+      findings.push({
+        file: `pkg/mod${c}/file${f}.ts`,
+        startLine: f + 1,
+        fp: `fp-${c}-${f}-` + "x".repeat(40),
+        message: `finding message ${c}/${f} ` + "M".repeat(80),
+        remediation: Array.from({ length: 20 }, (_, k) =>
+          `remediation line ${k} for ${c}/${f}: ` + "R".repeat(100) + ` <!-- inject --> @victim sk_live_${"Z".repeat(24)}`,
+        ),
+      });
+    }
+    manyChecks.push({
+      status: c % 3 === 0 ? "warn" : "fail",
+      label: `Check-${c}-` + "L".repeat(40),
+      detail: "detail " + "D".repeat(100),
+      findings,
+    });
+  }
+  const huge = buildSummaryMarkdown({
+    verdict: "NO-GO",
+    exitCode: 1,
+    checks: manyChecks,
+    version: "0.12.1",
+    sarifNote: "SARIF " + "S".repeat(500),
+  });
+  assert.ok(huge.length <= BODY_CHAR_CAP, `body length ${huge.length} exceeds BODY_CHAR_CAP ${BODY_CHAR_CAP}`);
+  // Findings listed are capped
+  const tableRows = (huge.match(/^\| (FAIL|WARN) \|/gm) || []).length;
+  assert.ok(tableRows <= FINDING_CAP + CHECK_CAP + 5, `unexpected table row count ${tableRows}`);
+  // No raw hostile injection from remediation (marker itself is an intentional HTML comment).
+  assert.ok(!/@victim\b/.test(huge), "mentions neutralized in remediation");
+  const afterMarker = huge.replace(/<!-- getadvantage:pr-summary -->/, "");
+  assert.ok(!afterMarker.includes("<!--"), "HTML comment openers broken outside marker");
+  assert.ok(!afterMarker.includes("-->"), "HTML comment terminators broken outside marker");
+  assert.ok(!/sk_live_Z{16,}/.test(huge), "credential in remediation redacted");
+  // Sanitizer still applied to free text
+  const injectedRem = sanitizeSummaryText("x @notify sk_live_" + "Y".repeat(20));
+  assert.ok(!/@notify\b/.test(injectedRem));
+
+  // BODY_CHAR_CAP enforcement: length is always bounded
+  assert.ok(huge.length <= BODY_CHAR_CAP);
+});
+
 scenario("action runner: clean GO, secret NO-GO, failed SARIF path, fork-safe summary", async () => {
   const { runAction } = await import(pathToFileURL(path.join(__dirname, "..", "action", "main.mjs")).href);
   const actionPath = path.join(__dirname, "..");

@@ -12,14 +12,108 @@ import { redactForSarif } from "../sarif.mjs";
 /** Hidden HTML comment marker — do not change without a migration plan. */
 export const PR_SUMMARY_MARKER = "<!-- getadvantage:pr-summary -->";
 
-/** Max length of a single finding line in the summary. */
-const LINE_CAP = 240;
-/** Max failing/warning checks listed. */
-const CHECK_CAP = 12;
+/** Max length of a single finding detail line in the summary table. */
+export const LINE_CAP = 240;
+/** Max failing/warning checks listed in the table. */
+export const CHECK_CAP = 12;
+/** Max findings rendered across all checks (one table row per finding when present). */
+export const FINDING_CAP = 20;
+/** Max findings shown for a single check (five leaked keys must fit under this). */
+export const FINDINGS_PER_CHECK = 8;
+/** Max findings that contribute remediation text to the PR summary. */
+export const REMEDIATION_FINDING_CAP = 5;
+/** Max remediation lines kept per finding (after sanitization). */
+export const REMEDIATION_LINES_PER_FINDING = 8;
+/** Max characters of sanitized remediation text per finding. */
+export const REMEDIATION_CHARS_PER_FINDING = 480;
+/** Hard cap on the full summary body (chars). Truncates with a tail note when exceeded. */
+export const BODY_CHAR_CAP = 12000;
 /** Comments per page when listing issue comments. */
 export const COMMENT_PAGE_SIZE = 100;
 /** Safe cap on list pages (prevents unbounded API walk). */
 export const COMMENT_PAGE_CAP = 10;
+/** Placeholder when a credential-shaped path must be omitted (never fake-redacted). */
+const PATH_OMITTED = "(path omitted — credential-shaped name)";
+
+/**
+ * Format a finding location as `file:line` when the path is safe to emit.
+ * Credential-shaped paths are omitted (never fake-redacted). Line numbers are
+ * only appended when they are finite positive integers.
+ * @param {{file?: string, startLine?: number}} f
+ * @returns {string} location fragment or empty string
+ */
+function formatFindingLocation(f) {
+  if (!f || typeof f !== "object") return "";
+  if (!f.file || typeof f.file !== "string") return "";
+  if (isUnsafePathForSummary(f.file)) {
+    return PATH_OMITTED;
+  }
+  const file = sanitizeSummaryText(f.file).slice(0, 120);
+  if (!file) return PATH_OMITTED;
+  const line =
+    typeof f.startLine === "number" && Number.isFinite(f.startLine) && f.startLine >= 1
+      ? Math.floor(f.startLine)
+      : null;
+  if (line != null) {
+    // Line number is numeric (not user-controlled free text); still sanitize the joined form.
+    return sanitizeSummaryText(`${file}:${line}`).slice(0, 140);
+  }
+  return file;
+}
+
+/**
+ * Build a single-line detail cell for one finding (path, fingerprint, message).
+ * All user-derived fields run through sanitizeSummaryText / path safety checks.
+ * @param {object} f finding
+ * @returns {string}
+ */
+function formatFindingDetail(f) {
+  const parts = [];
+  const loc = formatFindingLocation(f);
+  if (loc) parts.push(loc);
+  if (f?.fp) parts.push(sanitizeSummaryText(f.fp).slice(0, 80));
+  if (f?.message) parts.push(sanitizeSummaryText(f.message).slice(0, 120));
+  if (f?.authId) parts.push(sanitizeSummaryText(`auth ${f.authId}`).slice(0, 60));
+  return parts.join(" · ").slice(0, LINE_CAP);
+}
+
+/**
+ * Compact, sanitized remediation text for one finding.
+ * Prefers paste-ready value while staying size-bounded.
+ * Credential-shaped finding paths are stripped from free text before redaction
+ * so remediation cannot re-leak them as fake-redacted filenames.
+ * @param {object} f finding with optional remediation: string[]
+ * @returns {string} multi-line sanitized remediation or empty
+ */
+function formatFindingRemediation(f) {
+  if (!f || !Array.isArray(f.remediation) || f.remediation.length === 0) return "";
+  const unsafeFile =
+    f.file && typeof f.file === "string" && isUnsafePathForSummary(f.file) ? f.file : "";
+  const out = [];
+  let chars = 0;
+  for (const raw of f.remediation) {
+    if (out.length >= REMEDIATION_LINES_PER_FINDING) break;
+    let pre = String(raw ?? "");
+    // Omit credential-shaped finding path from free text (never fake-redact it).
+    if (unsafeFile) pre = pre.split(unsafeFile).join(PATH_OMITTED);
+    const line = sanitizeSummaryText(pre).replace(/\n/g, " ").trim();
+    if (!line) continue;
+    const clipped = line.slice(0, 200);
+    if (chars + clipped.length > REMEDIATION_CHARS_PER_FINDING) {
+      const room = REMEDIATION_CHARS_PER_FINDING - chars;
+      if (room > 20) out.push(clipped.slice(0, room) + "…");
+      break;
+    }
+    out.push(clipped);
+    chars += clipped.length;
+  }
+  return out.join("\n");
+}
+
+/** Escape pipes/newlines so table cells cannot break markdown structure. */
+function escTableCell(t) {
+  return String(t).replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
 
 /**
  * Strip C0 control characters, neutralize Markdown images / raw HTML /
@@ -94,7 +188,19 @@ export function buildSummaryMarkdown(o) {
   lines.push(`**${verdict}** · exit \`${exitCode}\`${version ? ` · CLI \`${version}\`` : ""}`);
   lines.push("");
 
-  const interesting = checks.filter((c) => c && (c.status === "fail" || c.status === "warn"));
+  // Blocking-first: fail before warn; stable within each status (input order).
+  const interesting = checks
+    .filter((c) => c && (c.status === "fail" || c.status === "warn"))
+    .slice()
+    .sort((a, b) => {
+      if (a.status === b.status) return 0;
+      if (a.status === "fail") return -1;
+      return 1;
+    });
+
+  /** @type {Array<{label: string, loc: string, text: string}>} */
+  const remediationBlocks = [];
+
   if (interesting.length === 0) {
     if (verdict === "GO") {
       lines.push("All applicable blocking checks clear.");
@@ -106,32 +212,73 @@ export function buildSummaryMarkdown(o) {
   } else {
     lines.push("| Status | Check | Detail |");
     lines.push("| --- | --- | --- |");
-    let n = 0;
+    let checksShown = 0;
+    let findingsShown = 0;
+    let checksOmitted = 0;
+
     for (const c of interesting) {
-      if (n >= CHECK_CAP) {
-        lines.push(`| … | … | +${interesting.length - CHECK_CAP} more (see logs) |`);
+      if (checksShown >= CHECK_CAP || findingsShown >= FINDING_CAP) {
+        checksOmitted = interesting.length - checksShown;
         break;
       }
       const status = c.status === "fail" ? "FAIL" : "WARN";
       const label = sanitizeSummaryText(c.label || "check").slice(0, 80);
-      let detail = sanitizeSummaryText(c.detail || "").slice(0, LINE_CAP);
-      // Prefer a single structured finding path when safe (no credential-shaped names).
-      const f0 = Array.isArray(c.findings) && c.findings[0] ? c.findings[0] : null;
-      if (f0) {
-        const parts = [];
-        if (f0.file && !isUnsafePathForSummary(f0.file)) {
-          parts.push(sanitizeSummaryText(f0.file).slice(0, 120));
-        } else if (f0.file && isUnsafePathForSummary(f0.file)) {
-          parts.push("(path omitted — credential-shaped name)");
-        }
-        if (f0.fp) parts.push(sanitizeSummaryText(f0.fp).slice(0, 80));
-        if (f0.message) parts.push(sanitizeSummaryText(f0.message).slice(0, 120));
-        if (parts.length) detail = parts.join(" · ").slice(0, LINE_CAP);
+      const findings = Array.isArray(c.findings) ? c.findings.filter(Boolean) : [];
+
+      if (findings.length === 0) {
+        const detail = sanitizeSummaryText(c.detail || "").slice(0, LINE_CAP);
+        lines.push(`| ${status} | ${escTableCell(label)} | ${escTableCell(detail)} |`);
+        checksShown += 1;
+        continue;
       }
-      // Escape pipes so table cells cannot break markdown structure.
-      const esc = (t) => String(t).replace(/\|/g, "\\|").replace(/\n/g, " ");
-      lines.push(`| ${status} | ${esc(label)} | ${esc(detail)} |`);
-      n += 1;
+
+      const perCheckRoom = Math.min(FINDINGS_PER_CHECK, FINDING_CAP - findingsShown);
+      const toShow = findings.slice(0, perCheckRoom);
+      for (const f of toShow) {
+        const detail = formatFindingDetail(f) || sanitizeSummaryText(c.detail || "").slice(0, LINE_CAP);
+        lines.push(`| ${status} | ${escTableCell(label)} | ${escTableCell(detail)} |`);
+        findingsShown += 1;
+
+        // Collect remediation (bounded) for a follow-on section.
+        if (remediationBlocks.length < REMEDIATION_FINDING_CAP) {
+          const rem = formatFindingRemediation(f);
+          if (rem) {
+            const loc = formatFindingLocation(f) || label;
+            remediationBlocks.push({ label, loc, text: rem });
+          }
+        }
+      }
+      const omittedHere = findings.length - toShow.length;
+      if (omittedHere > 0) {
+        lines.push(
+          `| ${status} | ${escTableCell(label)} | ${escTableCell(`+${omittedHere} more finding(s) (see logs)`)} |`,
+        );
+      }
+      checksShown += 1;
+    }
+
+    if (checksOmitted > 0) {
+      lines.push(`| … | … | +${checksOmitted} more check(s) (see logs) |`);
+    } else if (findingsShown >= FINDING_CAP) {
+      // Cap hit mid-list while checks remain — note without inventing a count of remaining findings.
+      const remainingChecks = interesting.length - checksShown;
+      if (remainingChecks > 0) {
+        lines.push(`| … | … | +${remainingChecks} more check(s) (see logs) |`);
+      }
+    }
+  }
+
+  // Paste-ready / smallest-safe-next-edit remediation (sanitized, size-capped).
+  if (remediationBlocks.length > 0) {
+    lines.push("");
+    lines.push("**Remediation** (paste-ready where available)");
+    for (const block of remediationBlocks) {
+      const heading = sanitizeSummaryText(`${block.label} · ${block.loc}`).slice(0, 160);
+      lines.push(`- ${heading}`);
+      for (const rl of block.text.split("\n")) {
+        // Indent as preformatted-ish prose; keep pipes safe outside tables.
+        lines.push(`  ${rl}`);
+      }
     }
   }
 
@@ -148,7 +295,14 @@ export function buildSummaryMarkdown(o) {
     lines.push(`[Workflow run](${runUrl})`);
   }
   lines.push("");
-  return lines.join("\n");
+
+  let body = lines.join("\n");
+  if (body.length > BODY_CHAR_CAP) {
+    const note = "\n\n_…summary truncated for size (see workflow logs / code scanning)._\n";
+    const keep = Math.max(0, BODY_CHAR_CAP - note.length);
+    body = body.slice(0, keep) + note;
+  }
+  return body;
 }
 
 /** Narrowly known default Actions bot identity (never arbitrary `[bot]` accounts). */
