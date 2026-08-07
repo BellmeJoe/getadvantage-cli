@@ -55,7 +55,15 @@ import { runMcp } from "./mcp.mjs";
 import { runFanOut, runFanIn } from "./fanout.mjs";
 import { runArchitecture } from "./architecture.mjs";
 import { runDemo } from "./demo.mjs";
-import { envReportOn, reportRun, lanesForIngest, ciDefaultBaseRef, runLogin, runLogout } from "./report.mjs";
+import {
+  envReportOn,
+  reportRun,
+  reportDryRun,
+  lanesForIngest,
+  ciDefaultBaseRef,
+  runLogin,
+  runLogout,
+} from "./report.mjs";
 import { runGithubAction } from "./action.mjs";
 import { buildSarif, writeSarifFile } from "./sarif.mjs";
 import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
@@ -246,6 +254,12 @@ ${c.bold("Flags")}
                           account. Also enabled by GETADVANTAGE_REPORT=1. Needs a key (env
                           GETADVANTAGE_API_KEY or ${c.cyan("login")}); endpoint override: GETADVANTAGE_API_URL.
                           Without --report, nothing ever leaves your machine.
+  --report-dry-run        (${c.cyan("check")} + ${c.cyan("fan-in")}) Transparency mode: build the exact body --report
+                          would POST, print a one-screen summary (project/ref, verdict, checks /
+                          findings with file:line · fp · authId · remediation) plus the full JSON,
+                          endpoint, byte size, and whether a key resolved (source only — never the
+                          key). ${c.bold("Nothing is sent")} — no network call. Exit code stays the gate's
+                          own verdict. Wins over --report when both are passed.
   --report-required       Reporting is best-effort by default (a failed post never changes the gate
                           verdict / exit code). This flag makes a failed post exit non-zero. Implies
                           --report.
@@ -451,7 +465,7 @@ async function main() {
   if (cmd === "check") {
     const GATE_FLAGS = new Set([
       "build", "base-ref", "no-overview", "no-brief-check", "json", "ci",
-      "report", "report-required", "sarif", "help", "version",
+      "report", "report-dry-run", "report-required", "sarif", "help", "version",
       // Explicit only — never default, never from repo config. Invisible-mode
       // hooks pass this so agent/commit triggers omit Dirty-tree (with disclosure).
       "agent-trigger",
@@ -507,7 +521,9 @@ async function main() {
   // platform. --report-required implies --report and makes a FAILED post exit
   // non-zero; otherwise reporting is best-effort and the gate verdict alone
   // owns the exit code (a network hiccup must not turn a GO into a failed CI
-  // step).
+  // step). --report-dry-run is transparency-only: same body, no network; it
+  // wins over --report when both are set so nothing is posted by accident.
+  const reportDryRunWanted = !!flags["report-dry-run"];
   const reportWanted = !!flags.report || !!flags["report-required"] || envReportOn();
   const reportRequired = !!flags["report-required"];
 
@@ -587,7 +603,10 @@ async function main() {
       generatedAt: new Date().toISOString(),
     };
     let finalExit = exitCode;
-    if (reportWanted) {
+    if (reportDryRunWanted) {
+      // Transparency only — never POSTs, even when combined with --report.
+      reportDryRun({ cwd, kind: "check", doc });
+    } else if (reportWanted) {
       const rep = await reportRun({ cwd, kind: "check", doc, required: reportRequired });
       if (!rep.ok && reportRequired) finalExit = finalExit || 1;
     }
@@ -743,7 +762,15 @@ async function main() {
       generatedAt: new Date().toISOString(),
     };
     let finalExit = exitCode;
-    if (reportWanted) {
+    if (reportDryRunWanted) {
+      // Transparency only — never POSTs, even when combined with --report.
+      reportDryRun({
+        cwd,
+        kind: "fan-in",
+        doc,
+        lanes: lanesForIngest(report.lanes),
+      });
+    } else if (reportWanted) {
       const rep = await reportRun({
         cwd,
         kind: "fan-in",

@@ -49,6 +49,9 @@
 //  12. marker-dir back-compat       — legacy .ship-safe/ read; new writes → .getadvantage/
 //  13. --report connector           — opt-in POST matches the ingest contract
 //                                     (hermetic mock server); nothing sent without it
+//  13b. --report-dry-run transparency — zero network; body == buildRunBody();
+//                                     key never printed; cold clean no key OK;
+//                                     oversize stub honest; --json still pure
 //  14. architecture scanner         — oversized + duplicated files flagged with the
 //                                     right signals; a small repo stays quiet; the
 //                                     check advisory never changes the verdict
@@ -2358,6 +2361,233 @@ scenario("--report: opt-in POST matches the ingest contract; nothing sent withou
     assert.ok(r1.stderr.includes(`http://127.0.0.1:${port}/r/tok_t1`), r1.stderr);
     // HONESTY: verdict + metadata only — the repo's source never rides along.
     assert.ok(!q.body.includes("hello from sample"), "source code must never be sent");
+  } finally {
+    server.close();
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13b. --report-dry-run transparency — show what would leave; send nothing
+// ---------------------------------------------------------------------------
+
+/** Extract the compact JSON body printed between dry-run markers. */
+function extractReportBody(text) {
+  const m = String(text).match(/--- report body \((\d+) bytes\) ---\r?\n([\s\S]*?)\r?\n--- end report body ---/);
+  assert.ok(m, `expected --- report body (N bytes) --- markers in output:\n${text.slice(0, 2000)}`);
+  return { bytes: Number(m[1]), raw: m[2] };
+}
+
+scenario("--report-dry-run: zero requests; --report still posts exactly one (hostile mock)", async () => {
+  const base = freshBase();
+  const { createServer } = await import("node:http");
+  const requests = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        auth: req.headers.authorization,
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "run_dry", url: `http://127.0.0.1:${server.address().port}/r/tok_dry` }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const repo = scaffold(base);
+    g(["remote", "add", "origin", "git@github.com:acme/widget.git"], repo);
+    // Assembled at runtime so this test file never trips the secret scanner.
+    const key = ["adv", "live", "d7y2r9u4n1k8m3p6q0st"].join("_");
+    const env = { GETADVANTAGE_API_URL: `http://127.0.0.1:${port}`, GETADVANTAGE_API_KEY: key };
+
+    // Dry-run alone: gate runs, transparency prints, ZERO network requests.
+    const rd = await runAsync(["check", "--ci", "--report-dry-run", "--json"], repo, env);
+    assert.equal(rd.code, 0, rd.stderr);
+    assert.equal(requests.length, 0, "dry-run must never POST");
+    const dryOut = rd.stdout + rd.stderr;
+    assert.ok(/report dry-run/i.test(dryOut) && /nothing is sent/i.test(dryOut), dryOut.slice(0, 1500));
+    assert.ok(/Never sent/i.test(dryOut), "must disclose what never leaves");
+    assert.ok(/API key: resolved from env/i.test(dryOut), dryOut.slice(0, 1500));
+    // Dry-run + --report: dry-run wins — still zero requests.
+    const both = await runAsync(["check", "--ci", "--report", "--report-dry-run", "--json"], repo, env);
+    assert.equal(both.code, 0, both.stderr);
+    assert.equal(requests.length, 0, "dry-run must win over --report (no POST)");
+
+    // Live --report (no dry-run): exactly one POST (contract still intact).
+    const live = await runAsync(["check", "--ci", "--report", "--json"], repo, env);
+    assert.equal(live.code, 0, live.stderr);
+    assert.equal(requests.length, 1, "exactly one POST with plain --report");
+    assert.equal(requests[0].url, "/api/v1/runs");
+    assert.equal(requests[0].auth, `Bearer ${key}`);
+  } finally {
+    server.close();
+    cleanup(base);
+  }
+});
+
+scenario("--report-dry-run: API key string nowhere in output (secret findings fixture)", async () => {
+  const base = freshBase();
+  const { createServer } = await import("node:http");
+  const requests = [];
+  const server = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      requests.push(1);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "x", url: "http://127.0.0.1/r/x" }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    // Planted secret (findings fixture) + reporting API key — both assembled at runtime.
+    const planted = ["adv", "live", "x9k2m4p7q1r8s3t6u0vw"].join("_");
+    const apiKey = ["adv", "live", "k7f2m9x4p1q8r3s6t0uv"].join("_");
+    write(repo, "config.js", `export const KEY = "${planted}";\n`);
+    write(repo, "package.json", JSON.stringify({ name: "leaky", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: leaky repo");
+
+    const env = {
+      GETADVANTAGE_API_URL: `http://127.0.0.1:${port}`,
+      GETADVANTAGE_API_KEY: apiKey,
+      GETADVANTAGE_CONFIG_DIR: path.join(base, "empty-cfg"),
+    };
+    const r = await runAsync(["check", "--report-dry-run", "--json"], repo, env);
+    assert.equal(r.code, 1, "planted secret must keep the gate at NO-GO");
+    assert.equal(requests.length, 0, "dry-run must not POST even with a key");
+    const all = r.stdout + r.stderr;
+    assert.ok(!all.includes(apiKey), "API key must never appear in dry-run output");
+    assert.ok(!all.includes(planted), "planted secret must never appear (fingerprint only)");
+    assert.ok(/report dry-run/i.test(all), all.slice(0, 1200));
+    assert.ok(/Findings that would leave|Secret scan/i.test(all), all.slice(0, 2000));
+    // Machine JSON on stdout still valid.
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    assert.equal(doc.exitCode, 1);
+  } finally {
+    server.close();
+    cleanup(base);
+  }
+});
+
+scenario("--report-dry-run: printed JSON body byte-identical to buildRunBody() incl. oversize stub", async () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    g(["remote", "add", "origin", "https://github.com/acme/widget.git"], repo);
+    const cfgDir = path.join(base, "cfg-none");
+    mkdirSync(cfgDir, { recursive: true });
+
+    // --- CLI path: dry-run body must match buildRunBody(doc) exactly ----------
+    const r = run(["check", "--report-dry-run", "--json"], repo, {
+      GETADVANTAGE_CONFIG_DIR: cfgDir,
+    });
+    assert.equal(r.code, 0, r.stderr);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const human = r.stderr; // --json routes human/preview to stderr
+    const { bytes, raw } = extractReportBody(human);
+
+    const { buildRunBody, reportDryRun, resolveKeySource } = await import(
+      pathToFileURL(path.join(__dirname, "..", "report.mjs")).href
+    );
+    // Match the child's env isolation (buildEnv strips GITHUB_* / GETADVANTAGE_*).
+    const saved = {};
+    for (const k of Object.keys(process.env)) {
+      if (k.startsWith("GITHUB_") || k.startsWith("GETADVANTAGE_")) {
+        saved[k] = process.env[k];
+        delete process.env[k];
+      }
+    }
+    process.env.GETADVANTAGE_CONFIG_DIR = cfgDir;
+    try {
+      const expected = buildRunBody({ cwd: repo, kind: "check", doc });
+      const expectedRaw = JSON.stringify(expected);
+      assert.equal(raw, expectedRaw, "printed body must be byte-identical to buildRunBody()");
+      assert.equal(bytes, Buffer.byteLength(expectedRaw, "utf8"));
+      assert.equal(resolveKeySource(), "none");
+
+      // --- Oversize stub: unit-level, same markers + byte identity ------------
+      const hugeExtra = "x".repeat(300 * 1024);
+      const hugeDoc = {
+        command: "check",
+        verdict: "GO",
+        exitCode: 0,
+        checks: [{ status: "pass", label: "Pad", detail: hugeExtra, extra: [] }],
+        generatedAt: "2026-01-01T00:00:00.000Z",
+      };
+      const stubBody = buildRunBody({ cwd: repo, kind: "check", doc: hugeDoc });
+      assert.equal(stubBody.payload.truncated, true, "buildRunBody must emit the oversize stub");
+      const stubRaw = JSON.stringify(stubBody);
+
+      const lines = [];
+      const origLog = console.log;
+      console.log = (...args) => {
+        lines.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
+      };
+      try {
+        const ret = reportDryRun({ cwd: repo, kind: "check", doc: hugeDoc });
+        assert.equal(ret.bytes, Buffer.byteLength(stubRaw, "utf8"));
+        assert.equal(ret.body.payload.truncated, true);
+      } finally {
+        console.log = origLog;
+      }
+      const captured = lines.join("\n");
+      assert.ok(/truncated stub|truncated/i.test(captured), captured.slice(0, 1500));
+      const extracted = extractReportBody(captured);
+      assert.equal(extracted.raw, stubRaw, "oversize dry-run body must match the stub byte-for-byte");
+    } finally {
+      for (const k of Object.keys(process.env)) {
+        if (k.startsWith("GITHUB_") || k.startsWith("GETADVANTAGE_")) delete process.env[k];
+      }
+      Object.assign(process.env, saved);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("--report-dry-run: cold clean repo, no key — exit 0, transparency text, nothing sent, no fatal noise", async () => {
+  const base = freshBase();
+  const { createServer } = await import("node:http");
+  const requests = [];
+  const server = createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      requests.push(1);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const repo = scaffold(base);
+    const cfgDir = path.join(base, "no-key-cfg");
+    mkdirSync(cfgDir, { recursive: true });
+    const env = {
+      GETADVANTAGE_API_URL: `http://127.0.0.1:${port}`,
+      GETADVANTAGE_CONFIG_DIR: cfgDir,
+      // deliberately no GETADVANTAGE_API_KEY
+    };
+    const r = await runAsync(["check", "--report-dry-run"], repo, env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(requests.length, 0, "nothing may be sent without a live --report");
+    const all = r.stdout + r.stderr;
+    assert.ok(/report dry-run/i.test(all) && /nothing is sent/i.test(all), all.slice(0, 1500));
+    assert.ok(/Never sent/i.test(all), all.slice(0, 1500));
+    assert.ok(/API key: not resolved/i.test(all), all.slice(0, 1500));
+    assert.ok(/--- report body \(\d+ bytes\) ---/.test(all), "body markers present");
+    assert.ok(!/fatal:/i.test(all), "no fatal: noise on cold clean dry-run");
+    // Best-effort: avoid error: noise from the dry-run path (gate GO is quiet).
+    assert.ok(!/\berror:\s/i.test(all), `unexpected error: noise:\n${all.slice(0, 2000)}`);
   } finally {
     server.close();
     cleanup(base);

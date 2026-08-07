@@ -421,6 +421,33 @@ On success the CLI prints the run's report URL: `→ verdict posted: https://…
   fail your CI. Pass `--report-required` if you *want* a failed post to exit
   non-zero.
 
+### See what would leave (`--report-dry-run`)
+
+Transparency mode: build the **exact** POST body `--report` would send (via the
+same `buildRunBody()` path, including the oversize stub when the payload would
+exceed the ingest cap), print a one-screen human summary and the full JSON, and
+**make no network call**. Exit code stays the gate's own GO / NO-GO.
+
+```bash
+npx getadvantage check --report-dry-run           # preview only — nothing is sent
+npx getadvantage check --report --report-dry-run  # dry-run wins: still nothing is sent
+npx getadvantage check --report-dry-run --json    # human preview on stderr; machine JSON on stdout
+```
+
+The preview includes:
+
+- **Summary:** project/ref, verdict, exit code, check-result families, findings
+  with `file:line`, fingerprint (`fp`), `authId`, and remediation text
+- **Full JSON body** that would be POSTed (machine-parseable between
+  `--- report body (N bytes) ---` / `--- end report body ---` markers)
+- **Resolved endpoint** and **byte size**
+- **Whether a key resolved** and from which source (`env` / `config` / none) —
+  **never the key itself**
+
+**Never shown / never sent:** source code, diffs, files, the API key, or
+environment variables. Use this when you want to verify the report contract
+before enabling live `--report` in CI.
+
 ### In CI (GitHub Actions)
 
 **One-copy install** (generated workflow):

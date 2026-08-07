@@ -1,8 +1,10 @@
-// getAdvantage CLI — THE CONNECTOR (`--report` · `login` · `logout`).
+// getAdvantage CLI — THE CONNECTOR (`--report` · `--report-dry-run` · `login` · `logout`).
 //
 // Opt-in bridge from the local gate to your getAdvantage account: after `check`
 // or `fan-in` computes its verdict, `--report` (or GETADVANTAGE_REPORT=1) POSTs
 // the RUN REPORT to `POST {api}/api/v1/runs` with your `adv_live_…` key.
+// `--report-dry-run` builds the same body and prints it (plus a human summary)
+// with no network call — transparency for what would leave the machine.
 //
 // HONESTY (hard rule — this is the brand's core promise, re-scoped precisely):
 //   • LOCAL BY DEFAULT. No command ever touches the network unless you
@@ -14,6 +16,7 @@
 //   • Reporting is BEST-EFFORT: a network hiccup must not turn a GO into a
 //     failed CI step. The gate's verdict stays the exit code unless you
 //     explicitly pass `--report-required`.
+//   • Dry-run never posts, even when combined with `--report`.
 //
 // Key resolution (never printed back, never logged):
 //   env GETADVANTAGE_API_KEY  >  ~/.getadvantage/config.json ({ apiKey, apiUrl? })
@@ -78,6 +81,17 @@ export function resolveApiBase() {
 /** The API key: env > stored config. Returns "" when logged out. */
 export function resolveApiKey() {
   return process.env.GETADVANTAGE_API_KEY || readUserConfig().apiKey || "";
+}
+
+/**
+ * Where the API key resolved from — for transparency messaging only.
+ * Never returns or prints the key itself.
+ * @returns {"env"|"config"|"none"}
+ */
+export function resolveKeySource() {
+  if (process.env.GETADVANTAGE_API_KEY) return "env";
+  if (readUserConfig().apiKey) return "config";
+  return "none";
 }
 
 /** Is reporting switched on by environment (GETADVANTAGE_REPORT=1)? */
@@ -201,6 +215,132 @@ export function buildRunBody({ cwd, kind, doc, lanes }) {
     };
   }
   return body;
+}
+
+/**
+ * Transparency mode (`--report-dry-run`): build the exact body `--report` would
+ * POST via `buildRunBody()`, print a one-screen human summary + the full JSON
+ * body, resolved endpoint, byte size, and whether a key resolved (source only
+ * — never the key). Makes no network call.
+ *
+ * Machine-parseable body block (for tests / tooling):
+ *   --- report body (N bytes) ---
+ *   <exact JSON.stringify of the POST body>
+ *   --- end report body ---
+ *
+ * @param {object} o
+ * @param {string} o.cwd
+ * @param {"check"|"fan-in"|"deploy"} o.kind
+ * @param {object} o.doc
+ * @param {Array}  [o.lanes]
+ * @returns {{ ok: true, body: object, bytes: number, endpoint: string, keySource: "env"|"config"|"none" }}
+ */
+export function reportDryRun(o) {
+  const base = resolveApiBase();
+  const keySource = resolveKeySource();
+  const body = buildRunBody({ cwd: o.cwd, kind: o.kind, doc: o.doc, lanes: o.lanes });
+  // Compact JSON — identical serialization to the live POST path.
+  const raw = JSON.stringify(body);
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const endpoint = `${base}/api/v1/runs`;
+
+  console.log(c.gray("  → report dry-run — show what would leave this machine (nothing is sent)"));
+  console.log("");
+  console.log(c.bold("  What would leave"));
+
+  const proj = body.project || {};
+  const projLabel =
+    proj.repo && proj.name && proj.name !== proj.repo
+      ? `${proj.repo} (${proj.name})`
+      : proj.repo || proj.name || "—";
+  console.log(`  Project: ${projLabel}`);
+  if (body.ref && Object.keys(body.ref).length > 0) {
+    const bits = [];
+    if (body.ref.branch) bits.push(body.ref.branch);
+    if (body.ref.sha) bits.push(String(body.ref.sha).slice(0, 12));
+    if (body.ref.ciUrl) bits.push(body.ref.ciUrl);
+    console.log(`  Ref: ${bits.join(" · ") || "—"}`);
+  } else {
+    console.log("  Ref: —");
+  }
+  console.log(`  Kind: ${body.kind}`);
+  console.log(`  Verdict: ${body.verdict} · exitCode ${body.exitCode}`);
+
+  const payload = body.payload || {};
+  if (payload.truncated) {
+    console.log(c.yellow("  Payload: truncated stub (full report exceeded the ingest size cap)"));
+    if (payload.note) console.log(`    ${payload.note}`);
+  } else if (Array.isArray(payload.checks)) {
+    console.log("  Check results that would leave:");
+    for (const ch of payload.checks) {
+      const n = Array.isArray(ch.findings) ? ch.findings.length : 0;
+      const findBit = n > 0 ? ` · ${n} finding${n === 1 ? "" : "s"}` : "";
+      const detail = ch.detail ? ` — ${String(ch.detail).slice(0, 140)}` : "";
+      console.log(`    · ${ch.label}: ${ch.status}${findBit}${detail}`);
+    }
+    const allFindings = [];
+    for (const ch of payload.checks) {
+      if (Array.isArray(ch.findings)) {
+        for (const f of ch.findings) allFindings.push(f);
+      }
+    }
+    if (allFindings.length > 0) {
+      console.log("  Findings that would leave (file:line · fp · authId · remediation):");
+      for (const f of allFindings.slice(0, 40)) {
+        const loc = f.file
+          ? `${f.file}${typeof f.startLine === "number" ? `:${f.startLine}` : ""}`
+          : "—";
+        const label = f.label || f.ruleId || "finding";
+        const fpBit = f.fp ? `: ${f.fp}` : "";
+        const authBit = f.authId ? ` · auth ${f.authId}` : "";
+        console.log(`    · ${loc} → ${label}${fpBit}${authBit}`);
+        if (Array.isArray(f.remediation)) {
+          for (const line of f.remediation.slice(0, 8)) {
+            console.log(`      ${line}`);
+          }
+        }
+      }
+      if (allFindings.length > 40) {
+        console.log(`    … +${allFindings.length - 40} more findings`);
+      }
+    }
+  }
+
+  if (Array.isArray(body.lanes) && body.lanes.length > 0) {
+    console.log("  Lane outcomes that would leave:");
+    for (const l of body.lanes) {
+      const detail = l.detail ? ` — ${String(l.detail).slice(0, 120)}` : "";
+      console.log(`    · ${l.lane}: ${l.status}${detail}`);
+    }
+  } else if (Array.isArray(payload.lanes) && payload.lanes.length > 0) {
+    console.log("  Lane outcomes that would leave:");
+    for (const l of payload.lanes) {
+      const name = l.lane ?? l.branch ?? "?";
+      const status = l.status || l.outcome || "?";
+      const detail = l.detail ? ` — ${String(l.detail).slice(0, 120)}` : "";
+      console.log(`    · ${name}: ${status}${detail}`);
+    }
+  }
+
+  console.log("");
+  console.log(c.gray("  Never sent: source code · diffs · files · API key · environment"));
+  console.log("");
+  console.log(`  Endpoint: ${endpoint}`);
+  console.log(`  Body size: ${bytes} bytes`);
+  if (keySource === "env") {
+    console.log("  API key: resolved from env (value never shown)");
+  } else if (keySource === "config") {
+    console.log("  API key: resolved from config (value never shown)");
+  } else {
+    console.log("  API key: not resolved (a live --report would send nothing)");
+  }
+  console.log("");
+  // Markers deliberately plain ASCII so tests extract the body without ambiguity.
+  console.log(`--- report body (${bytes} bytes) ---`);
+  console.log(raw);
+  console.log("--- end report body ---");
+
+  return { ok: true, body, bytes, endpoint, keySource };
 }
 
 /** POST the run. Never throws — returns { status, json } or { status: 0, error }. */
