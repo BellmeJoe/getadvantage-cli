@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.12.1 LIVE**
+# Social / advertising pack — getadvantage **0.12.2 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,25 +6,27 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Live:** **getadvantage@0.12.1** (2026-08-05). Train-scoped independent
-> **REVIEW_GO (release-eligible)** at product fingerprint `4b69b51`; 0 open
-> P1/P2/P3. Registry `gitHead` = `e2f8665` (release commit), tags `v0.12.1` +
-> floating `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1),
-> cold published package verified (clean GO **~4.3–7.2s** across logged cold
-> paths: 7.24s release routine / ~5.7s independent audit / 4.34s 2026-08-06
-> dispatch; no Supabase/RLS line; zero raw git/fatal noise). Actions run
-> [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656)
-> success. Prefer leading with the eight core GO/NO-GO claims below; Intent
-> remains the trust-layer follow-on — always *scope verified; semantic
-> correctness not proven*.
+> **Live:** **getadvantage@0.12.2** (2026-08-07). Independent **REVIEW_GO
+> (lane-scoped)** at product fingerprint `653a693`; 0 open P1/P2. Registry
+> `gitHead` = _TBD after CI publish_ (release commit), tags `v0.12.2` + floating
+> `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.2),
+> cold published package verified _TBD after publish_. Actions run
+> _TBD after CI_ success. Prefer leading with the eight core GO/NO-GO claims
+> below; Intent remains the trust-layer follow-on — always *scope verified;
+> semantic correctness not proven*.
 >
-> **What 0.12.1 ships (patch — legibility only):** denser human `check` output so
-> the verdict sits on a short first screen, plus symlink-escape mode `120000`
-> regression coverage. Measured: **CLI `check` 109 → 56 lines** (verdict header
-> 106 → 53); **site `check` 143 → 82 lines** (verdict header 140 → 79). No new
-> check, no changed verdict, no changed exit code; `--json` findings[] and SARIF
-> unchanged. **Not an adoption event** — named evaluators / installs / first
-> gates / week-two reuse / retained external teams remain **0**.
+> **What 0.12.2 ships (patch — Action PR/job summary only):** the GitHub Action
+> PR / job summary now lists every finding — not only the first — each with its
+> `file:line` location and paste-ready remediation, blocking findings first
+> (bounded by published caps). Presentation only — no new check, no changed
+> verdict, no changed exit code; `--json` findings[] and SARIF unchanged; CLI
+> human `check` density unchanged from 0.12.1. **Not an adoption event** — named
+> evaluators / installs / first gates / week-two reuse / retained external teams
+> remain **0**.
+>
+> **Still live from 0.12.1:** denser human `check` output so the verdict sits on
+> a short first screen, plus symlink-escape mode `120000` regression coverage.
+> Measured: **CLI `check` 109 → 56 lines**; **site `check` 143 → 82 lines**.
 >
 > **Still live from 0.12.0:** `getadvantage init --claude-code` installs the gate
 > as an **automatic hook** so every Claude Code agent session is gated by
@@ -43,9 +45,9 @@
 > **Also still live (from 0.10.x):** Vite/React/Supabase **client orientation**
 > on `map` (Supabase SDK ≠ RLS seal); Intent Contract (`intent init` /
 > `intent check` / `check` when freeze trusted); first-party GitHub Action + PR
-> summary (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.12.1`); secret scan of
+> summary (`uses: BellmeJoe/getadvantage-cli@v1` or `@v0.12.2`); secret scan of
 > committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback: **getadvantage@0.11.1** / tag `v0.11.1` / `66ffb9b`.
+> Rollback: **getadvantage@0.12.1** / tag `v0.12.1` / `e2f8665`.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -58,12 +60,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.12.1` |
-| **Checkout** | Live **0.12.1** (legibility patch on invisible-mode stack: denser check output + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF) |
-| **Install** | `npx getadvantage` or `npx getadvantage@0.12.1` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.1) · Action `@v1` / `@v0.12.1` |
+| **npm (live)** | `getadvantage@0.12.2` |
+| **Checkout** | Live **0.12.2** (Action PR/job-summary findings density on the 0.12.1 legibility + invisible-mode stack: multi-finding summary + denser check output + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF) |
+| **Install** | `npx getadvantage` or `npx getadvantage@0.12.2` (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.2](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.2) · Action `@v1` / `@v0.12.2` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [30980794656](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/30980794656) success · product fingerprint `4b69b51` · release `e2f8665` · cold published path verified (2026-08-05/06, **~4.3–7.2s** GO exit 0 across logged runs: 7.24s / ~5.7s / 4.34s) · registry `gitHead` `e2f8665` · tags `v0.12.1` + `v1` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI _TBD after publish_ · product fingerprint `653a693` · release _TBD_ · cold published path _TBD_ · registry `gitHead` _TBD_ · tags `v0.12.2` + `v1` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -112,7 +114,7 @@ windows.
 | **Project brain** | `PROJECT-BRIEF.md` — any model starts cold. Notes preserved across refresh. | `brief` · `init` · `handoff` · `switch` |
 | **Safe fan-in** | Parallel agent lanes; land only what stays green **together**. Quarantine “green alone, red together.” | `fan-out` · `fan-in` · **`demo`** (wow) |
 | **CI** | Same gate on every PR. SARIF upload to code scanning on public repos (private needs Code Security + `actions: read`). Not a security seal. | `github-action` · `check --sarif` · publish pipeline runs tests + evidence |
-| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.12.1`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. | root `action.yml` · npm **0.12.1** · tags `v1`/`v0.12.1` |
+| **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (or `@v0.12.2`), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. **0.12.2:** multi-finding table rows with `file:line` + paste-ready remediation, blocking first (bounded caps). | root `action.yml` · npm **0.12.2** · tags `v1`/`v0.12.2` |
 | **Invisible mode (Claude Code)** | One command installs the gate as an **automatic hook** so every agent session is gated by default; writes in-repo proof receipt with **zero telemetry**. Cursor is **detect-and-refuse** (not automatic). | `npx getadvantage init --claude-code` · status/uninstall/bypass · receipt `.getadvantage/INVISIBLE-MODE.md` | product `fe9e2ad` · cold published activation ~11.3s · *scope verified; semantic correctness not proven* |
 
 ### D. Trust layer — advertise to builders who run agents (honest scope)
@@ -127,7 +129,7 @@ Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
 Commit only intent.json (dedicated freeze). After: intent check → every
 post-baseline change inside the human envelope? Fan-in also enforces the
 envelope on the combined tree when a freeze is present. Scope only — not
-semantics. (getadvantage@0.12.1 · LIVE)
+semantics. (getadvantage@0.12.2 · LIVE)
 ```
 
 ### E. Do **not** lead with (true but wrong first sentence)
@@ -236,9 +238,9 @@ If evidence is red, **do not post**.
 | `brief` / `handoff` / `init` / `switch` / `gauge` / `ledger` | Portable brain + session continuity |
 | `fan-out` / `fan-in` / `demo` | Parallel lanes + safe conductor |
 | `mcp` | tools: get_brief, refresh_brief, get_handoff, save_handoff, check, gauge, **map**, **architecture** |
-| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.12.0`) + SARIF upload path (**live 0.12.0**) |
+| `github-action` | CI workflow writer — first-party Action consumer (`uses: …@v1` or `@v0.12.2`) + SARIF upload path (**live 0.12.0+**) |
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
-| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.12.0** · `@v1` / `@v0.12.0`) |
+| First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live 0.12.2** · `@v1` / `@v0.12.2`; multi-finding density) |
 | `init --claude-code` | Invisible mode: automatic Claude Code hooks + receipt (**live 0.12.0**). Cursor = detect-and-refuse |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
