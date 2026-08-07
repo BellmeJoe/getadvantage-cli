@@ -8,12 +8,14 @@
 
 > **Live:** **getadvantage@0.12.2** (2026-08-07). Independent **REVIEW_GO
 > (lane-scoped)** at product fingerprint `653a693`; 0 open P1/P2. Registry
-> `gitHead` = _TBD after CI publish_ (release commit), tags `v0.12.2` + floating
-> `v1`, [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.2),
-> cold published package verified _TBD after publish_. Actions run
-> _TBD after CI_ success. Prefer leading with the eight core GO/NO-GO claims
-> below; Intent remains the trust-layer follow-on — always *scope verified;
-> semantic correctness not proven*.
+> `gitHead` = `1e451ac` (release commit), tags `v0.12.2` + floating `v1`,
+> [GitHub Release](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.2),
+> cold published package verified (clean GO **~5.0s** exit 0; no Supabase/RLS
+> line; zero raw `fatal:` noise). Actions run
+> [31153799756](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/31153799756)
+> success. Prefer leading with the eight core GO/NO-GO claims below; Intent
+> remains the trust-layer follow-on — always *scope verified; semantic
+> correctness not proven*.
 >
 > **What 0.12.2 ships (patch — Action PR/job summary only):** the GitHub Action
 > PR / job summary now lists every finding — not only the first — each with its
@@ -65,7 +67,7 @@ windows.
 | **Install** | `npx getadvantage` or `npx getadvantage@0.12.2` (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.12.2](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.12.2) · Action `@v1` / `@v0.12.2` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI _TBD after publish_ · product fingerprint `653a693` · release _TBD_ · cold published path _TBD_ · registry `gitHead` _TBD_ · tags `v0.12.2` + `v1` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [31153799756](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/31153799756) success · product fingerprint `653a693` · release `1e451ac` · cold published path verified (~5.0s GO exit 0) · registry `gitHead` `1e451ac` · tags `v0.12.2` + `v1` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
