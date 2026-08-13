@@ -71,7 +71,7 @@ windows.
 | **Install** | `npx getadvantage` or `npx getadvantage@0.13.0` (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.13.0](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.13.0) · Action `@v1` / `@v0.13.0` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · product fingerprint `cdb923c` · suite **230/230** · pack pre-bump **34 files / 330.8 kB / shasum `bbaab154…`** · tags `v0.13.0` + `v1` · registry / CI / cold path verified post-publish (see release record) |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [31679618395](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/31679618395) success · product fingerprint `cdb923c` · release `bdc8b04` · cold published path verified (~38.6s GO exit 0, 20 lines, 0 RLS) · registry `gitHead` `bdc8b04` · tags `v0.13.0` + `v1` · suite **230/230** · pack pre-bump **34 files / 330.8 kB / shasum `bbaab154…`** |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
