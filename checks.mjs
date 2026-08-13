@@ -540,8 +540,14 @@ export function checkSecrets(cwd) {
 
   // Display fingerprint is human-readable only; sha256 auth id is the
   // copy-paste allowlist identity (never the full secret).
+  // Prefer path:line on every finding/allowlist row when region is known;
+  // bare path otherwise (partial scans, missing region — never ":undefined").
+  const formatHitPath = (h) => {
+    const file = h.file || "";
+    return typeof h.startLine === "number" ? `${file}:${h.startLine}` : file;
+  };
   const hitLine = (h) =>
-    `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`;
+    `${formatHitPath(h)} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`;
 
   const allowedList = [...allowed.values()];
   const allowedNote =
@@ -573,7 +579,7 @@ export function checkSecrets(cwd) {
   const hitList = [...hits.values()];
   const lines = hitList.map(
     (h) =>
-      `${h.file} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`,
+      `${formatHitPath(h)} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`,
   );
   // Structured findings for SARIF (and optional --json consumers). Never carry
   // the raw match — only fingerprint, auth id, path, patternId, region.

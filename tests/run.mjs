@@ -2168,8 +2168,11 @@ scenario("paste-ready remediation: multi-finding density — every auth id named
     const human = `${secret.detail || ""}\n${extra.join("\n")}`;
 
     // Every finding still individually named with its own auth id (finding lines).
+    // Collapsed multi-finding remediation still carries file:line on each row.
     for (let i = 0; i < keys.length; i++) {
       assert.ok(human.includes(`src/key${i}.js`), `must name src/key${i}.js\n${human}`);
+      // One-line fixture → line 1; option-1 fix keeps file:line on every finding row.
+      assert.ok(human.includes(`src/key${i}.js:1`), `expected src/key${i}.js:1 on finding row\n${human}`);
       assert.ok(human.includes(auths[i]), `must name auth id for key${i}\n${human}`);
     }
     // Full secrets never echoed.
@@ -2186,6 +2189,13 @@ scenario("paste-ready remediation: multi-finding density — every auth id named
     assert.equal(escapeCount, 1, `Escape hatch must appear once in human extra, got ${escapeCount}\n${human}`);
     assert.ok(/Smallest safe next edit/i.test(human), human);
     assert.ok(/deliberate|tracked|reviewable|disclosed/i.test(human), human);
+    // Line-count ceiling: densify must not give density back (option-1 file:line
+    // adds characters, not lines). 5 finding rows + densified remediation block.
+    // Measured: extra.length === 24 for this five-key fixture; pin with headroom.
+    assert.ok(
+      extra.length <= 30,
+      `multi-finding human extra must stay densified (≤30 lines), got ${extra.length}\n${extra.join("\n")}`,
+    );
 
     // One merged paste-ready block carrying all auth ids (not five separate JSON docs).
     const snip = extractPasteReadyIgnoreSnippet(human);
@@ -2212,6 +2222,103 @@ scenario("paste-ready remediation: multi-finding density — every auth id named
       assert.ok(fSnip, `per-finding remediation JSON for ${f.file}`);
       assert.deepEqual(fSnip.secrets.ignore.hashes, [f.authId]);
     }
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Hostile: two-file / two-finding collapsed remediation must show file:line on EACH row
+// (0.13.x regression — multi-hit finding rows previously dropped startLine).
+scenario("paste-ready remediation: two-file two-finding each row carries file:line", () => {
+  const base = freshBase();
+  try {
+    const keyA = "sk_live_" + "t1w2o3f4i5l6e7a8a9a0a1a2aA";
+    const keyB = "sk_live_" + "t1w2o3f4i5l6e7b8b9b0b1b2bB";
+    const authA = hashOf(keyA);
+    const authB = hashOf(keyB);
+    assert.notEqual(authA, authB);
+
+    const repo = path.join(base, "two-file-line");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "two-file-line", version: "1.0.0", private: true }, null, 2) + "\n");
+    // Distinct line numbers so we assert more than a shared ":1".
+    write(repo, "src/alpha.js", `// pad\nexport const A = "${keyA}";\n`);
+    write(repo, "src/beta.js", `// 1\n// 2\nexport const B = "${keyB}";\n`);
+    commitAll(repo, "chore: two distinct secrets on different lines");
+
+    const r = run(["check"], repo);
+    assert.equal(r.code, 1, `two secrets must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const out = r.stdout + r.stderr;
+    // Human stdout: each finding row is path:line → label …
+    assert.ok(/src\/alpha\.js:2\s*→/.test(out), `alpha must be file:line on finding row\n${out}`);
+    assert.ok(/src\/beta\.js:3\s*→/.test(out), `beta must be file:line on finding row\n${out}`);
+    // Acceptance shape: ≥2 path:line tokens for js/txt/json.
+    const fileLineHits = out.match(/\.(js|txt|json):\d+/g) || [];
+    assert.ok(fileLineHits.length >= 2, `expected ≥2 file:line tokens, got ${fileLineHits.length}\n${out}`);
+    assert.ok(out.includes(authA), `auth A must surface\n${out}`);
+    assert.ok(out.includes(authB), `auth B must surface\n${out}`);
+    // Collapsed multi-hit header (no per-finding header lines); loc lives on rows.
+    assert.ok(
+      /Smallest safe next edit — 2 blocking secret finding/i.test(out),
+      `collapsed multi header expected\n${out}`,
+    );
+    assert.ok(!out.includes(keyA) && !out.includes(keyB), "full secrets must never be echoed");
+
+    // --json: structured findings keep startLine; human extra rows match path:line.
+    const rj = run(["check", "--json"], repo);
+    const doc = parseJson(rj);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.equal(secret.status, "fail");
+    const findings = secret.findings || [];
+    assert.ok(findings.length >= 2, `need 2 findings, got ${findings.length}`);
+    const fa = findings.find((f) => (f.file || "").includes("alpha"));
+    const fb = findings.find((f) => (f.file || "").includes("beta"));
+    assert.ok(fa && typeof fa.startLine === "number" && fa.startLine === 2, JSON.stringify(fa));
+    assert.ok(fb && typeof fb.startLine === "number" && fb.startLine === 3, JSON.stringify(fb));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/src\/alpha\.js:2\s*→/.test(extra), extra);
+    assert.ok(/src\/beta\.js:3\s*→/.test(extra), extra);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Hostile: finding without startLine (partial oversized scan) must render bare path —
+// never ":undefined" and never a dangling colon before the arrow.
+scenario("paste-ready remediation: no-startLine path-only fallback (no :undefined, no dangling colon)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "no-startline");
+    initRepo(repo);
+    const awsKey = "AKIA" + "9".repeat(16);
+    write(repo, "package.json", JSON.stringify({ name: "no-startline", version: "1.0.0", private: true }, null, 2) + "\n");
+    // Partial head+tail scan: region not attached (isPartial) → no startLine on hit.
+    write(repo, "big-log.txt", "x".repeat(5 * 1024 * 1024) + `\nAWS_KEY=${awsKey}\n`);
+    commitAll(repo, "chore: oversized partial-scan secret without region");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `partial-scan secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const findings = secret.findings || [];
+    const hit = findings.find((f) => (f.file || "").includes("big-log"));
+    assert.ok(hit, `must find big-log finding\n${JSON.stringify(findings)}`);
+    assert.ok(
+      hit.startLine === undefined || hit.startLine === null,
+      `partial scan must omit startLine, got ${hit.startLine}`,
+    );
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(extra.includes("big-log.txt"), `must name big-log.txt\n${extra}`);
+    // Path-only row: bare path then arrow — no :undefined / dangling colon.
+    assert.ok(
+      /big-log\.txt\s*→/.test(extra),
+      `expected bare path before arrow\n${extra}`,
+    );
+    assert.ok(!/big-log\.txt:undefined/.test(extra), `must not render :undefined\n${extra}`);
+    assert.ok(!/big-log\.txt:\s*→/.test(extra), `must not render dangling colon before arrow\n${extra}`);
+    assert.ok(!/:undefined\s*→/.test(extra), `no :undefined before arrow anywhere\n${extra}`);
+    assert.ok(!JSON.stringify(doc).includes(awsKey), "full secret must never be echoed");
   } finally {
     cleanup(base);
   }
@@ -11792,6 +11899,11 @@ scenario("invisible: cold install --claude-code + first gate + receipt + idempot
     // Stash contract measurement on global for the summary line.
     globalThis.__INV_ACTIVATION_S = elapsed;
 
+    // FU-1: separate wall-clock budget for the tail limbs (secret-scan gate,
+    // deliberate bypass, idempotent re-init). Measured on this lane: ~108s;
+    // budget 180s (~67% headroom). Not charged against the 60s activation contract.
+    const tTail0 = Date.now();
+
     // Secret fixture → NO-GO
     write(repo, "leak.js", 'const k = "sk_live_1234567890abcdefghijklmnop";\n');
     // Need it tracked/staged for secret scan of committed+staged? check scans committed and more.
@@ -11828,6 +11940,13 @@ scenario("invisible: cold install --claude-code + first gate + receipt + idempot
     const r2 = run(["init", "--claude-code"], repo);
     assert.equal(r2.code, 0, `re-init failed:\n${r2.stdout}\n${r2.stderr}`);
     assert.match(r2.stdout + r2.stderr, /already installed|nothing changed|gating/i);
+
+    const tailElapsed = (Date.now() - tTail0) / 1000;
+    assert.ok(
+      tailElapsed < 180,
+      `FU-1 tail limbs (secret-scan + bypass + re-init) <180s failed: ${tailElapsed.toFixed(1)}s`,
+    );
+    globalThis.__INV_TAIL_S = tailElapsed;
   } finally {
     cleanup(base);
   }
