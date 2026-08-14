@@ -437,16 +437,20 @@ npx getadvantage check --report-dry-run --json    # human preview on stderr; mac
 The preview includes:
 
 - **Summary:** project/ref, verdict, exit code, check-result families, findings
-  with `file:line`, fingerprint (`fp`), `authId`, and remediation text
+  with `file:line`, fingerprint (`fp`), `authId`, and whether remediation was
+  present (full paste-ready `secrets.ignore` stays on plain `check` above —
+  not re-printed inside the dry-run block)
 - **Full JSON body** that would be POSTed (machine-parseable between
   `--- report body (N bytes) ---` / `--- end report body ---` markers)
 - **Resolved endpoint** and **byte size**
 - **Whether a key resolved** and from which source (`env` / `config` / none) —
   **never the key itself**
 
-**Never shown / never sent:** source code, diffs, files, the API key, or
-environment variables. Use this when you want to verify the report contract
-before enabling live `--report` in CI.
+**Never shown** (and never in the report body): source code, diffs, files, the
+API key value, or environment variables. **Transport:** dry-run makes zero
+network calls. Live `--report` still sends the API key only as the
+`Authorization` bearer header (never printed). Use dry-run to verify the
+report contract before enabling live `--report` in CI.
 
 ### In CI (GitHub Actions)
 

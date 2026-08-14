@@ -49,9 +49,12 @@ that real CI time improves.
 
 ## Retained-team detector (the north-star measurement method)
 
-**LIVE 0.13.0** — invisible mode from `0.12.0`; legibility + Action summary
-density through `0.12.2`; `--report-dry-run` transparency mode shipped as
-`0.13.0` (minor — additive flag).
+**LIVE 0.13.1** (patch on 0.13.0) — invisible mode from `0.12.0`; legibility +
+Action summary density through `0.12.2`; `--report-dry-run` transparency mode
+from `0.13.0` (minor — additive flag). **0.13.1** only repairs human
+presentation/correctness: collapsed secret rows regain `file:line` when known;
+dry-run no longer emits truncated paste-ready JSON and scopes body vs transport
+for the API key. **No new check. Adoption metrics unchanged (all 0).**
 
 Retention is counted with **zero telemetry**, from public data only. Invisible
 mode writes an in-repo receipt (`.getadvantage/INVISIBLE-MODE.md`) whose stable
@@ -126,14 +129,18 @@ lane ships or is killed. Only one implementation lane may be open.
 7b. **Invisible mode** — `init --claude-code` installs the gate as an automatic
    hook so every agent session is gated by default; the hook writes the in-repo
    proof receipt that makes week-two reuse publicly countable with zero telemetry.
-   **Status (2026-08-13):** **LIVE 0.13.0** — invisible-mode product fingerprint
+   **Status (2026-08-14):** **LIVE 0.13.1** — invisible-mode product fingerprint
    **`fe9e2ad`** (0.12.0); train/legibility stack through **0.12.2**;
    `--report-dry-run` product fingerprint **`cdb923c`** (feat `472ca83` + test
-   rescope). Agent-trigger profile (`check --agent-trigger`) visibly omits
-   Dirty-tree on hooks only; plain `check` / `check --ci` still enforce
-   Dirty-tree. Cursor remains **detect-and-refuse**. `--report-dry-run` is
-   transparency only (preview exact report body; zero network; never print API
-   key value). Rollback: **0.12.2** / `v0.12.2` / `1e451ac`.
+   rescope); **0.13.1** presentation/correctness train fingerprints **`ce5c182`**
+   (collapsed secret-row `file:line`) + **`ec92722`** (dry-run density + paste-ready
+   JSON repair + body/transport key banner). Agent-trigger profile
+   (`check --agent-trigger`) visibly omits Dirty-tree on hooks only; plain
+   `check` / `check --ci` still enforce Dirty-tree. Cursor remains
+   **detect-and-refuse**. `--report-dry-run` is transparency only (preview exact
+   report body; zero network; never print API key value; live `--report` still
+   sends the key as `Authorization` bearer only). Rollback: **0.12.2** /
+   `v0.12.2` / `1e451ac` (with **0.13.0** / `v0.13.0` / `bdc8b04` intact).
 
 ### P2 — make proof portable and shareable
 
