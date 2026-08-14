@@ -285,7 +285,13 @@ export function reportDryRun(o) {
       }
     }
     if (allFindings.length > 0) {
+      // Header rows only — do not re-print remediation bodies. Plain `check`
+      // already printed paste-ready secrets.ignore above; re-printing here
+      // duplicated ~40% of the dry-run block and slice(0, 8) truncated JSON
+      // mid-object (unclosed braces). Field families stay named; bodies stay
+      // complete-or-absent (absent).
       console.log("  Findings that would leave (file:line · fp · authId · remediation):");
+      let anyRemediation = false;
       for (const f of allFindings.slice(0, 40)) {
         const loc = f.file
           ? `${f.file}${typeof f.startLine === "number" ? `:${f.startLine}` : ""}`
@@ -293,15 +299,18 @@ export function reportDryRun(o) {
         const label = f.label || f.ruleId || "finding";
         const fpBit = f.fp ? `: ${f.fp}` : "";
         const authBit = f.authId ? ` · auth ${f.authId}` : "";
-        console.log(`    · ${loc} → ${label}${fpBit}${authBit}`);
-        if (Array.isArray(f.remediation)) {
-          for (const line of f.remediation.slice(0, 8)) {
-            console.log(`      ${line}`);
-          }
-        }
+        const hasRem = Array.isArray(f.remediation) && f.remediation.length > 0;
+        if (hasRem) anyRemediation = true;
+        const remBit = hasRem ? " · remediation" : "";
+        console.log(`    · ${loc} → ${label}${fpBit}${authBit}${remBit}`);
       }
       if (allFindings.length > 40) {
         console.log(`    … +${allFindings.length - 40} more findings`);
+      }
+      if (anyRemediation) {
+        console.log(
+          "    remediation: already printed above (paste-ready secrets.ignore) — not re-printed here",
+        );
       }
     }
   }
@@ -323,7 +332,18 @@ export function reportDryRun(o) {
   }
 
   console.log("");
-  console.log(c.gray("  Never sent: source code · diffs · files · API key · environment"));
+  // Precise disclosure: report *body* never carries source/diffs/files/key value/env.
+  // Transport differs: live --report sends the key as Authorization header only;
+  // dry-run sends nothing at all. (Older "Never sent: … API key …" over-claimed —
+  // the key *is* sent on live --report, just never in the body / never displayed.)
+  console.log(
+    c.gray("  Never sent in report body: source code · diffs · files · API key value · environment"),
+  );
+  console.log(
+    c.gray(
+      "  Transport: live --report sends the key as Authorization header only; dry-run sends nothing",
+    ),
+  );
   console.log("");
   console.log(`  Endpoint: ${endpoint}`);
   console.log(`  Body size: ${bytes} bytes`);

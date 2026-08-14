@@ -2485,6 +2485,20 @@ function extractReportBody(text) {
   return { bytes: Number(m[1]), raw: m[2] };
 }
 
+/**
+ * Human dry-run summary only — everything from the dry-run banner through the
+ * line before `--- report body (N bytes) ---`. Excludes the compact POST body
+ * (which is intentionally one JSON line and always brace-balanced).
+ */
+function extractDryRunSummary(text) {
+  const s = String(text);
+  const start = s.search(/report dry-run/i);
+  assert.ok(start >= 0, `expected report dry-run banner:\n${s.slice(0, 2000)}`);
+  const end = s.indexOf("--- report body", start);
+  assert.ok(end > start, `expected --- report body marker after dry-run banner:\n${s.slice(start, start + 2000)}`);
+  return s.slice(start, end);
+}
+
 scenario("--report-dry-run: zero requests; --report still posts exactly one (hostile mock)", async () => {
   const base = freshBase();
   const { createServer } = await import("node:http");
@@ -2518,7 +2532,11 @@ scenario("--report-dry-run: zero requests; --report still posts exactly one (hos
     assert.equal(requests.length, 0, "dry-run must never POST");
     const dryOut = rd.stdout + rd.stderr;
     assert.ok(/report dry-run/i.test(dryOut) && /nothing is sent/i.test(dryOut), dryOut.slice(0, 1500));
-    assert.ok(/Never sent/i.test(dryOut), "must disclose what never leaves");
+    assert.ok(/Never sent in report body/i.test(dryOut), "must disclose what never leaves the report body");
+    assert.ok(
+      /Authorization header/i.test(dryOut) && /dry-run sends nothing/i.test(dryOut),
+      "must distinguish body (no key) from transport (header on live --report)\n" + dryOut.slice(0, 2000),
+    );
     assert.ok(/API key: resolved from env/i.test(dryOut), dryOut.slice(0, 1500));
     // Dry-run + --report: dry-run wins — still zero requests.
     const both = await runAsync(["check", "--ci", "--report", "--report-dry-run", "--json"], repo, env);
@@ -2689,7 +2707,11 @@ scenario("--report-dry-run: cold clean repo, no key — exit 0, transparency tex
     assert.equal(requests.length, 0, "nothing may be sent without a live --report");
     const all = r.stdout + r.stderr;
     assert.ok(/report dry-run/i.test(all) && /nothing is sent/i.test(all), all.slice(0, 1500));
-    assert.ok(/Never sent/i.test(all), all.slice(0, 1500));
+    assert.ok(/Never sent in report body/i.test(all), all.slice(0, 1500));
+    assert.ok(
+      /Authorization header/i.test(all) && /dry-run sends nothing/i.test(all),
+      "must distinguish body vs transport\n" + all.slice(0, 2000),
+    );
     assert.ok(/API key: not resolved/i.test(all), all.slice(0, 1500));
     assert.ok(/--- report body \(\d+ bytes\) ---/.test(all), "body markers present");
     assert.ok(!/fatal:/i.test(all), "no fatal: noise on cold clean dry-run");
@@ -2697,6 +2719,134 @@ scenario("--report-dry-run: cold clean repo, no key — exit 0, transparency tex
     assert.ok(!/\berror:\s/i.test(all), `unexpected error: noise:\n${all.slice(0, 2000)}`);
   } finally {
     server.close();
+    cleanup(base);
+  }
+});
+
+scenario("--report-dry-run: findings-heavy density ceiling (no remediation wall re-print)", () => {
+  // Multi-finding fixture mirrors paste-ready density scenarios: five distinct
+  // stripe-shaped secrets. Dry-run must name every finding's field families
+  // without re-printing the gate's paste-ready remediation wall (which used to
+  // double density and truncate JSON mid-object via slice(0, 8)).
+  const base = freshBase();
+  try {
+    const keys = [
+      "sk_live_" + "d1r2y3r4u5n6d7e8n9s0i1t2yA",
+      "sk_live_" + "d1r2y3r4u5n6d7e8n9s0i1t2yB",
+      "sk_live_" + "d1r2y3r4u5n6d7e8n9s0i1t2yC",
+      "sk_live_" + "d1r2y3r4u5n6d7e8n9s0i1t2yD",
+      "sk_live_" + "d1r2y3r4u5n6d7e8n9s0i1t2yE",
+    ];
+    const auths = keys.map((k) => hashOf(k));
+    assert.equal(new Set(auths).size, keys.length, "fixture keys must produce distinct auth ids");
+
+    const repo = path.join(base, "dry-run-density");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "dry-run-density", version: "1.0.0", private: true }, null, 2) + "\n");
+    for (let i = 0; i < keys.length; i++) {
+      write(repo, `src/key${i}.js`, `export const K${i} = "${keys[i]}";\n`);
+    }
+    commitAll(repo, "chore: five distinct stripe-shaped secrets for dry-run density");
+
+    const cfgDir = path.join(base, "cfg-none");
+    mkdirSync(cfgDir, { recursive: true });
+    const r = run(["check", "--report-dry-run", "--json"], repo, {
+      GETADVANTAGE_CONFIG_DIR: cfgDir,
+    });
+    assert.equal(r.code, 1, `multi secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    assert.equal(parseJson(r).verdict, "NO-GO");
+    // --json routes human/preview (incl. dry-run summary) to stderr.
+    const human = r.stderr;
+    const summary = extractDryRunSummary(human);
+    const summaryLines = summary.split(/\r?\n/);
+
+    // Every finding still named with file:line + auth id in the dry-run block.
+    for (let i = 0; i < keys.length; i++) {
+      assert.ok(
+        summary.includes(`src/key${i}.js:1`),
+        `dry-run must name src/key${i}.js:1\n${summary}`,
+      );
+      assert.ok(summary.includes(auths[i]), `dry-run must name auth for key${i}\n${summary}`);
+    }
+    // Remediation presence referenced, not re-printed as a second wall.
+    assert.ok(
+      /remediation:\s*already printed above/i.test(summary) ||
+        /already printed above.*secrets\.ignore/i.test(summary),
+      `must reference gate remediation, not re-print it\n${summary}`,
+    );
+    // Density ceiling: findings-heavy dry-run summary must stay compact.
+    // Pre-fix multi-finding wall grew well past 45 lines; pin with headroom.
+    assert.ok(
+      summaryLines.length <= 45,
+      `dry-run summary must stay ≤45 lines (got ${summaryLines.length}):\n${summary}`,
+    );
+    // Full secrets never echoed; canary-style check on fixture values.
+    const all = r.stdout + r.stderr;
+    for (const k of keys) {
+      assert.ok(!all.includes(k), "full secret must never appear in dry-run output");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("--report-dry-run: multi-finding emits no unclosed JSON in human summary", () => {
+  // Ship-blocker regression: dry-run used to re-print findings[].remediation
+  // with slice(0, 8), cutting paste-ready secrets.ignore mid-object so
+  // `"secrets": {` count >> `"ignore": {` and braces were unbalanced.
+  // Human dry-run summary must never emit truncated remediation JSON.
+  const base = freshBase();
+  try {
+    const keys = [
+      "sk_live_" + "b1r2a3c4e5b6a7l8a9n0c1e2A",
+      "sk_live_" + "b1r2a3c4e5b6a7l8a9n0c1e2B",
+      "sk_live_" + "b1r2a3c4e5b6a7l8a9n0c1e2C",
+    ];
+    const repo = path.join(base, "dry-run-brace");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "dry-run-brace", version: "1.0.0", private: true }, null, 2) + "\n");
+    for (let i = 0; i < keys.length; i++) {
+      write(repo, `src/k${i}.js`, `export const K${i} = "${keys[i]}";\n`);
+    }
+    commitAll(repo, "chore: three secrets for dry-run brace balance");
+
+    const cfgDir = path.join(base, "cfg-none");
+    mkdirSync(cfgDir, { recursive: true });
+    const r = run(["check", "--report-dry-run", "--json"], repo, {
+      GETADVANTAGE_CONFIG_DIR: cfgDir,
+    });
+    assert.equal(r.code, 1, `must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const summary = extractDryRunSummary(r.stderr);
+
+    // Prefer zero remediation JSON in the dry-run human block (bodies already
+    // shown by plain check). If any secrets.ignore fragment appears, counts
+    // must match and every snippet must parse.
+    const secretsOpen = (summary.match(/"secrets"\s*:\s*\{/g) || []).length;
+    const ignoreOpen = (summary.match(/"ignore"\s*:\s*\{/g) || []).length;
+    assert.equal(
+      secretsOpen,
+      ignoreOpen,
+      `"secrets": { count (${secretsOpen}) must equal "ignore": { count (${ignoreOpen}) — truncated JSON?\n${summary}`,
+    );
+    const opens = (summary.match(/\{/g) || []).length;
+    const closes = (summary.match(/\}/g) || []).length;
+    assert.equal(
+      opens,
+      closes,
+      `dry-run human summary must not emit unclosed JSON (opens=${opens} closes=${closes}):\n${summary}`,
+    );
+    // Strongest form of the fix: no remediation JSON wall in the summary at all.
+    assert.equal(
+      secretsOpen,
+      0,
+      `dry-run summary must not re-print paste-ready secrets.ignore JSON (got ${secretsOpen}):\n${summary}`,
+    );
+    // Body markers still present and the compact body itself still parses.
+    const { raw } = extractReportBody(r.stderr);
+    const body = JSON.parse(raw);
+    assert.equal(body.verdict, "NO-GO");
+    assert.ok(Array.isArray(body.payload?.checks));
+  } finally {
     cleanup(base);
   }
 });
