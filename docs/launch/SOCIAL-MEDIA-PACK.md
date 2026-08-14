@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.13.1** (LIVE after registry confirm)
+# Social / advertising pack — getadvantage **0.13.1 LIVE**
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,7 +6,7 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Shipping:** **getadvantage@0.13.1** (patch, 2026-08-14). Independent
+> **Live:** **getadvantage@0.13.1** (patch, 2026-08-14). Independent
 > **REVIEW_GO (release-eligible)** at product fingerprints **`ce5c182`** (bet 1)
 > + **`ec92722`** (bet 2); docs tip `ea94bb2`; 0 open P1/P2/P3. Prefer leading
 > with the eight core GO/NO-GO claims below; Intent remains the trust-layer
@@ -69,12 +69,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (shipping)** | `getadvantage@0.13.1` (LIVE after registry confirm this cycle) |
-| **Checkout** | **0.13.1** patch on the 0.13.0 stack: `file:line` restore on collapsed secret rows + dry-run paste-ready JSON repair + body/transport key banner + prior `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **npm (live)** | `getadvantage@0.13.1` |
+| **Checkout** | Live **0.13.1** patch on the 0.13.0 stack: `file:line` restore on collapsed secret rows + dry-run paste-ready JSON repair + body/transport key banner + prior `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
 | **Install** | `npx getadvantage` or `npx getadvantage@0.13.1` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · Release `v0.13.1` (after publish) · Action `@v1` / `@v0.13.1` |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.13.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.13.1) · Action `@v1` / `@v0.13.1` |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · product fingerprints `ce5c182` + `ec92722` · suite **234/234** (three same-day independent completions) · pack pre-bump **34 files / 334.1 kB / shasum `217df92a…`** · train-scoped **REVIEW_GO (release-eligible)** · CI / registry / cold path filled in after publish |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [31808631124](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/31808631124) success · product fingerprints `ce5c182` + `ec92722` · release `e5b06f3` · cold published path verified (~17.2s GO exit 0, 25 lines, 0 RLS, 0 stderr) · registry `gitHead` `e5b06f3` · tags `v0.13.1` + `v1` · suite **234/234** · pack post-bump **34 files / 334.2 kB / shasum `e46de565…`** |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -139,7 +139,7 @@ Before the agent starts: getadvantage intent init --goal "…" --allow "src/…"
 Commit only intent.json (dedicated freeze). After: intent check → every
 post-baseline change inside the human envelope? Fan-in also enforces the
 envelope on the combined tree when a freeze is present. Scope only — not
-semantics. (getadvantage@0.13.1 · shipping — LIVE after registry confirm)
+semantics. (getadvantage@0.13.1 · LIVE)
 ```
 
 ### E. Do **not** lead with (true but wrong first sentence)
