@@ -13383,6 +13383,479 @@ scenario("api-map-density: >60 routes with many ungated POST — check lists eve
 });
 
 // ---------------------------------------------------------------------------
+// 54. Retained external team detector (0.13.x ops tooling)
+// ---------------------------------------------------------------------------
+// Measures week-two reuse of invisible-mode receipts via GitHub code search.
+// Ops-only: zero product CLI surface. Network layer is fully injectable —
+// these scenarios make **zero** real calls to github.com.
+// Filtered via TEST_FILTER=retained-team
+
+import {
+  RECEIPT_HEADER as RTD_RECEIPT_HEADER,
+  classifyReceipt,
+  isoWeekId,
+  shouldExcludeRepo,
+  runDetector,
+  formatReport,
+  DEFAULT_SELF_OWNER as RTD_SELF_OWNER,
+} from "../ops/retained-team-detector.mjs";
+
+/** Minimal product-shaped receipt body with one or more `- at:` lines. */
+function makeReceipt(atTimestamps) {
+  const ats = Array.isArray(atTimestamps) ? atTimestamps : [atTimestamps];
+  const lines = [
+    `# ${RTD_RECEIPT_HEADER}`,
+    "",
+    "This file is a **local proof receipt** that getAdvantage invisible mode is",
+    "installed (or was recently run) in this repository.",
+    "",
+    "## Last gate run",
+    "",
+    "- phase: install",
+  ];
+  for (const at of ats) lines.push(`- at: ${at}`);
+  lines.push("- verdict: installed");
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** JSON Response-like helper for mock fetch. */
+function mockJsonRes(status, body, headers = {}) {
+  const h = new Map(
+    Object.entries({
+      "content-type": "application/json",
+      ...headers,
+    }).map(([k, v]) => [k.toLowerCase(), String(v)]),
+  );
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (k) => h.get(String(k).toLowerCase()) || null },
+    async json() {
+      return typeof body === "string" ? JSON.parse(body) : body;
+    },
+    async text() {
+      return typeof body === "string" ? body : JSON.stringify(body);
+    },
+  };
+}
+
+function mockTextRes(status, text, contentType = "text/plain") {
+  const h = new Map([["content-type", contentType]]);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (k) => h.get(String(k).toLowerCase()) || null },
+    async json() {
+      return JSON.parse(text);
+    },
+    async text() {
+      return text;
+    },
+  };
+}
+
+/** Build a code-search item + optional content map for mock fetch. */
+function searchItem(fullName, { fork = false, parent = null, path = ".getadvantage/INVISIBLE-MODE.md" } = {}) {
+  const [owner, name] = fullName.split("/");
+  return {
+    name: "INVISIBLE-MODE.md",
+    path,
+    sha: "deadbeef",
+    url: `https://api.github.com/repos/${fullName}/contents/${path}`,
+    repository: {
+      full_name: fullName,
+      name,
+      fork,
+      owner: { login: owner },
+      ...(parent
+        ? {
+            parent: {
+              name: parent.split("/")[1] || parent,
+              full_name: parent,
+              owner: { login: parent.split("/")[0] },
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Mock fetch that serves a fixed search payload + per-repo receipt bodies.
+ * Throws if any URL targets a non-api.github.com host (guards real network).
+ */
+function makeMockFetch({ searchStatus = 200, searchBody, contents = {}, repoBodies = {} }) {
+  return async (url, _init) => {
+    const u = String(url);
+    if (!u.includes("api.github.com") && !u.includes("raw.githubusercontent.com")) {
+      throw new Error(`retained-team mock fetch refused non-GitHub URL: ${u}`);
+    }
+    // Never hit the real network from tests — this mock is the only path.
+    if (u.includes("/search/code")) {
+      if (searchStatus !== 200) {
+        return mockJsonRes(searchStatus, { message: `status ${searchStatus}` });
+      }
+      return mockJsonRes(200, searchBody);
+    }
+    const repoMatch = u.match(/\/repos\/([^/]+\/[^/]+)(?:\?|$)/);
+    const contentsMatch = u.match(/\/repos\/([^/]+\/[^/]+)\/contents\//);
+    if (contentsMatch) {
+      const full = contentsMatch[1];
+      if (Object.prototype.hasOwnProperty.call(contents, full)) {
+        const body = contents[full];
+        if (body && typeof body === "object" && body.__status) {
+          return mockJsonRes(body.__status, { message: "err" });
+        }
+        // contents API shape (base64)
+        const b64 = Buffer.from(String(body), "utf8").toString("base64");
+        return mockJsonRes(200, {
+          name: "INVISIBLE-MODE.md",
+          path: ".getadvantage/INVISIBLE-MODE.md",
+          encoding: "base64",
+          content: b64,
+        });
+      }
+      return mockJsonRes(404, { message: "Not Found" });
+    }
+    if (repoMatch && !u.includes("/contents/")) {
+      const full = repoMatch[1];
+      if (repoBodies[full]) return mockJsonRes(200, repoBodies[full]);
+      // Default: echo a non-fork external repo.
+      const [owner, name] = full.split("/");
+      return mockJsonRes(200, {
+        full_name: full,
+        name,
+        fork: false,
+        owner: { login: owner },
+      });
+    }
+    throw new Error(`retained-team mock fetch: unhandled URL ${u}`);
+  };
+}
+
+scenario("retained-team: pure classifiers — isoWeekId + install vs retained + unknown-shape", () => {
+  // ISO week boundaries (UTC): 2026-01-05 is Monday of 2026-W02; 2026-01-12 is 2026-W03.
+  assert.equal(isoWeekId("2026-01-05T12:00:00.000Z"), "2026-W02");
+  assert.equal(isoWeekId("2026-01-12T12:00:00.000Z"), "2026-W03");
+  assert.equal(isoWeekId("2026-08-14T00:00:00.000Z"), "2026-W33");
+  assert.equal(isoWeekId("not-a-date"), null);
+
+  // Single week → install, NOT retention. If week-two detection were neutered
+  // (always retained), this assertion would fail — proving the test is real.
+  const oneWeek = classifyReceipt(
+    makeReceipt(["2026-01-05T10:00:00.000Z", "2026-01-06T11:00:00.000Z"]),
+  );
+  assert.equal(oneWeek.kind, "install", "single ISO week must be install, not retained");
+  assert.deepEqual(oneWeek.weeks, ["2026-W02"]);
+  assert.notEqual(oneWeek.kind, "retained");
+
+  // Two distinct ISO weeks → retained (week-two reuse).
+  const twoWeeks = classifyReceipt(
+    makeReceipt(["2026-01-05T10:00:00.000Z", "2026-01-12T10:00:00.000Z"]),
+  );
+  assert.equal(twoWeeks.kind, "retained");
+  assert.deepEqual(twoWeeks.weeks, ["2026-W02", "2026-W03"]);
+
+  // Missing header → unknown-shape, never retained.
+  const noHeader = classifyReceipt("# not a receipt\n- at: 2026-01-05T10:00:00.000Z\n");
+  assert.equal(noHeader.kind, "unknown-shape");
+  assert.equal(noHeader.weeks, undefined);
+
+  // Header present but no timestamps → unknown-shape.
+  const noTs = classifyReceipt(`# ${RTD_RECEIPT_HEADER}\n\n- phase: install\n`);
+  assert.equal(noTs.kind, "unknown-shape");
+
+  // Corrupt / hand-edited garbage → unknown-shape.
+  const garbage = classifyReceipt(`# ${RTD_RECEIPT_HEADER}\n\n- at: not-a-real-timestamp\n`);
+  assert.equal(garbage.kind, "unknown-shape");
+});
+
+scenario("retained-team: receipt once, single week → install, not retention", async () => {
+  const receipt = makeReceipt("2026-03-10T08:00:00.000Z");
+  const item = searchItem("acme/ship-app");
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 1, items: [item] },
+    contents: { "acme/ship-app": receipt },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+    selfOwner: RTD_SELF_OWNER,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.status, "ok");
+  assert.equal(result.retained.length, 0, "single-week must NOT count as retained");
+  assert.equal(result.installs.length, 1);
+  assert.equal(result.installs[0].fullName, "acme/ship-app");
+  assert.equal(result.installs[0].kind, "install");
+  assert.match(report, /Installs \(receipt exists, single ISO week/);
+  assert.ok(!/## Retained/.test(report) || result.retained.length === 0);
+  // North-star line is 0 retained.
+  assert.match(report, /retained-external-teams: 0|## North-star[\s\S]*\n0\n/);
+});
+
+scenario("retained-team: two distinct ISO weeks → retained, print both week ids", async () => {
+  const receipt = makeReceipt([
+    "2026-03-10T08:00:00.000Z", // 2026-W11
+    "2026-03-17T09:00:00.000Z", // 2026-W12
+  ]);
+  // Prove week ids up front so a neutered classifier cannot sneak through.
+  const cls = classifyReceipt(receipt);
+  assert.equal(cls.kind, "retained");
+  assert.ok(cls.weeks.length >= 2, `need ≥2 weeks, got ${JSON.stringify(cls.weeks)}`);
+
+  const item = searchItem("ext-co/prod");
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 1, items: [item] },
+    contents: { "ext-co/prod": receipt },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.retained.length, 1);
+  assert.equal(result.installs.length, 0);
+  assert.deepEqual(result.retained[0].weeks, cls.weeks);
+  for (const w of cls.weeks) {
+    assert.ok(report.includes(w), `report must print week id ${w}:\n${report}`);
+  }
+  assert.match(report, /Retained \(gate activity/);
+  assert.match(report, /retained-external-teams: 1|\n1\n/);
+});
+
+scenario("retained-team: fork of Benjamin's repo with receipt → excluded with reason", async () => {
+  // Parent present on the search payload — no extra repo round-trip required.
+  const item = searchItem("forker/getadvantage-cli", {
+    fork: true,
+    parent: "BellmeJoe/getadvantage-cli",
+  });
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 1, items: [item] },
+    contents: {
+      // Would be retained if not excluded — proves exclusion is not silent.
+      "forker/getadvantage-cli": makeReceipt([
+        "2026-01-05T10:00:00.000Z",
+        "2026-01-12T10:00:00.000Z",
+      ]),
+    },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+    selfOwner: "BellmeJoe",
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.retained.length, 0);
+  assert.equal(result.installs.length, 0);
+  assert.equal(result.excluded.length, 1);
+  assert.equal(result.excluded[0].fullName, "forker/getadvantage-cli");
+  assert.match(result.excluded[0].reason, /fork of BellmeJoe/i);
+  assert.match(report, /Excluded \(with reason\)/);
+  assert.match(report, /forker\/getadvantage-cli/);
+  assert.match(report, /fork of/i);
+});
+
+scenario("retained-team: Benjamin's own non-fork repo → excluded with reason", async () => {
+  const item = searchItem("BellmeJoe/getadvantage-cli", { fork: false });
+  // Direct pure check first.
+  const pure = shouldExcludeRepo(item.repository, "BellmeJoe");
+  assert.equal(pure.exclude, true);
+  assert.match(pure.reason, /selfOwner/i);
+
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 1, items: [item] },
+    contents: {
+      "BellmeJoe/getadvantage-cli": makeReceipt([
+        "2026-01-05T10:00:00.000Z",
+        "2026-01-12T10:00:00.000Z",
+      ]),
+    },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+    selfOwner: "BellmeJoe",
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.retained.length, 0, "self repo must never count as retained");
+  assert.equal(result.excluded.length, 1);
+  assert.equal(result.excluded[0].fullName, "BellmeJoe/getadvantage-cli");
+  assert.match(result.excluded[0].reason, /selfOwner \(BellmeJoe\)/);
+  assert.match(report, /BellmeJoe\/getadvantage-cli/);
+  assert.match(report, /selfOwner/);
+});
+
+scenario("retained-team: API 403 rate-limited → UNKNOWN, non-zero exit, never 0", async () => {
+  const fetchImpl = makeMockFetch({
+    searchStatus: 403,
+    searchBody: { message: "API rate limit exceeded" },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0, "rate-limit must be non-zero exit");
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(report, /^UNKNOWN$/m);
+  // Must never present as a clean zero observation.
+  assert.ok(
+    !/^0\s*$/m.test(report.split("UNKNOWN")[0] || "") && report.includes("UNKNOWN"),
+    `must not report plain 0 on failure:\n${report}`,
+  );
+  assert.ok(
+    !report.startsWith("0\n") || report.includes("UNKNOWN"),
+    "failure report must not lead with north-star 0",
+  );
+  // Stronger: formatReport for UNKNOWN never starts with plain 0.
+  const unk = formatReport({ status: "UNKNOWN", failureReason: "rate-limited (403)", httpStatus: 403 });
+  assert.ok(unk.includes("UNKNOWN"));
+  assert.ok(!/^\s*0\s*$/m.test(unk.split("\n").find((l) => l === "0") ? "fail" : "ok") || !unk.trimStart().startsWith("0"));
+  assert.ok(!unk.trimStart().startsWith("0"), `UNKNOWN report must not start with 0:\n${unk}`);
+});
+
+scenario("retained-team: API 401 → UNKNOWN, non-zero exit", async () => {
+  const fetchImpl = makeMockFetch({
+    searchStatus: 401,
+    searchBody: { message: "Bad credentials" },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(exitCode, 1);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /auth failure \(401\)/);
+  assert.match(report, /UNKNOWN/);
+  assert.ok(!report.trimStart().startsWith("0"), "401 must never report as 0");
+});
+
+scenario("retained-team: corrupt/hand-edited receipt → unknown-shape, listed, not retained", async () => {
+  const corrupt = `# ${RTD_RECEIPT_HEADER}\n\n## Last gate run\n\n- at: TOTALLY-NOT-A-TIMESTAMP\n- phase: hand-edited\n`;
+  assert.equal(classifyReceipt(corrupt).kind, "unknown-shape");
+
+  const item = searchItem("stranger/weird-app");
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 1, items: [item] },
+    contents: { "stranger/weird-app": corrupt },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.retained.length, 0, "unknown-shape must never count as retained");
+  assert.equal(result.installs.length, 0);
+  assert.equal(result.unknownShape.length, 1);
+  assert.equal(result.unknownShape[0].fullName, "stranger/weird-app");
+  assert.match(report, /Unknown-shape/);
+  assert.match(report, /stranger\/weird-app/);
+});
+
+scenario("retained-team: empty result set → prints 0, exit 0", async () => {
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 0, items: [] },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.status, "ok");
+  assert.equal(result.retained.length, 0);
+  assert.equal(result.installs.length, 0);
+  assert.equal(result.totalSearchHits, 0);
+  // Plain `0` line is required.
+  assert.ok(
+    report.split(/\r?\n/).some((l) => l.trim() === "0"),
+    `empty result must print a plain 0 line:\n${report}`,
+  );
+  assert.ok(!report.includes("UNKNOWN"), "empty success is not UNKNOWN");
+});
+
+scenario("retained-team: missing token → UNKNOWN non-zero (never 0)", async () => {
+  const fetchImpl = async () => {
+    throw new Error("fetch must not be called without a token");
+  };
+  const { exitCode, result, report } = await runDetector({
+    token: "",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /GITHUB_TOKEN/);
+  assert.ok(!report.trimStart().startsWith("0"));
+});
+
+scenario("retained-team: network throw → UNKNOWN non-zero", async () => {
+  const fetchImpl = async () => {
+    throw new Error("simulated ECONNRESET");
+  };
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /network failure/);
+  assert.match(report, /UNKNOWN/);
+});
+
+// Hostile: if install were mis-labeled retained, single-week scenario already
+// fails. Extra belt-and-braces: a mixed search must keep counts exact.
+scenario("retained-team: mixed hits — self excluded, install vs retained separated", async () => {
+  const installReceipt = makeReceipt("2026-06-02T12:00:00.000Z"); // one week
+  const retainedReceipt = makeReceipt([
+    "2026-06-02T12:00:00.000Z",
+    "2026-06-09T12:00:00.000Z",
+  ]);
+  assert.equal(classifyReceipt(installReceipt).kind, "install");
+  assert.equal(classifyReceipt(retainedReceipt).kind, "retained");
+
+  const items = [
+    searchItem("BellmeJoe/getadvantage-cli"),
+    searchItem("alice/once"),
+    searchItem("bob/twice"),
+  ];
+  const fetchImpl = makeMockFetch({
+    searchBody: { total_count: 3, items },
+    contents: {
+      "alice/once": installReceipt,
+      "bob/twice": retainedReceipt,
+      // self should never be fetched for classification, but if it is, still excluded first
+      "BellmeJoe/getadvantage-cli": retainedReceipt,
+    },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.excluded.length, 1);
+  assert.equal(result.installs.length, 1);
+  assert.equal(result.installs[0].fullName, "alice/once");
+  assert.equal(result.retained.length, 1);
+  assert.equal(result.retained[0].fullName, "bob/twice");
+  assert.ok(result.retained[0].weeks.length >= 2);
+  assert.match(report, /alice\/once/);
+  assert.match(report, /bob\/twice/);
+  assert.match(report, /BellmeJoe\/getadvantage-cli/);
+});
+
+// ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
 const filter = process.env.TEST_FILTER || "";
