@@ -47,6 +47,13 @@ expectation adopted in the week plan, not an ambition.
 12-month target; further latency work is not fundable without profiling evidence
 that real CI time improves.
 
+> **Re-measured 2026-08-15 at `0.13.1`** (weekly review; fresh `git init`,
+> isolated `npm_config_cache`): **2.03s** and **4.98s** across two runs, exit 0,
+> GO. The **full activation path** — cold `npx` → `init --claude-code` → first
+> gate → receipt on disk — is **4.63s** (init 2.11s + gate 2.53s). The 2026-08-02
+> baseline row stands; the target is *hold*, and it is held with ~13x margin on
+> the whole adoption path. No further latency work is fundable.
+
 ## Retained-team detector (the north-star measurement method)
 
 **LIVE 0.13.1** (patch on 0.13.0) — invisible mode from `0.12.0`; legibility +
@@ -71,6 +78,19 @@ header is publicly searchable.
 - Never infer attribution beyond what the query shows, and never count
   agent-generated verification traffic as adoption.
 
+> **DETECTOR SHIPPED 2026-08-15** — `ops/retained-team-detector.mjs`, ops tooling
+> only (absent from `package.json` `files`; ships to nobody; no product surface,
+> no telemetry, no CLI/flag/verdict). Lane-scoped `REVIEW_GO`, 0 P1/P2, 12 hostile
+> scenarios, 246/246 suite. Classifies **install** (one ISO week) vs **retained**
+> (≥2 distinct ISO weeks); rate-limit/auth/network → `UNKNOWN` + non-zero exit,
+> never a silent `0`. **First live run, 2026-08-15 weekly review: exit 0,
+> `retained-external-teams: 0`, `status: ok — zero code-search hits`**, with the
+> `npx left-pad` positive control returning 3 real third-party repositories in the
+> same session. The zero is observed absence. **P3 carried:** the tool has no
+> internal positive-control assertion, so a future GitHub API change could turn a
+> broken query into a silent `0` with HTTP 200 — today that control exists only
+> because the weekly review runs it by hand, and it must keep doing so.
+
 ## Portfolio order
 
 Grok pulls the highest-scoring eligible bet from this list whenever the active
@@ -90,6 +110,15 @@ lane ships or is killed. Only one implementation lane may be open.
    **0.8.4** / `v0.8.4`.
 3. **One-command CI bootstrap** — detect the repository, write or update the
    workflow safely, show the exact diff, and refuse destructive overwrite.
+   **Status (2026-08-15): KILLED on duplication.** Bet 1 (LIVE 0.8.4) already
+   generates a pinned workflow, and `init --claude-code` (LIVE 0.12.0) installs
+   the gate in **2.11s** measured this review. The residual delta is safe-update
+   diffing plus destructive-overwrite refusal. It fails the eligibility rule
+   "does not duplicate an existing capability", carries **zero demand evidence**
+   across ~40 market-signal-ledger entries and zero dogfood friction, and its
+   activation premise is dead at a 4.63s measured activation path. **Reopen only
+   if a real external repository reports friction installing the workflow** —
+   which requires an external repository to exist first.
 
 ### P1 — own the AI-built-app failure modes
 
@@ -156,10 +185,21 @@ lane ships or is killed. Only one implementation lane may be open.
    dogfood friction, and it depends on the receipt existing first.*
 10. **Shareable verified summary** — honest Markdown/JSON output for PRs,
     handoffs, and badges. Never turn a partial check into a security seal.
+    *Deprioritized 2026-08-15: **zero demand evidence** in ~40 ledger entries.
+    Written justification, as the rule requires — it is the only bet whose growth
+    mechanism is user-to-user propagation, the one channel depending on neither
+    the send gate nor a founder click; but propagation from a base of zero users
+    cannot start. Held in queue below both distribution bets until a first
+    external user exists.*
 11. **Agent-native parity** — every stable read-only capability is available
     through the MCP surface with the same result and policy semantics.
     *Split (2026-08-02): the MCP-registry listing of the existing `mcp.mjs`
     surface moves into 16; full parity stays here.*
+    *Deprioritized 2026-08-15: zero demand evidence, zero dogfood friction, and a
+    capability lane for a zero-user population is exactly what
+    `WEEK-PLAN-2026-07-30:101` closed. Bet 16b delivers most of its realistic
+    near-term value — discoverability of the surface that already ships — at a
+    third of the effort.*
 
 ### P3 — retention and ecosystem
 
@@ -174,13 +214,30 @@ lane ships or is killed. Only one implementation lane may be open.
 14. **Evaluator feedback loop** — generated issue/discussion link containing
     redacted environment and result metadata, never secrets.
 15. **GitLab and audit exports** only after observed buyer or repository demand.
-16. **Free-shelf distribution** *(added 2026-08-02)* — GitHub Actions Marketplace
-    listing plus MCP registry listing. Verified absent this review: the Action is
-    `@v1`-tagged across 13 releases and `github.com/marketplace/actions/…`
-    returns 404 at every plausible slug, because bot-created API releases cannot
-    set the marketplace-publish flag. The only reach surface in the portfolio
-    that requires no outbound message to anyone; needs one founder account action
-    (the Marketplace developer agreement) and one release-workflow change.
+16. **Free-shelf distribution** *(added 2026-08-02; **SPLIT 2026-08-15** into 16a
+    and 16b — they have different blockers and do not belong in one queue slot)*.
+
+16a. **GitHub Actions Marketplace listing** — **top-ranked bet, score 3.55 at
+    effort 1 (2026-08-15).** Re-verified live this review: 404 at all four
+    plausible slugs (`/getadvantage`, `/getadvantage-check`,
+    `/get-advantage-check`, `/getadvantage-cli`), now **13 days after the absence
+    was first recorded and still unactioned**. Bot-created API releases cannot set
+    the marketplace-publish flag, so it will never appear as a side effect of the
+    release pipeline. **The only reach surface in the entire portfolio that
+    requires no outbound message to any human**, and therefore the only one the
+    send gate cannot block. Readiness lane `0.13.x-marketplace-listing-readiness`
+    dispatched 2026-08-15. **Publishing needs one founder action no agent may
+    take:** accept the Marketplace Developer Agreement and tick "Publish this
+    Action to the GitHub Marketplace" on one release.
+
+16b. **MCP registry listing** — score 2.85 at effort 1 (2026-08-15). Lists the
+    **already-shipped** `mcp.mjs` surface in the MCP registry and established
+    awesome-lists; no product code. Verified gap: account-wide
+    `gh search prs --author=@me` returns 8 lifetime PRs, **every one on a
+    `BellmeJoe/*` repo — zero third-party shelf PRs ever opened.** *Honest
+    distinction from 16a:* a registry listing requires a **PR to someone else's
+    repository**, which is a send-class action and sits inside the send gate. It
+    is not click-free.
 
 ## Selection score
 
