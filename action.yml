@@ -22,10 +22,11 @@
 #   - GITHUB_TOKEN stays in the Action parent; project-controlled children
 #     (tsc/build) receive a credential-scrubbed environment.
 name: getAdvantage check
+# Marketplace hard limit: description must be < 125 characters (enforced by
+# GitHub at release-publish time, 2026-08-15). Keep the honesty disclaimer.
 description: >-
-  Pre-deploy GO/NO-GO gate with SARIF upload for code scanning and a concise
-  PR summary (update-in-place). Same checks as local getadvantage check —
-  not a security guarantee.
+  Catch secrets and unintended changes before you ship. GO/NO-GO gate, SARIF
+  upload, PR summary. Not a security guarantee.
 author: getAdvantage
 branding:
   icon: shield
