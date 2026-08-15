@@ -179,6 +179,10 @@
 //                                     pointer; dedicated map keeps full routes;
 //                                     zero-route has no pointer; all-gated pass
 //                                     with no ⚠; >60 routes lists every ⚠ on check
+//  54. Retained external team detector — ops measurement only (TEST_FILTER=retained-team)
+//  55. Marketplace listing readiness  — action.yml publishing contract (mutation-
+//                                     proven) + non-fatal release notice
+//                                     (TEST_FILTER=marketplace)
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -13853,6 +13857,594 @@ scenario("retained-team: mixed hits — self excluded, install vs retained separ
   assert.match(report, /alice\/once/);
   assert.match(report, /bob\/twice/);
   assert.match(report, /BellmeJoe\/getadvantage-cli/);
+});
+
+// ---------------------------------------------------------------------------
+// 55. Marketplace listing readiness (0.13.x) — publishing contract + notice
+// ---------------------------------------------------------------------------
+// Guards root action.yml Marketplace metadata (name/description/branding/runs)
+// with pure regex/line parsing (no YAML dependency). Mutation-proven: each
+// assertion fails on a scratch-mutated fixture string, never dirtying repo
+// action.yml. Release-time notice is NON-FATAL.
+// Filtered via TEST_FILTER=marketplace
+
+/**
+ * Frozen set of GitHub Actions branding icons (Feather v4.28.0), matching the
+ * exhaustive list in GitHub docs. Omitted (must NOT be present): coffee,
+ * columns, divide, divide-circle, divide-square, frown, hexagon, key, meh,
+ * mouse-pointer, smile, tool, x-octagon.
+ */
+const MARKETPLACE_ALLOWED_ICONS = new Set([
+  "activity", "airplay", "alert-circle", "alert-octagon", "alert-triangle",
+  "align-center", "align-justify", "align-left", "align-right", "anchor",
+  "aperture", "archive", "arrow-down-circle", "arrow-down-left", "arrow-down-right",
+  "arrow-down", "arrow-left-circle", "arrow-left", "arrow-right-circle", "arrow-right",
+  "arrow-up-circle", "arrow-up-left", "arrow-up-right", "arrow-up", "at-sign",
+  "award", "bar-chart-2", "bar-chart", "battery-charging", "battery", "bell-off",
+  "bell", "bluetooth", "bold", "book-open", "book", "bookmark", "box", "briefcase",
+  "calendar", "camera-off", "camera", "cast", "check-circle", "check-square",
+  "check", "chevron-down", "chevron-left", "chevron-right", "chevron-up",
+  "chevrons-down", "chevrons-left", "chevrons-right", "chevrons-up", "circle",
+  "clipboard", "clock", "cloud-drizzle", "cloud-lightning", "cloud-off",
+  "cloud-rain", "cloud-snow", "cloud", "code", "command", "compass", "copy",
+  "corner-down-left", "corner-down-right", "corner-left-down", "corner-left-up",
+  "corner-right-down", "corner-right-up", "corner-up-left", "corner-up-right",
+  "cpu", "credit-card", "crop", "crosshair", "database", "delete", "disc",
+  "dollar-sign", "download-cloud", "download", "droplet", "edit-2", "edit-3",
+  "edit", "external-link", "eye-off", "eye", "fast-forward", "feather",
+  "file-minus", "file-plus", "file-text", "file", "film", "filter", "flag",
+  "folder-minus", "folder-plus", "folder", "gift", "git-branch", "git-commit",
+  "git-merge", "git-pull-request", "globe", "grid", "hard-drive", "hash",
+  "headphones", "heart", "help-circle", "home", "image", "inbox", "info",
+  "italic", "layers", "layout", "life-buoy", "link-2", "link", "list", "loader",
+  "lock", "log-in", "log-out", "mail", "map-pin", "map", "maximize-2", "maximize",
+  "menu", "message-circle", "message-square", "mic-off", "mic", "minimize-2",
+  "minimize", "minus-circle", "minus-square", "minus", "monitor", "moon",
+  "more-horizontal", "more-vertical", "move", "music", "navigation-2",
+  "navigation", "octagon", "package", "paperclip", "pause-circle", "pause",
+  "percent", "phone-call", "phone-forwarded", "phone-incoming", "phone-missed",
+  "phone-off", "phone-outgoing", "phone", "pie-chart", "play-circle", "play",
+  "plus-circle", "plus-square", "plus", "pocket", "power", "printer", "radio",
+  "refresh-ccw", "refresh-cw", "repeat", "rewind", "rotate-ccw", "rotate-cw",
+  "rss", "save", "scissors", "search", "send", "server", "settings", "share-2",
+  "share", "shield-off", "shield", "shopping-bag", "shopping-cart", "shuffle",
+  "sidebar", "skip-back", "skip-forward", "slash", "sliders", "smartphone",
+  "speaker", "square", "star", "stop-circle", "sun", "sunrise", "sunset",
+  "table", "tablet", "tag", "target", "terminal", "thermometer", "thumbs-down",
+  "thumbs-up", "toggle-left", "toggle-right", "trash-2", "trash", "trending-down",
+  "trending-up", "triangle", "truck", "tv", "type", "umbrella", "underline",
+  "unlock", "upload-cloud", "upload", "user-check", "user-minus", "user-plus",
+  "user-x", "user", "users", "video-off", "video", "voicemail", "volume-1",
+  "volume-2", "volume-x", "volume", "watch", "wifi-off", "wifi", "wind",
+  "x-circle", "x-square", "x", "zap-off", "zap", "zoom-in", "zoom-out",
+]);
+
+/** Exact Marketplace badge colors (GitHub docs subset used by this contract). */
+const MARKETPLACE_ALLOWED_COLORS = new Set([
+  "white",
+  "yellow",
+  "blue",
+  "green",
+  "orange",
+  "red",
+  "purple",
+  "gray-dark",
+]);
+
+/** Valid `runs.using` runner values for action.yml. */
+const MARKETPLACE_VALID_RUNS_USING = new Set([
+  "composite",
+  "node20",
+  "node24",
+  "docker",
+]);
+
+/**
+ * GitHub Marketplace hard limit on action description length (characters).
+ * Enforced at release-publish time; a longer description makes the founder
+ * publish checkbox fail. Documented on action.yml by e74d117 (2026-08-15).
+ */
+const MARKETPLACE_DESCRIPTION_MAX_CHARS = 125;
+
+/** Icons GitHub documents as omitted from the allowed Feather set. */
+const MARKETPLACE_OMITTED_ICONS = [
+  "coffee",
+  "columns",
+  "divide",
+  "divide-circle",
+  "divide-square",
+  "frown",
+  "hexagon",
+  "key",
+  "meh",
+  "mouse-pointer",
+  "smile",
+  "tool",
+  "x-octagon",
+];
+
+/**
+ * Parse a top-level scalar (or folded `>-` / `|` block) from action.yml text.
+ * Line/regex only — no YAML dependency.
+ * @param {string} yml
+ * @param {string} key
+ * @returns {string|null}
+ */
+function parseActionYmlTopLevelScalar(yml, key) {
+  const lines = String(yml ?? "").split(/\r?\n/);
+  const keyRe = new RegExp(`^${key}:\\s*(.*)$`);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(keyRe);
+    if (!m) continue;
+    let val = (m[1] || "").trim();
+    // Strip inline comments on plain scalars (not inside quotes).
+    if (val && !val.startsWith(">") && !val.startsWith("|") && !val.startsWith("'") && !val.startsWith('"')) {
+      const hash = val.indexOf(" #");
+      if (hash >= 0) val = val.slice(0, hash).trim();
+    }
+    if (val === ">" || val === ">-" || val === "|" || val === "|-" || val === "") {
+      const parts = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const line = lines[j];
+        if (line.trim() === "") {
+          if (parts.length) parts.push("");
+          continue;
+        }
+        if (/^\S/.test(line)) break; // next top-level key
+        parts.push(line.replace(/^\s+/, "").trimEnd());
+      }
+      return parts.join(" ").replace(/\s+/g, " ").trim();
+    }
+    if (
+      (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
+      (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
+    ) {
+      return val.slice(1, -1);
+    }
+    return val;
+  }
+  return null;
+}
+
+/**
+ * Parse branding.icon / branding.color from a branding: block.
+ * @param {string} yml
+ * @returns {{icon:string|null,color:string|null}}
+ */
+function parseActionYmlBranding(yml) {
+  const lines = String(yml ?? "").split(/\r?\n/);
+  let inBranding = false;
+  let icon = null;
+  let color = null;
+  for (const line of lines) {
+    if (/^branding:\s*(#.*)?$/.test(line)) {
+      inBranding = true;
+      continue;
+    }
+    if (inBranding) {
+      if (/^\S/.test(line) && line.trim() !== "" && !line.trim().startsWith("#")) {
+        inBranding = false;
+        // fall through — this line may be another top-level key
+      } else {
+        const im = line.match(/^\s+icon:\s*['"]?([^'"#\s]+)['"]?/);
+        if (im) icon = im[1];
+        const cm = line.match(/^\s+color:\s*['"]?([^'"#\s]+)['"]?/);
+        if (cm) color = cm[1];
+        continue;
+      }
+    }
+  }
+  return { icon, color };
+}
+
+/**
+ * Parse runs.using from a runs: block.
+ * @param {string} yml
+ * @returns {string|null}
+ */
+function parseActionYmlRunsUsing(yml) {
+  const lines = String(yml ?? "").split(/\r?\n/);
+  let inRuns = false;
+  for (const line of lines) {
+    if (/^runs:\s*(#.*)?$/.test(line)) {
+      inRuns = true;
+      continue;
+    }
+    if (inRuns) {
+      if (/^\S/.test(line) && line.trim() !== "" && !line.trim().startsWith("#")) {
+        break;
+      }
+      const m = line.match(/^\s+using:\s*['"]?([^'"#\s]+)['"]?/);
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+/**
+ * Validate Marketplace publishing contract fields for an action.yml body.
+ * Pure: never reads or writes the filesystem unless opts.repoRoot is set
+ * (then only checks that action.yml exists at that root).
+ *
+ * @param {string} ymlText
+ * @param {{repoRoot?:string}} [opts]
+ * @returns {{ok:boolean,failures:string[],fields:object}}
+ */
+function validateMarketplaceListingContract(ymlText, opts = {}) {
+  const failures = [];
+  const name = parseActionYmlTopLevelScalar(ymlText, "name");
+  const description = parseActionYmlTopLevelScalar(ymlText, "description");
+  const { icon, color } = parseActionYmlBranding(ymlText);
+  const runsUsing = parseActionYmlRunsUsing(ymlText);
+  const fields = { name, description, icon, color, runsUsing };
+
+  if (name == null || String(name).trim() === "") {
+    failures.push("name: missing or empty");
+  } else if (String(name).trim() === "action") {
+    failures.push('name: placeholder bare "action" is not allowed');
+  }
+
+  if (description == null || String(description).trim() === "") {
+    failures.push("description: missing or empty");
+  } else if (String(description).trim().length >= MARKETPLACE_DESCRIPTION_MAX_CHARS) {
+    // GitHub enforces description < 125 at Marketplace publish time.
+    failures.push(
+      `description: length ${String(description).trim().length} must be < ${MARKETPLACE_DESCRIPTION_MAX_CHARS} (Marketplace hard limit)`,
+    );
+  }
+
+  if (icon == null || String(icon).trim() === "") {
+    failures.push("branding.icon: missing or empty");
+  } else if (!MARKETPLACE_ALLOWED_ICONS.has(icon)) {
+    failures.push(`branding.icon: "${icon}" is not in the allowed Feather v4.28.0 set`);
+  }
+
+  if (color == null || String(color).trim() === "") {
+    failures.push("branding.color: missing or empty");
+  } else if (!MARKETPLACE_ALLOWED_COLORS.has(color)) {
+    failures.push(
+      `branding.color: "${color}" is not one of ${[...MARKETPLACE_ALLOWED_COLORS].join(", ")}`,
+    );
+  }
+
+  if (runsUsing == null || String(runsUsing).trim() === "") {
+    failures.push("runs.using: missing or empty");
+  } else if (!MARKETPLACE_VALID_RUNS_USING.has(runsUsing)) {
+    failures.push(
+      `runs.using: "${runsUsing}" is not a valid runner (expect ${[...MARKETPLACE_VALID_RUNS_USING].join("|")})`,
+    );
+  }
+
+  if (opts.repoRoot) {
+    const atRoot = path.join(opts.repoRoot, "action.yml");
+    if (!existsSync(atRoot)) {
+      failures.push("action file must be at repository root (action.yml), not nested");
+    }
+  }
+
+  return { ok: failures.length === 0, failures, fields };
+}
+
+scenario("marketplace: allowed-icon set includes shield and omits documented exclusions", () => {
+  assert.ok(MARKETPLACE_ALLOWED_ICONS.has("shield"), "shield must be allowed (live action.yml uses it)");
+  for (const bad of MARKETPLACE_OMITTED_ICONS) {
+    assert.ok(
+      !MARKETPLACE_ALLOWED_ICONS.has(bad),
+      `omitted icon "${bad}" must not be in the allowed set`,
+    );
+  }
+  // Spot-check a few common allowed icons.
+  for (const ok of ["award", "check-circle", "package", "zap"]) {
+    assert.ok(MARKETPLACE_ALLOWED_ICONS.has(ok), `expected allowed icon ${ok}`);
+  }
+  // Exact eight colors.
+  assert.equal(MARKETPLACE_ALLOWED_COLORS.size, 8);
+  assert.ok(!MARKETPLACE_ALLOWED_COLORS.has("black"), "contract uses exact eight (no black)");
+  assert.ok(!MARKETPLACE_ALLOWED_COLORS.has("neon-pink"));
+});
+
+scenario("marketplace: root action.yml satisfies publishing contract", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const actionPath = path.join(repoRoot, "action.yml");
+  assert.ok(existsSync(actionPath), "action.yml must live at repository root");
+  // Nested path must NOT be the only location — root is required.
+  assert.ok(!existsSync(path.join(repoRoot, "action", "action.yml")));
+  const yml = readFileSync(actionPath, "utf8");
+  const r = validateMarketplaceListingContract(yml, { repoRoot });
+  assert.equal(r.ok, true, `contract failures: ${r.failures.join("; ")}`);
+  assert.ok(r.fields.name && r.fields.name.trim() !== "" && r.fields.name !== "action");
+  assert.ok(r.fields.description && r.fields.description.trim() !== "");
+  assert.ok(
+    r.fields.description.trim().length < MARKETPLACE_DESCRIPTION_MAX_CHARS,
+    `description length ${r.fields.description.trim().length} must be < ${MARKETPLACE_DESCRIPTION_MAX_CHARS}`,
+  );
+  assert.equal(r.fields.icon, "shield");
+  assert.equal(r.fields.color, "yellow");
+  assert.equal(r.fields.runsUsing, "composite");
+  assert.ok(MARKETPLACE_ALLOWED_ICONS.has(r.fields.icon));
+  assert.ok(MARKETPLACE_ALLOWED_COLORS.has(r.fields.color));
+  assert.ok(MARKETPLACE_VALID_RUNS_USING.has(r.fields.runsUsing));
+});
+
+scenario("marketplace: mutation — overlong description fails Marketplace 125-char limit", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+  assert.equal(
+    validateMarketplaceListingContract(original, { repoRoot }).ok,
+    true,
+    "precondition: live action.yml must pass",
+  );
+  // Replace the folded description body with a deliberately over-long scalar.
+  const overlong = "x".repeat(MARKETPLACE_DESCRIPTION_MAX_CHARS);
+  const mutated = original.replace(
+    /^description:\s*>-[\s\S]*?(?=^author:)/m,
+    `description: "${overlong}"\n`,
+  );
+  assert.ok(mutated !== original, "mutation must change the fixture string");
+  const bad = validateMarketplaceListingContract(mutated, { repoRoot });
+  assert.equal(bad.ok, false, "overlong description must fail the contract");
+  assert.ok(
+    bad.failures.some((f) => /description/i.test(f) && /125|length/i.test(f)),
+    `expected description length failure, got: ${bad.failures.join("; ")}`,
+  );
+  assert.equal(
+    validateMarketplaceListingContract(original, { repoRoot }).ok,
+    true,
+    "restored original must pass",
+  );
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: mutation — bad colour fails; restore still passes", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+  assert.equal(
+    validateMarketplaceListingContract(original, { repoRoot }).ok,
+    true,
+    "precondition: live action.yml must pass",
+  );
+  const mutated = original.replace(/^(\s+color:\s*)yellow\s*$/m, "$1neon-pink");
+  assert.ok(mutated !== original, "mutation must change the fixture string");
+  assert.ok(/color:\s*neon-pink/.test(mutated), "scratch must carry bad colour");
+  const bad = validateMarketplaceListingContract(mutated, { repoRoot });
+  assert.equal(bad.ok, false, "bad colour must fail the contract");
+  assert.ok(
+    bad.failures.some((f) => /color/i.test(f) && /neon-pink/.test(f)),
+    `expected color failure, got: ${bad.failures.join("; ")}`,
+  );
+  // Restore (string-only — never wrote to disk).
+  const restored = validateMarketplaceListingContract(original, { repoRoot });
+  assert.equal(restored.ok, true, "restored original must pass");
+  // Repo file must remain untouched.
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: mutation — bad icon fails; restore still passes", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+  const mutated = original.replace(/^(\s+icon:\s*)shield\s*$/m, "$1coffee");
+  assert.ok(/icon:\s*coffee/.test(mutated));
+  const bad = validateMarketplaceListingContract(mutated, { repoRoot });
+  assert.equal(bad.ok, false, "omitted icon coffee must fail");
+  assert.ok(
+    bad.failures.some((f) => /icon/i.test(f) && /coffee/.test(f)),
+    `expected icon failure, got: ${bad.failures.join("; ")}`,
+  );
+  assert.equal(validateMarketplaceListingContract(original, { repoRoot }).ok, true);
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: mutation — empty description fails; restore still passes", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+  // Collapse the folded description block to an explicit empty string.
+  const mutated = original.replace(
+    /^description:\s*>-[\s\S]*?(?=^author:)/m,
+    'description: ""\n',
+  );
+  assert.ok(mutated !== original, "must mutate description");
+  const bad = validateMarketplaceListingContract(mutated, { repoRoot });
+  assert.equal(bad.ok, false, "empty description must fail");
+  assert.ok(
+    bad.failures.some((f) => /description/i.test(f)),
+    `expected description failure, got: ${bad.failures.join("; ")}`,
+  );
+  assert.equal(validateMarketplaceListingContract(original, { repoRoot }).ok, true);
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: mutation — missing name fails; bare action placeholder fails", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+
+  const missing = original.replace(/^name:\s*.*$/m, "# name: removed for mutation test");
+  const miss = validateMarketplaceListingContract(missing, { repoRoot });
+  assert.equal(miss.ok, false, "missing name must fail");
+  assert.ok(
+    miss.failures.some((f) => /name/i.test(f)),
+    `expected name failure, got: ${miss.failures.join("; ")}`,
+  );
+
+  const placeholder = original.replace(/^name:\s*.*$/m, "name: action");
+  const ph = validateMarketplaceListingContract(placeholder, { repoRoot });
+  assert.equal(ph.ok, false, 'bare name "action" must fail');
+  assert.ok(
+    ph.failures.some((f) => /name/i.test(f) && /action/i.test(f)),
+    `expected placeholder name failure, got: ${ph.failures.join("; ")}`,
+  );
+
+  assert.equal(validateMarketplaceListingContract(original, { repoRoot }).ok, true);
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: mutation — invalid runs.using fails", () => {
+  const repoRoot = path.join(__dirname, "..");
+  const original = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+  const mutated = original.replace(/^(\s+using:\s*)composite\s*$/m, "$1node16");
+  const bad = validateMarketplaceListingContract(mutated, { repoRoot });
+  assert.equal(bad.ok, false, "node16 is not a valid runs.using");
+  assert.ok(
+    bad.failures.some((f) => /runs\.using/i.test(f) && /node16/.test(f)),
+    `expected runs.using failure, got: ${bad.failures.join("; ")}`,
+  );
+  // Accept listed valid runners on synthetic fixtures.
+  for (const runner of ["composite", "node20", "node24", "docker"]) {
+    const okYml = mutated.replace(/^(\s+using:\s*)node16\s*$/m, `$1${runner}`);
+    const r = validateMarketplaceListingContract(okYml, { repoRoot });
+    // May still fail for other reasons if description etc. odd — but runs.using ok.
+    assert.ok(
+      !r.failures.some((f) => /runs\.using/i.test(f)),
+      `runner ${runner} must be accepted; failures=${r.failures.join("; ")}`,
+    );
+  }
+  assert.equal(readFileSync(path.join(repoRoot, "action.yml"), "utf8"), original);
+});
+
+scenario("marketplace: action.yml must be at repo root (not nested)", () => {
+  const repoRoot = path.join(__dirname, "..");
+  // Live root file exists.
+  assert.ok(existsSync(path.join(repoRoot, "action.yml")));
+  // Scratch: a temp dir without root action.yml fails the root check.
+  const scratch = freshBase();
+  try {
+    const yml = readFileSync(path.join(repoRoot, "action.yml"), "utf8");
+    // Nested only — no root action.yml.
+    mkdirSync(path.join(scratch, "nested", "action"), { recursive: true });
+    writeFileSync(path.join(scratch, "nested", "action.yml"), yml, "utf8");
+    const nestedOnly = validateMarketplaceListingContract(yml, { repoRoot: scratch });
+    assert.equal(nestedOnly.ok, false, "nested-only action.yml must fail root check");
+    assert.ok(
+      nestedOnly.failures.some((f) => /repository root/i.test(f)),
+      `expected root failure, got: ${nestedOnly.failures.join("; ")}`,
+    );
+    // Place at root of scratch → root check passes (other fields still validated).
+    writeFileSync(path.join(scratch, "action.yml"), yml, "utf8");
+    const atRoot = validateMarketplaceListingContract(yml, { repoRoot: scratch });
+    assert.equal(atRoot.ok, true, atRoot.failures.join("; "));
+  } finally {
+    try {
+      rmSync(scratch, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+scenario("marketplace: notice text names release published + founder click path", async () => {
+  const {
+    marketplaceListingNoticeText,
+    emitMarketplaceListingNotice,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "ops", "action-release.mjs")).href);
+
+  const text = marketplaceListingNoticeText({ exactTag: "v0.13.1", version: "0.13.1" });
+  assert.match(text, /Marketplace listing/i);
+  assert.match(text, /v0\.13\.1/);
+  assert.match(text, /is published/i);
+  assert.match(text, /NOT.*published automatically|Marketplace listing is \*\*NOT\*\*/i);
+  assert.match(text, /REST API cannot set/i);
+  assert.match(text, /Marketplace Developer Agreement/i);
+  assert.match(text, /Publish this Action to the GitHub Marketplace/i);
+  assert.match(text, /discovery surface/i);
+  // May name adoption metrics only to disclaim them — never claim a positive count.
+  assert.ok(!/\b\d+\s+retained\b/i.test(text), "must not claim retained-team counts");
+  assert.ok(!/we have installs|N evaluators|week-two reuse is/i.test(text), "must not claim adoption");
+  assert.match(text, /not adoption/i);
+
+  // Emit writes stdout + optional GITHUB_STEP_SUMMARY.
+  const lines = [];
+  const sumFile = path.join(freshBase(), "step-summary.md");
+  mkdirSync(path.dirname(sumFile), { recursive: true });
+  writeFileSync(sumFile, "", "utf8");
+  try {
+    const r = emitMarketplaceListingNotice({
+      exactTag: "v0.13.1",
+      version: "0.13.1",
+      stepSummaryPath: sumFile,
+      log: (...a) => lines.push(a.join(" ")),
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.ok(lines.some((l) => /Marketplace listing/i.test(l)));
+    const summary = readFileSync(sumFile, "utf8");
+    assert.match(summary, /Marketplace Developer Agreement/);
+    assert.match(summary, /v0\.13\.1/);
+  } finally {
+    try {
+      rmSync(path.dirname(sumFile), { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+});
+
+scenario("marketplace: notice path throw is non-fatal (emit + release path)", async () => {
+  const {
+    emitMarketplaceListingNotice,
+    runPostReleaseMarketplaceNotice,
+    applyActionRelease,
+    planActionRelease,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "ops", "action-release.mjs")).href);
+
+  // 1. emitMarketplaceListingNotice swallows append failures.
+  const r1 = emitMarketplaceListingNotice({
+    exactTag: "v0.13.1",
+    stepSummaryPath: path.join(tmpdir(), "ga-no-such-dir-marketplace", "summary.md"),
+    appendFileSync: () => {
+      throw new Error("simulated disk full");
+    },
+    log: () => {},
+  });
+  assert.equal(r1.ok, false, "append failure must surface as ok:false");
+  assert.match(r1.error || "", /disk full/);
+
+  // 2. runPostReleaseMarketplaceNotice never throws even when emit throws.
+  let threw = false;
+  const r2 = runPostReleaseMarketplaceNotice({
+    exactTag: "v0.13.1",
+    version: "0.13.1",
+    emit: () => {
+      threw = true;
+      throw new Error("forced notice explosion");
+    },
+  });
+  assert.equal(threw, true);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error || "", /forced notice explosion/);
+
+  // 3. applyActionRelease success path still returns ok when notice throws.
+  // Use dryRun + inject so we never mutate real tags/releases.
+  const head = "a".repeat(40);
+  const plan = planActionRelease({
+    version: "0.13.1",
+    headSha: head,
+    existingTags: [
+      { name: "v0.13.1", sha: head },
+      { name: "v1", sha: head },
+    ],
+    releaseExists: true,
+  });
+  assert.equal(plan.ok, true, plan.reason);
+  assert.equal(plan.idempotent, true);
+
+  let noticeCalls = 0;
+  const applyResult = applyActionRelease({
+    dryRun: true,
+    version: "0.13.1",
+    headSha: head,
+    releaseExists: true,
+    // Hermetic: do not depend on real local tag/release state.
+    existingTags: [
+      { name: "v0.13.1", sha: head },
+      { name: "v1", sha: head },
+    ],
+    emitMarketplaceListingNotice: () => {
+      noticeCalls++;
+      throw new Error("notice must not fail release");
+    },
+  });
+  assert.equal(applyResult.ok, true, "release path must succeed when notice throws");
+  assert.equal(applyResult.exitCode, 0);
+  assert.equal(applyResult.dryRun, true);
+  assert.equal(noticeCalls, 1, "injected notice must have been invoked on success path");
 });
 
 // ---------------------------------------------------------------------------

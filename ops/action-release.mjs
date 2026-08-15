@@ -727,11 +727,19 @@ export function applyActionRelease(o = {}) {
   const version = o.version || readLocalVersion().version;
 
   // Discover existing tags for exact + major — always peel to commit (annotated-safe).
-  const existingTags = [];
-  for (const name of [exactTagName(version), ACTION_MAJOR_TAG]) {
-    const peeled = peelTagToCommit(name, { cwd: o.cwd || REPO_ROOT });
-    if (peeled) {
-      existingTags.push({ name, sha: peeled });
+  // Tests may inject `existingTags` (dry-run / hermetic) to avoid real git tag state.
+  let existingTags = [];
+  if (Array.isArray(o.existingTags)) {
+    existingTags = o.existingTags.map((t) => ({
+      name: String(t.name),
+      sha: normalizeSha(t.sha) || String(t.sha || ""),
+    }));
+  } else {
+    for (const name of [exactTagName(version), ACTION_MAJOR_TAG]) {
+      const peeled = peelTagToCommit(name, { cwd: o.cwd || REPO_ROOT });
+      if (peeled) {
+        existingTags.push({ name, sha: peeled });
+      }
     }
   }
 
@@ -766,6 +774,20 @@ export function applyActionRelease(o = {}) {
   }
 
   if (o.dryRun) {
+    // Normal dry-run is silent about Marketplace. Tests may inject
+    // emitMarketplaceListingNotice to prove the success-path notice is non-fatal
+    // without mutating tags/releases.
+    if (typeof o.emitMarketplaceListingNotice === "function") {
+      try {
+        o.emitMarketplaceListingNotice({
+          exactTag: plan.exactTag,
+          version,
+          majorTag: plan.majorTag,
+        });
+      } catch {
+        // notice must never fail, block, or alter a release (incl. dry-run plan)
+      }
+    }
     return { ok: true, plan, exitCode: 0, dryRun: true };
   }
 
@@ -825,7 +847,127 @@ export function applyActionRelease(o = {}) {
   }
 
   console.log(`action-release: OK ${plan.exactTag} + ${plan.majorTag} @ ${plan.headSha.slice(0, 12)}`);
+  // Non-fatal Marketplace listing notice. REST API cannot set the
+  // marketplace-publish flag on bot-created Releases — founder must click.
+  // Runs after create-release AND keep-release (idempotent) success paths.
+  // Never fails, blocks, or alters the release outcome.
+  try {
+    const emit =
+      typeof o.emitMarketplaceListingNotice === "function"
+        ? o.emitMarketplaceListingNotice
+        : emitMarketplaceListingNotice;
+    emit({ exactTag: plan.exactTag, version, majorTag: plan.majorTag });
+  } catch {
+    // intentionally empty — notice path must never fail a release
+  }
   return { ok: true, plan, exitCode: 0 };
+}
+
+/**
+ * Pure text for the post-release Marketplace listing notice.
+ * Discovery surface only — never claim installs, evaluators, or retained teams.
+ *
+ * @param {{exactTag?:string,version?:string,majorTag?:string}} [o]
+ * @returns {string}
+ */
+export function marketplaceListingNoticeText(o = {}) {
+  const tag = String(o.exactTag || o.tag || "the release").trim() || "the release";
+  const version = o.version ? String(o.version).trim() : "";
+  const verBit = version ? ` (getadvantage@${version})` : "";
+  return [
+    "## Marketplace listing — manual founder step remaining",
+    "",
+    `GitHub Release **${tag}**${verBit} is published.`,
+    "Marketplace listing is **NOT** published automatically.",
+    "The GitHub REST API cannot set the marketplace-publish flag on bot-created Releases.",
+    "",
+    "### Remaining founder click path",
+    `1. Open the GitHub Release page for \`${tag}\` (Releases → ${tag}).`,
+    "2. Accept the **Marketplace Developer Agreement** if prompted (once per publisher account).",
+    '3. Check **Publish this Action to the GitHub Marketplace** on that Release and confirm.',
+    "",
+    "Full path: `docs/launch/MARKETPLACE-LISTING.md`.",
+    "A Marketplace listing is a **discovery surface** — not adoption, installs, evaluators, or retained teams.",
+  ].join("\n");
+}
+
+/**
+ * Emit Marketplace listing notice to stdout and GITHUB_STEP_SUMMARY (when set).
+ * NEVER throws to the caller when used as designed; internal failures are
+ * swallowed and reported as `{ ok: false }`. Injectable deps for tests.
+ *
+ * @param {object} [o]
+ * @param {string} [o.exactTag]
+ * @param {string} [o.version]
+ * @param {string} [o.majorTag]
+ * @param {string|null} [o.stepSummaryPath] override GITHUB_STEP_SUMMARY
+ * @param {typeof appendFileSync} [o.appendFileSync]
+ * @param {(...args: unknown[]) => void} [o.log]
+ * @param {(o: object) => string} [o.textFn]
+ * @returns {{ok:boolean,text?:string,error?:string}}
+ */
+export function emitMarketplaceListingNotice(o = {}) {
+  try {
+    const textFn = typeof o.textFn === "function" ? o.textFn : marketplaceListingNoticeText;
+    const text = textFn(o);
+    const log = typeof o.log === "function" ? o.log : (...args) => console.log(...args);
+    log(text);
+    const summaryPath =
+      o.stepSummaryPath !== undefined ? o.stepSummaryPath : process.env.GITHUB_STEP_SUMMARY;
+    if (summaryPath) {
+      const append = typeof o.appendFileSync === "function" ? o.appendFileSync : appendFileSync;
+      const blob = text.endsWith("\n") ? text : `${text}\n`;
+      append(summaryPath, blob, "utf8");
+    }
+    return { ok: true, text };
+  } catch (err) {
+    try {
+      const log = typeof o.log === "function" ? o.log : (...args) => console.log(...args);
+      log(
+        `action-release: marketplace listing notice skipped (non-fatal): ${
+          err && err.message ? err.message : err
+        }`,
+      );
+    } catch {
+      // even logging failure is non-fatal
+    }
+    return {
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+    };
+  }
+}
+
+/**
+ * Post-release notice wrapper used by applyActionRelease success path.
+ * Guarantees no throw even if a custom `emit` throws past its own guards.
+ *
+ * @param {object} [o]
+ * @param {string} [o.exactTag]
+ * @param {string} [o.version]
+ * @param {string} [o.majorTag]
+ * @param {Function} [o.emit] inject for tests
+ * @returns {{ok:boolean,text?:string,error?:string}}
+ */
+export function runPostReleaseMarketplaceNotice(o = {}) {
+  try {
+    const emit = typeof o.emit === "function" ? o.emit : emitMarketplaceListingNotice;
+    return emit({ exactTag: o.exactTag, version: o.version, majorTag: o.majorTag });
+  } catch (err) {
+    try {
+      console.log(
+        `action-release: marketplace listing notice skipped (non-fatal): ${
+          err && err.message ? err.message : err
+        }`,
+      );
+    } catch {
+      /* ignore */
+    }
+    return {
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+    };
+  }
 }
 
 /**
