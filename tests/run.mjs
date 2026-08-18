@@ -14821,14 +14821,22 @@ scenario("feedback: mutation — neuter secret redaction → secret leaks (then 
   const base = freshBase();
   try {
     const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const checksPath = path.join(__dirname, "..", "checks.mjs");
     const original = readFileSync(productPath, "utf8");
     const scratchDir = path.join(base, "scratch-fb");
     mkdirSync(scratchDir, { recursive: true });
-    // Neuter: redactSecrets returns input unchanged.
-    const neutered = original.replace(
-      /export function redactSecrets\(text\) \{[\s\S]*?\n\}/,
-      "export function redactSecrets(text) { return String(text ?? \"\"); }",
-    );
+    // Point the scratch module at the real checks catalogue (relative import
+    // would miss sibling modules when loaded from a temp directory).
+    const checksHref = pathToFileURL(checksPath).href;
+    const neutered = original
+      .replace(
+        /from\s+["']\.\/checks\.mjs["']/,
+        `from ${JSON.stringify(checksHref)}`,
+      )
+      .replace(
+        /export function redactSecrets\(text\) \{[\s\S]*?\n\}/,
+        "export function redactSecrets(text) { return String(text ?? \"\"); }",
+      );
     assert.ok(neutered !== original, "mutation must change the source");
     writeFileSync(path.join(scratchDir, "feedback.mjs"), neutered, "utf8");
     const mod = await import(pathToFileURL(path.join(scratchDir, "feedback.mjs")).href + `?mut=${Date.now()}`);
@@ -14961,10 +14969,16 @@ scenario("feedback: overlong payload truncates under MAX_URL_CHARS; valid URL; d
   const base = freshBase();
   try {
     const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const checksPath = path.join(__dirname, "..", "checks.mjs");
     const original = readFileSync(productPath, "utf8");
     const scratchDir = path.join(base, "scratch-cap");
     mkdirSync(scratchDir, { recursive: true });
+    const checksHref = pathToFileURL(checksPath).href;
     const neutered = original
+      .replace(
+        /from\s+["']\.\/checks\.mjs["']/,
+        `from ${JSON.stringify(checksHref)}`,
+      )
       .replace(/export const MAX_URL_CHARS = \d+;/, "export const MAX_URL_CHARS = 999999;")
       .replace(
         /export function assembleFeedbackUrl\(title, body, maxChars = MAX_URL_CHARS\) \{/,
@@ -15220,6 +15234,227 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     }
     cleanup(base);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 56b. Feedback redaction catalogue unification (P3-f1 / P3-f2)
+//      TEST_FILTER=feedback
+// ---------------------------------------------------------------------------
+
+scenario("feedback: catalogue-parity — every checks.mjs secret id is covered", async () => {
+  const stamp = Date.now();
+  const { SECRET_PATTERNS } = await import(
+    pathToFileURL(path.join(__dirname, "..", "checks.mjs")).href + `?par=${stamp}`
+  );
+  const {
+    FEEDBACK_COVERS_CHECK_SECRET_IDS,
+    listFeedbackSecretRedactionSources,
+    redactSecrets,
+  } = await import(
+    pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?par=${stamp}`
+  );
+
+  assert.ok(Array.isArray(SECRET_PATTERNS) && SECRET_PATTERNS.length > 0, "checks catalogue non-empty");
+  assert.ok(
+    Array.isArray(FEEDBACK_COVERS_CHECK_SECRET_IDS) && FEEDBACK_COVERS_CHECK_SECRET_IDS.length > 0,
+    "feedback coverage list non-empty",
+  );
+
+  const sources = listFeedbackSecretRedactionSources();
+  const missing = [];
+  for (const p of SECRET_PATTERNS) {
+    if (!FEEDBACK_COVERS_CHECK_SECRET_IDS.includes(p.id)) {
+      missing.push(p.id);
+      continue;
+    }
+    const hasRe = sources.some((s) => s.source === p.re.source && s.flags === p.re.flags);
+    if (!hasRe) missing.push(p.id);
+  }
+  assert.deepEqual(
+    missing,
+    [],
+    `feedback redactor missing check catalogue coverage for: ${missing.join(", ")}`,
+  );
+  assert.equal(
+    FEEDBACK_COVERS_CHECK_SECRET_IDS.length,
+    SECRET_PATTERNS.length,
+    "coverage id count must equal checks catalogue length",
+  );
+
+  // Named gaps (P3-f1): prove the four shapes redact via the shared catalogue.
+  // Values assembled so this test file does not itself become a new scan hit.
+  const sg = "SG." + "Aa1Bb2Cc3Dd4Ee5F" + "." + "Gg6Hh7Ii8Jj9Kk0L";
+  const vcp = "vcp_" + "a1b2c3d4e5f6g7h8i9j0";
+  const kv = "KV_REST_API_" + "TOKEN" + "=" + "syn_kv_rest_token_value_001";
+  // Real JWT header {"alg":"none"} base64url = eyJhbGciOiJub25lIn0 — assembled.
+  const jwt =
+    "eyJ" + "hbGciOiJub25lIn0" + "." + "eyJzdWIiOiJ4In0" + "." + "signaturepartxx";
+  for (const [label, sample] of [
+    ["sendgrid", sg],
+    ["vercel", vcp],
+    ["kv-rest", kv],
+    ["jwt", jwt],
+  ]) {
+    const out = redactSecrets(`prefix ${sample} suffix`);
+    assert.ok(!out.includes(sample), `${label} sample must be redacted, got: ${out}`);
+    assert.ok(out.includes("[REDACTED]"), `${label} must leave [REDACTED] marker`);
+  }
+});
+
+scenario("feedback: mutation — drop one check id from coverage → parity fails", async () => {
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const checksPath = path.join(__dirname, "..", "checks.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-parity");
+    mkdirSync(scratchDir, { recursive: true });
+    const checksHref = pathToFileURL(checksPath).href;
+
+    // Drop sendgrid from the derived redaction list (id + regex).
+    const neutered = original
+      .replace(
+        /from\s+["']\.\/checks\.mjs["']/,
+        `from ${JSON.stringify(checksHref)}`,
+      )
+      .replace(
+        /const CHECK_SECRET_REDACTION = CHECK_SECRET_PATTERNS\.map\(\(p\) => \(\{[\s\S]*?\}\)\);/,
+        `const CHECK_SECRET_REDACTION = CHECK_SECRET_PATTERNS.filter((p) => p.id !== "sendgrid").map((p) => ({
+  id: p.id,
+  re: cloneRe(p.re),
+}));`,
+      );
+    assert.ok(neutered !== original, "mutation must change feedback source");
+    writeFileSync(path.join(scratchDir, "feedback.mjs"), neutered, "utf8");
+
+    const { SECRET_PATTERNS } = await import(
+      pathToFileURL(checksPath).href + `?mutpar=${Date.now()}`
+    );
+    const mut = await import(
+      pathToFileURL(path.join(scratchDir, "feedback.mjs")).href + `?mutpar=${Date.now()}`
+    );
+
+    const missing = [];
+    const sources = mut.listFeedbackSecretRedactionSources();
+    for (const p of SECRET_PATTERNS) {
+      if (!mut.FEEDBACK_COVERS_CHECK_SECRET_IDS.includes(p.id)) {
+        missing.push(p.id);
+        continue;
+      }
+      const hasRe = sources.some((s) => s.source === p.re.source && s.flags === p.re.flags);
+      if (!hasRe) missing.push(p.id);
+    }
+    assert.ok(missing.includes("sendgrid"), `neuter must surface sendgrid as missing, got: ${missing.join(",")}`);
+    assert.ok(
+      !mut.FEEDBACK_COVERS_CHECK_SECRET_IDS.includes("sendgrid"),
+      "neuter must remove sendgrid from FEEDBACK_COVERS_CHECK_SECRET_IDS",
+    );
+    assert.equal(readFileSync(productPath, "utf8"), original);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: SG/vcp_/eyJ/KV_REST_API never travel (stdout/stderr/url/decoded)", async () => {
+  const base = freshBase();
+  try {
+    // Assembled so tests/run.mjs itself does not gain new contiguous scan hits.
+    const sg = "SG." + "Zz1Yy2Xx3Ww4Vv5U" + "." + "Tt6Ss7Rr8Qq9Pp0O";
+    const vcp = "vcp_" + "z9y8x7w6v5u4t3s2r1q0";
+    const kv = "KV_REST_API_" + "URL" + "=" + "https://example.kv.vercel-storage.com";
+    const jwt =
+      "eyJ" + "hbGciOiJub25lIn0" + "." + "eyJleHAiOjB9" + "." + "deadbeefcafe001";
+
+    const {
+      buildFeedbackUrl,
+      redactSecrets,
+    } = await import(
+      pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?four=${Date.now()}`
+    );
+
+    for (const sample of [sg, vcp, kv, jwt]) {
+      assert.ok(!redactSecrets(sample).includes(sample), `redactSecrets must clear ${sample.slice(0, 12)}…`);
+    }
+
+    const built = buildFeedbackUrl({
+      cliVersion: "0.0.0-test",
+      nodeVersion: "v20.0.0",
+      platform: "linux",
+      notes: `pasted ${sg} ${vcp} ${kv} ${jwt}`,
+      checks: [{ label: "Secret scan", status: "fail" }],
+    });
+    const decoded = decodeURIComponent(built.url);
+    for (const sample of [sg, vcp, kv, jwt]) {
+      assert.ok(!built.body.includes(sample), `body must not contain ${sample.slice(0, 12)}…`);
+      assert.ok(!built.url.includes(sample), `raw url must not contain ${sample.slice(0, 12)}…`);
+      assert.ok(!decoded.includes(sample), `decoded url must not contain ${sample.slice(0, 12)}…`);
+    }
+
+    // CLI path: plant one shape in a committed file; feedback must still exit 0
+    // and never echo any of the four values (gate metadata is labels only, but
+    // defend the redactor path via forced notes above; here we check stdout).
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "leak.js", `export const K = "${vcp}";\n`);
+    write(repo, "package.json", JSON.stringify({ name: "four", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: plant vcp");
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const all = r.stdout + r.stderr;
+    assert.ok(!all.includes(vcp), "vcp must be absent from CLI stdout+stderr");
+    const urlLine = r.stdout.split(/\r?\n/).find((l) => l.startsWith("https://")) || "";
+    let dec = urlLine;
+    try {
+      dec = decodeURIComponent(urlLine);
+    } catch {
+      /* keep */
+    }
+    assert.ok(!urlLine.includes(vcp) && !dec.includes(vcp), "vcp must be absent from URL/decoded");
+    assert.equal(r.stderr.length, 0, "stderr 0 bytes");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: spaced Windows + POSIX absolute paths fully redacted", async () => {
+  const {
+    redactPathsAndUser,
+    buildFeedbackUrl,
+  } = await import(
+    pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?pathsp=${Date.now()}`
+  );
+
+  const winSpaced = "C:\\Program Files\\Foo\\bar.txt";
+  const posixSpaced = "/Users/ben/My Documents/x";
+  const winFwd = "C:/Program Files/Foo/bar.txt";
+
+  // Pure path redactor — full path must not survive (not merely the prefix).
+  for (const sample of [winSpaced, posixSpaced, winFwd]) {
+    const out = redactPathsAndUser(`see ${sample} today`);
+    assert.ok(!out.includes(sample), `full path must be redacted: ${sample} → ${out}`);
+    assert.ok(!out.includes("Program Files") && !out.includes("My Documents"), `spaced segment must not remain: ${out}`);
+    assert.ok(out.includes("[PATH]"), `expected [PATH] marker, got: ${out}`);
+  }
+
+  // Partial-prefix failure mode (pre-fix): only C:\Program would be eaten if
+  // the redactor still stopped at whitespace — assert that does not happen.
+  const brokenShape = redactPathsAndUser(winSpaced);
+  assert.ok(!/C:\\Program\b/.test(brokenShape), "must not leave C:\\Program residue");
+  assert.ok(!brokenShape.includes("Files\\Foo"), "must not leave Files\\Foo residue");
+
+  const built = buildFeedbackUrl({
+    cliVersion: "0.0.0-test",
+    platform: "win32",
+    notes: `config at ${winSpaced} and also ${posixSpaced}`,
+  });
+  const decoded = decodeURIComponent(built.url);
+  for (const sample of [winSpaced, posixSpaced]) {
+    assert.ok(!built.body.includes(sample), `body must not contain ${sample}`);
+    assert.ok(!built.url.includes(sample), `raw url must not contain path`);
+    assert.ok(!decoded.includes(sample), `decoded must not contain ${sample}`);
+  }
+  assert.ok(!decoded.includes("Program Files"), "Program Files must not travel decoded");
+  assert.ok(!decoded.includes("My Documents"), "My Documents must not travel decoded");
 });
 
 // ---------------------------------------------------------------------------

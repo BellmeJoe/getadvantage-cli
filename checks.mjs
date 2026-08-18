@@ -170,7 +170,7 @@ export function checkDirtyTree(cwd) {
 // chains ("sk-circle-fade-dot-before-anim") and prose practically never do.
 const hasDigit = (tok) => /[0-9]/.test(tok);
 
-const SECRET_PATTERNS = [
+export const SECRET_PATTERNS = [
   // --- from app/lib/safety.ts ---
   // Anthropic BEFORE OpenAI: `sk-ant-…` also matches the broader sk- shape, so
   // the specific pattern must claim it first (and openai's validator skips it).

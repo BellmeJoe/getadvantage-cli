@@ -434,9 +434,11 @@ npx getadvantage feedback
 The URL opens a new issue on the public getadvantage-cli repository with
 redacted metadata only (CLI/Node/OS platform, detected stack, check counts and
 labels). **It never opens a browser, never posts, and makes zero network
-requests** — you choose whether to submit. Secrets, absolute paths, usernames,
-and hostnames are stripped. This is instrumentation for a live experiment, not
-a claim of adoption or active support volume.
+requests** — you choose whether to submit. The payload is built by
+**non-collection**: hostname, username, absolute paths, and secret values are
+never gathered into it (a redactor is defence-in-depth on that boundary, not
+the primary guarantee). This is instrumentation for a live experiment, not a
+claim of adoption or active support volume.
 
 ### See what would leave (`--report-dry-run`)
 

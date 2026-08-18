@@ -11,6 +11,10 @@
 //   • URL length is hard-capped (MAX_URL_CHARS); overlong payloads truncate
 //     with visible disclosure and never emit an invalid URL.
 //   • This module never posts, opens a browser, or touches the network.
+//   • Secret shapes come from the checks.mjs catalogue (one answer). Feedback-
+//     only extras may widen coverage; they must never narrow it.
+
+import { SECRET_PATTERNS as CHECK_SECRET_PATTERNS } from "./checks.mjs";
 
 /** Canonical origin for the feedback issue form. Never from git remote. */
 export const FEEDBACK_GITHUB_ORIGIN = "https://github.com";
@@ -31,35 +35,65 @@ export const FEEDBACK_NEW_ISSUE_BASE =
  */
 export const MAX_URL_CHARS = 7000;
 
-// Live-shaped / high-entropy credential patterns — redacted from any string
-// that ends up in the issue title or body (and therefore in the URL).
-const SECRET_PATTERNS = [
-  /\bsk_live_[A-Za-z0-9]{20,}/g,
+/** Clone a RegExp so redaction never shares lastIndex with the gate scanner. */
+function cloneRe(re) {
+  return new RegExp(re.source, re.flags);
+}
+
+/**
+ * Check-catalogue entries the redactor covers. Derived from checks.mjs —
+ * removing an entry here is exactly what the drift/parity test mutates.
+ * Defence-in-depth: we apply each `.re` without its `validate()` (redact more
+ * aggressively than the gate detects).
+ */
+const CHECK_SECRET_REDACTION = CHECK_SECRET_PATTERNS.map((p) => ({
+  id: p.id,
+  re: cloneRe(p.re),
+}));
+
+/**
+ * Ids from `checks.mjs` `SECRET_PATTERNS` that the feedback redactor covers.
+ * Must stay a complete enumeration of the check catalogue (superset via
+ * feedback-only extras is fine; missing an id is a defect).
+ */
+export const FEEDBACK_COVERS_CHECK_SECRET_IDS = Object.freeze(
+  CHECK_SECRET_REDACTION.map((p) => p.id),
+);
+
+/**
+ * Feedback-only extras — shapes the gate does not list (or lists more
+ * narrowly) but that must still never travel in a feedback payload.
+ * Keeping these is the allowed "superset" relative to checks.mjs.
+ */
+const FEEDBACK_ONLY_SECRET_PATTERNS = [
   /\bsk_test_[A-Za-z0-9]{20,}/g,
-  /\brk_live_[A-Za-z0-9]{20,}/g,
-  /\bsk-ant-[A-Za-z0-9_-]{16,}/g,
-  /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
-  /\badv_live_[a-z0-9]{16,}/g,
-  /\bghp_[A-Za-z0-9]{36}\b/g,
   /\bghs_[A-Za-z0-9]{20,}/g,
   /\bgho_[A-Za-z0-9]{20,}/g,
   /\bghu_[A-Za-z0-9]{20,}/g,
   /\bghr_[A-Za-z0-9]{20,}/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/g,
-  /\bwhsec_[A-Za-z0-9]{16,}/g,
-  /\bnpm_[A-Za-z0-9]{20,}/g,
-  /\bGOCSPX-[A-Za-z0-9_-]{16,}/g,
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
-  /\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^\s'"]+/gi,
-  /\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi,
+  /\b(?:mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^\s'"]+/gi,
 ];
+
+const SECRET_REDACTION_REGEXES = [
+  ...CHECK_SECRET_REDACTION.map((p) => p.re),
+  ...FEEDBACK_ONLY_SECRET_PATTERNS,
+];
+
+/**
+ * Source/flags pairs actually applied by redactSecrets — used by the
+ * catalogue-parity test so coverage cannot drift from a hand-written id list.
+ */
+export function listFeedbackSecretRedactionSources() {
+  return SECRET_REDACTION_REGEXES.map((re) => ({
+    source: re.source,
+    flags: re.flags,
+  }));
+}
 
 /** Replace credential-shaped substrings with a fixed token. Pure. */
 export function redactSecrets(text) {
   let s = String(text ?? "");
-  for (const re of SECRET_PATTERNS) {
+  for (const re of SECRET_REDACTION_REGEXES) {
     // Reset lastIndex for global patterns reused across calls.
     re.lastIndex = 0;
     s = s.replace(re, "[REDACTED]");
@@ -71,6 +105,9 @@ export function redactSecrets(text) {
  * Strip absolute paths, home-directory prefixes, and OS usernames so a
  * payload never carries machine identity. Pure — extra names come from the
  * caller (e.g. process.env.USERNAME) so this module stays I/O-free.
+ *
+ * Path shapes allow spaces inside segments (e.g. `C:\Program Files\…`,
+ * `/Users/ben/My Documents/x`) so redaction does not stop at the first space.
  *
  * @param {string} text
  * @param {{ homeDir?: string, username?: string }} [opts]
@@ -102,14 +139,16 @@ export function redactPathsAndUser(text, opts = {}) {
   }
 
   // Generic absolute-path shapes (defense in depth — never depend on opts).
-  // Windows: C:\Users\name\... and C:/Users/name/...
-  s = s.replace(/\b[A-Za-z]:\\Users\\[^\\\/\s"'`]+/gi, "[PATH]");
-  s = s.replace(/\b[A-Za-z]:\/Users\/[^\\\/\s"'`]+/gi, "[PATH]");
-  // Other Windows absolute: C:\something
-  s = s.replace(/\b[A-Za-z]:\\[^\s"'`]+/g, "[PATH]");
-  // Unix home and absolute
-  s = s.replace(/\/home\/[^\/\s"'`]+/g, "[PATH]");
-  s = s.replace(/\/Users\/[^\/\s"'`]+/g, "[PATH]");
+  // Spaces are allowed inside path *segments*; the final segment stops at
+  // whitespace so trailing prose is not swallowed. Middle segments may contain
+  // spaces (`Program Files`, `My Documents`).
+  // Windows backslash: C:\Users\name\… and C:\Program Files\Foo\bar.txt
+  s = s.replace(/\b[A-Za-z]:\\(?:[^\\\/\r\n"'`<>|]+\\)*[^\\\/\s"'`<>|]+/g, "[PATH]");
+  // Windows forward-slash form
+  s = s.replace(/\b[A-Za-z]:\/(?:[^\/\r\n"'`<>|]+\/)*[^\/\s"'`<>|]+/g, "[PATH]");
+  // Unix home and absolute (spaced segments OK)
+  s = s.replace(/\/home\/(?:[^\/\r\n"'`<>|]+\/)*[^\/\s"'`<>|]+/g, "[PATH]");
+  s = s.replace(/\/Users\/(?:[^\/\r\n"'`<>|]+\/)*[^\/\s"'`<>|]+/g, "[PATH]");
   // $HOME / %USERPROFILE% literals
   s = s.replace(/\$HOME\b/g, "[HOME]");
   s = s.replace(/%USERPROFILE%/gi, "[HOME]");
