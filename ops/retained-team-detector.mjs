@@ -12,7 +12,8 @@
 //
 // Exit codes:
 //   0  — query succeeded (including zero external hits → plain `0`)
-//   1  — UNKNOWN (auth / rate-limit / network / missing token)
+//   1  — UNKNOWN (auth / rate-limit / network / missing token /
+//                positive-control failure / incomplete_results)
 //
 // Node built-ins only. ESM. Injectable `fetch` for hermetic tests.
 
@@ -24,6 +25,26 @@ import path from "node:path";
 export const RECEIPT_HEADER = "getAdvantage invisible-mode receipt";
 export const RECEIPT_PATH = ".getadvantage/INVISIBLE-MODE.md";
 export const DEFAULT_SELF_OWNER = "BellmeJoe";
+
+/**
+ * World-fact positive-control code-search query.
+ *
+ * Why this shape (not a repo-scoped control):
+ * - `filename:package.json left-pad` is a globally popular, long-lived artifact
+ *   (left-pad's infamous unpublish / npm incident). Measured ~2060 hits when the
+ *   GitHub code-search API is healthy — expected non-zero and stable enough that
+ *   a count of 0 means "instrument broken", not "left-pad vanished".
+ * - CRITICAL: do NOT use `repo:BellmeJoe/getadvantage-cli …`. Live measurement
+ *   (2026-08-18) showed that repo-scoped shape returns `incomplete_results: true`
+ *   even on a healthy API, which would fail-closed the detector forever.
+ *
+ * Judged by count only (must be non-zero). Do NOT apply the production
+ * `incomplete_results → UNKNOWN` guard to the control response.
+ */
+export const CONTROL_QUERY = "filename:package.json left-pad";
+
+/** Minimum total_count for the control to be considered healthy. */
+export const CONTROL_MIN_COUNT = 1;
 
 const API = "https://api.github.com";
 const API_VERSION = "2022-11-28";
@@ -218,6 +239,7 @@ export function formatReport(result) {
   const generated = result.generatedAt || new Date().toISOString();
 
   if (result.status === "UNKNOWN") {
+    const reason = result.failureReason || "unknown";
     lines.push("# getAdvantage retained-team-detector report");
     lines.push(`# generated: ${generated}`);
     lines.push(`# selfOwner: ${result.selfOwner || DEFAULT_SELF_OWNER}`);
@@ -225,13 +247,37 @@ export function formatReport(result) {
     lines.push("UNKNOWN");
     lines.push("");
     lines.push(`## Failure`);
-    lines.push(`- reason: ${result.failureReason || "unknown"}`);
+    lines.push(`- reason: ${reason}`);
     if (result.httpStatus != null) lines.push(`- httpStatus: ${result.httpStatus}`);
     lines.push("");
-    lines.push(
-      "This is not a retained-team count of 0. Auth, rate-limit, or network",
-    );
-    lines.push("failure prevented a reliable observation.");
+    // Distinguish three outcome classes in output text:
+    //   1. missing token
+    //   2. instrument failure (positive-control / incomplete_results)
+    //   3. auth / rate-limit / network (pre-existing paths)
+    // Observed absence is the plain-`0` happy path below — never UNKNOWN.
+    const reasonLower = String(reason).toLowerCase();
+    if (/missing.*github_token|github_token/.test(reasonLower) && /missing/.test(reasonLower)) {
+      lines.push(
+        "This is not a retained-team count of 0. Missing GITHUB_TOKEN prevented",
+      );
+      lines.push("any observation.");
+    } else if (
+      /incomplete results|positive.?control|control query|control search|control returned/i.test(
+        reason,
+      )
+    ) {
+      lines.push(
+        "This is not a retained-team count of 0. Instrument failure (positive",
+      );
+      lines.push(
+        "control or incomplete code-search results) prevented a reliable observation.",
+      );
+    } else {
+      lines.push(
+        "This is not a retained-team count of 0. Auth, rate-limit, or network",
+      );
+      lines.push("failure prevented a reliable observation.");
+    }
     lines.push("");
     return lines.join("\n");
   }
@@ -385,7 +431,76 @@ export async function runDetector(opts = {}) {
 
   const headers = authHeaders(String(token).trim());
 
-  // Code search: receipt header + path. Phrase match is the countable identity.
+  // -------------------------------------------------------------------------
+  // Positive control FIRST (same session / same API / same token).
+  // Judge by count only — must be non-zero. Do NOT treat control
+  // incomplete_results as UNKNOWN (only the production query gets that guard).
+  // A failing control is never rescued by a non-zero production result.
+  // -------------------------------------------------------------------------
+  const controlUrl = `${API}/search/code?q=${encodeURIComponent(CONTROL_QUERY)}&per_page=1`;
+
+  let controlRes;
+  try {
+    controlRes = await fetchImpl(controlUrl, { method: "GET", headers });
+  } catch (e) {
+    const out = fail(
+      `positive-control search network failure: ${e && e.message ? e.message : e}`,
+    );
+    emit(out.report, opts);
+    return out;
+  }
+
+  if (isFailureStatus(controlRes.status)) {
+    const out = fail(
+      controlRes.status === 401
+        ? "positive-control search auth failure (401)"
+        : controlRes.status === 429
+          ? "positive-control search rate-limited (429)"
+          : "positive-control search rate-limited or forbidden (403)",
+      controlRes.status,
+    );
+    emit(out.report, opts);
+    return out;
+  }
+
+  if (!controlRes.ok) {
+    const out = fail(
+      `positive-control search HTTP ${controlRes.status}`,
+      controlRes.status,
+    );
+    emit(out.report, opts);
+    return out;
+  }
+
+  let controlBody;
+  try {
+    controlBody = await controlRes.json();
+  } catch (e) {
+    const out = fail(
+      `positive-control search unparseable response: ${e && e.message ? e.message : e}`,
+    );
+    emit(out.report, opts);
+    return out;
+  }
+
+  const controlCount =
+    typeof controlBody?.total_count === "number"
+      ? controlBody.total_count
+      : Array.isArray(controlBody?.items)
+        ? controlBody.items.length
+        : 0;
+
+  if (!(controlCount >= CONTROL_MIN_COUNT)) {
+    const out = fail(
+      `positive-control search returned ${controlCount} hits (expected ≥${CONTROL_MIN_COUNT} for query ${JSON.stringify(CONTROL_QUERY)}); instrument unusable — refusing to report a retained-team count`,
+    );
+    emit(out.report, opts);
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
+  // Production query: receipt header + path. Phrase match is the countable identity.
+  // -------------------------------------------------------------------------
   const q = [
     `"${RECEIPT_HEADER}"`,
     "path:.getadvantage",
@@ -433,6 +548,15 @@ export async function runDetector(opts = {}) {
     const out = fail(
       `unparseable search response: ${e && e.message ? e.message : e}`,
     );
+    emit(out.report, opts);
+    return out;
+  }
+
+  // Highest-value guard: incomplete_results on the production query means the
+  // API could not finish ranking/counting. Never emit a numeric retained-team
+  // count (including a confident 0) from an incomplete search.
+  if (searchBody && searchBody.incomplete_results === true) {
+    const out = fail("code search returned incomplete results");
     emit(out.report, opts);
     return out;
   }
@@ -625,7 +749,8 @@ Queries GitHub code search for invisible-mode receipts
 classifies installs vs week-two retention, prints a dated auditable report.
 
 Exit 0 on successful observation (including plain 0 when nothing external).
-Exit 1 with UNKNOWN on auth / rate-limit / network failure.
+Exit 1 with UNKNOWN on auth / rate-limit / network / positive-control /
+incomplete_results failure.
 `);
     return 0;
   }

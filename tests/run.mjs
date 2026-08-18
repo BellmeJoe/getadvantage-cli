@@ -13402,7 +13402,45 @@ import {
   runDetector,
   formatReport,
   DEFAULT_SELF_OWNER as RTD_SELF_OWNER,
+  CONTROL_QUERY as RTD_CONTROL_QUERY,
+  CONTROL_MIN_COUNT as RTD_CONTROL_MIN_COUNT,
 } from "../ops/retained-team-detector.mjs";
+
+/** Default healthy world-fact control response (~2060 left-pad package.json hits). */
+const RTD_HEALTHY_CONTROL_BODY = {
+  total_count: 2060,
+  incomplete_results: false,
+  items: [],
+};
+
+/** True when a /search/code URL is the positive-control query (not production). */
+function isRetainedTeamControlSearchUrl(url) {
+  const u = String(url);
+  if (!u.includes("/search/code")) return false;
+  let q = "";
+  try {
+    const idx = u.indexOf("?");
+    if (idx >= 0) {
+      const params = new URLSearchParams(u.slice(idx + 1));
+      q = params.get("q") || "";
+    }
+  } catch {
+    q = "";
+  }
+  // Match exported CONTROL_QUERY; also accept encoded/decoded variants.
+  if (q === RTD_CONTROL_QUERY) return true;
+  try {
+    if (decodeURIComponent(q) === RTD_CONTROL_QUERY) return true;
+  } catch {
+    /* ignore */
+  }
+  // Fallback: world-fact left-pad control shape (never repo-scoped).
+  return (
+    /\bleft-pad\b/i.test(q) &&
+    /filename:package\.json/i.test(q) &&
+    !/INVISIBLE-MODE/i.test(q)
+  );
+}
 
 /** Minimal product-shaped receipt body with one or more `- at:` lines. */
 function makeReceipt(atTimestamps) {
@@ -13488,15 +13526,40 @@ function searchItem(fullName, { fork = false, parent = null, path = ".getadvanta
 /**
  * Mock fetch that serves a fixed search payload + per-repo receipt bodies.
  * Throws if any URL targets a non-api.github.com host (guards real network).
+ *
+ * Distinguishes positive-control vs production `/search/code` by inspecting `q=`.
+ * Existing scenarios that only supply production `searchBody` still pass: a
+ * default healthy control response is returned for the control query unless
+ * `controlBody` / `controlStatus` overrides it.
  */
-function makeMockFetch({ searchStatus = 200, searchBody, contents = {}, repoBodies = {} }) {
+function makeMockFetch({
+  searchStatus = 200,
+  searchBody,
+  contents = {},
+  repoBodies = {},
+  controlStatus = 200,
+  controlBody = RTD_HEALTHY_CONTROL_BODY,
+} = {}) {
   return async (url, _init) => {
     const u = String(url);
     if (!u.includes("api.github.com") && !u.includes("raw.githubusercontent.com")) {
       throw new Error(`retained-team mock fetch refused non-GitHub URL: ${u}`);
     }
+    // Counter-proof: never allow a non-api github.com host either.
+    if (/^https?:\/\/github\.com\b/i.test(u) && !u.includes("api.github.com")) {
+      throw new Error(`retained-team mock fetch refused real github.com URL: ${u}`);
+    }
     // Never hit the real network from tests — this mock is the only path.
     if (u.includes("/search/code")) {
+      if (isRetainedTeamControlSearchUrl(u)) {
+        if (controlStatus !== 200) {
+          return mockJsonRes(controlStatus, {
+            message: `control status ${controlStatus}`,
+          });
+        }
+        return mockJsonRes(200, controlBody);
+      }
+      // Production query
       if (searchStatus !== 200) {
         return mockJsonRes(searchStatus, { message: `status ${searchStatus}` });
       }
@@ -13536,6 +13599,24 @@ function makeMockFetch({ searchStatus = 200, searchBody, contents = {}, repoBodi
     }
     throw new Error(`retained-team mock fetch: unhandled URL ${u}`);
   };
+}
+
+/** Assert UNKNOWN report has no numeric retained-team count / plain leading 0. */
+function assertNoNumericRetainedCount(report, label = "report") {
+  assert.ok(report.includes("UNKNOWN"), `${label} must include UNKNOWN:\n${report}`);
+  assert.ok(
+    !report.trimStart().startsWith("0"),
+    `${label} must not lead with plain 0:\n${report}`,
+  );
+  assert.ok(
+    !/retained-external-teams:\s*\d+/i.test(report),
+    `${label} must not emit retained-external-teams numeric count:\n${report}`,
+  );
+  // North-star section numeric line must not appear on UNKNOWN.
+  assert.ok(
+    !/## North-star: retained external teams[\s\S]*?\n\d+\n/.test(report),
+    `${label} must not print a north-star integer:\n${report}`,
+  );
 }
 
 scenario("retained-team: pure classifiers — isoWeekId + install vs retained + unknown-shape", () => {
@@ -13766,8 +13847,9 @@ scenario("retained-team: corrupt/hand-edited receipt → unknown-shape, listed, 
 });
 
 scenario("retained-team: empty result set → prints 0, exit 0", async () => {
+  // Explicit incomplete_results:false + healthy default control → observed absence.
   const fetchImpl = makeMockFetch({
-    searchBody: { total_count: 0, items: [] },
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
   });
   const { exitCode, result, report } = await runDetector({
     token: "test-token",
@@ -13813,8 +13895,10 @@ scenario("retained-team: network throw → UNKNOWN non-zero", async () => {
   });
   assert.notEqual(exitCode, 0);
   assert.equal(result.status, "UNKNOWN");
+  // Control runs first; network throw surfaces as control (or generic) network failure.
   assert.match(result.failureReason, /network failure/);
   assert.match(report, /UNKNOWN/);
+  assertNoNumericRetainedCount(report);
 });
 
 // Hostile: if install were mis-labeled retained, single-week scenario already
@@ -13834,7 +13918,7 @@ scenario("retained-team: mixed hits — self excluded, install vs retained separ
     searchItem("bob/twice"),
   ];
   const fetchImpl = makeMockFetch({
-    searchBody: { total_count: 3, items },
+    searchBody: { total_count: 3, incomplete_results: false, items },
     contents: {
       "alice/once": installReceipt,
       "bob/twice": retainedReceipt,
@@ -13857,6 +13941,236 @@ scenario("retained-team: mixed hits — self excluded, install vs retained separ
   assert.match(report, /alice\/once/);
   assert.match(report, /bob\/twice/);
   assert.match(report, /BellmeJoe\/getadvantage-cli/);
+});
+
+// ---------------------------------------------------------------------------
+// incomplete_results + positive-control (0.13.x-retained-team-detector-incomplete-results)
+// ---------------------------------------------------------------------------
+
+scenario("retained-team: control returns 0 → UNKNOWN, no numeric count", async () => {
+  assert.ok(RTD_CONTROL_MIN_COUNT >= 1);
+  assert.match(RTD_CONTROL_QUERY, /left-pad/);
+  assert.ok(
+    !/repo:/i.test(RTD_CONTROL_QUERY),
+    "control must be world-fact, not repo-scoped",
+  );
+
+  const fetchImpl = makeMockFetch({
+    controlBody: { total_count: 0, incomplete_results: false, items: [] },
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(exitCode, 1);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /positive-control/i);
+  assert.match(report, /Instrument failure|positive.?control/i);
+  assertNoNumericRetainedCount(report);
+});
+
+scenario("retained-team: control 0 + production hits → still UNKNOWN (not rescued)", async () => {
+  const item = searchItem("ext-co/would-have-counted");
+  const receipt = makeReceipt([
+    "2026-01-05T10:00:00.000Z",
+    "2026-01-12T10:00:00.000Z",
+  ]);
+  let productionSearchCalls = 0;
+  const base = makeMockFetch({
+    controlBody: { total_count: 0, incomplete_results: false, items: [] },
+    searchBody: { total_count: 1, incomplete_results: false, items: [item] },
+    contents: { "ext-co/would-have-counted": receipt },
+  });
+  const fetchImpl = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/search/code") && !isRetainedTeamControlSearchUrl(u)) {
+      productionSearchCalls += 1;
+    }
+    return base(url, init);
+  };
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /positive-control/i);
+  assert.equal(
+    result.retained.length,
+    0,
+    "failing control must never yield a retained count",
+  );
+  assertNoNumericRetainedCount(report);
+  // Control fails closed before trusting production (may skip production entirely).
+  assert.ok(
+    productionSearchCalls === 0 || result.status === "UNKNOWN",
+    "production hits must not rescue a failed control",
+  );
+});
+
+scenario("retained-team: control passes + production 0 incomplete_results false → plain 0", async () => {
+  // Regression pin: healthy control + complete empty production = observed absence.
+  const urls = [];
+  const base = makeMockFetch({
+    controlBody: { total_count: 2060, incomplete_results: false, items: [] },
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
+  });
+  const fetchImpl = async (url, init) => {
+    urls.push(String(url));
+    return base(url, init);
+  };
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.status, "ok");
+  assert.equal(result.totalSearchHits, 0);
+  assert.ok(
+    report.split(/\r?\n/).some((l) => l.trim() === "0"),
+    `must print plain 0:\n${report}`,
+  );
+  assert.ok(!report.includes("UNKNOWN"));
+  // Control ran before production.
+  const controlIdx = urls.findIndex(isRetainedTeamControlSearchUrl);
+  const prodIdx = urls.findIndex(
+    (u) => u.includes("/search/code") && !isRetainedTeamControlSearchUrl(u),
+  );
+  assert.ok(controlIdx >= 0, "control search must run");
+  assert.ok(prodIdx >= 0, "production search must run");
+  assert.ok(controlIdx < prodIdx, "control must run before production");
+});
+
+scenario("retained-team: production incomplete_results true → UNKNOWN (mutation-proven)", async () => {
+  const fetchImpl = makeMockFetch({
+    controlBody: { total_count: 2060, incomplete_results: false, items: [] },
+    searchBody: { total_count: 0, incomplete_results: true, items: [] },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(exitCode, 1);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(
+    result.failureReason,
+    /code search returned incomplete results/,
+  );
+  assert.match(report, /incomplete results/i);
+  assert.match(report, /Instrument failure/i);
+  assertNoNumericRetainedCount(report);
+
+  // Mutation proof: flipping incomplete_results to false must restore plain 0.
+  const okFetch = makeMockFetch({
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
+  });
+  const ok = await runDetector({
+    token: "test-token",
+    fetchImpl: okFetch,
+    silent: true,
+  });
+  assert.equal(ok.exitCode, 0, ok.report);
+  assert.equal(ok.result.status, "ok");
+  assert.ok(ok.report.split(/\r?\n/).some((l) => l.trim() === "0"));
+});
+
+scenario("retained-team: control incomplete_results true but count>0 → still passes (count-only)", async () => {
+  // Requirement 2: judge control by count only — do NOT apply incomplete_results
+  // guard to the control query.
+  const fetchImpl = makeMockFetch({
+    controlBody: { total_count: 2060, incomplete_results: true, items: [] },
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0, report);
+  assert.equal(result.status, "ok");
+  assert.ok(report.split(/\r?\n/).some((l) => l.trim() === "0"));
+});
+
+scenario("retained-team: zero real network — injected fetch; no github.com host", async () => {
+  const seen = [];
+  const base = makeMockFetch({
+    searchBody: { total_count: 0, incomplete_results: false, items: [] },
+  });
+  const fetchImpl = async (url, init) => {
+    const u = String(url);
+    seen.push(u);
+    // Counter-prove: refuse any non-api github.com (www, raw without allowance path handled in mock).
+    assert.ok(
+      !/^https?:\/\/(?!api\.github\.com)([^/]*\.)?github\.com\b/i.test(u),
+      `must not call real github.com: ${u}`,
+    );
+    assert.ok(
+      u.includes("api.github.com"),
+      `expected api.github.com mock URL, got ${u}`,
+    );
+    return base(url, init);
+  };
+  const { exitCode } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 0);
+  assert.ok(seen.length >= 2, "control + production must both be fetched via mock");
+  assert.ok(seen.some(isRetainedTeamControlSearchUrl));
+  assert.ok(seen.every((u) => u.includes("api.github.com")));
+});
+
+scenario("retained-team: missing token still UNKNOWN + missing GITHUB_TOKEN (distinguished)", async () => {
+  const fetchImpl = async () => {
+    throw new Error("fetch must not be called without a token");
+  };
+  const { exitCode, result, report } = await runDetector({
+    token: "   ",
+    fetchImpl,
+    silent: true,
+  });
+  assert.notEqual(exitCode, 0);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /missing GITHUB_TOKEN/);
+  assert.match(report, /Missing GITHUB_TOKEN/i);
+  assert.ok(!/Instrument failure/i.test(report), "missing token ≠ instrument failure");
+  assertNoNumericRetainedCount(report);
+});
+
+scenario("retained-team: production incomplete_results true with non-zero total_count → UNKNOWN", async () => {
+  // Even if total_count looks non-zero, incomplete_results on production is fatal.
+  const item = searchItem("maybe/partial");
+  const fetchImpl = makeMockFetch({
+    searchBody: {
+      total_count: 1,
+      incomplete_results: true,
+      items: [item],
+    },
+    contents: {
+      "maybe/partial": makeReceipt([
+        "2026-01-05T10:00:00.000Z",
+        "2026-01-12T10:00:00.000Z",
+      ]),
+    },
+  });
+  const { exitCode, result, report } = await runDetector({
+    token: "test-token",
+    fetchImpl,
+    silent: true,
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(result.status, "UNKNOWN");
+  assert.match(result.failureReason, /code search returned incomplete results/);
+  assert.equal(result.retained.length, 0);
+  assertNoNumericRetainedCount(report);
 });
 
 // ---------------------------------------------------------------------------
