@@ -116,6 +116,7 @@ run getAdvantage.
 | `getadvantage github-action` | Write `.github/workflows/getadvantage.yml` for a **one-copy** first-party Action install: `uses: BellmeJoe/getadvantage-cli@v1`. The Action runs the same gate as local `check`, writes SARIF, uploads via `github/codeql-action/upload-sarif@v4` (even on NO-GO), posts an **update-in-place** PR summary (stable `<!-- getadvantage:pr-summary -->` marker; job-summary fallback when PR write is unavailable, e.g. many fork PRs), then fails the job on NO-GO or action error. Optional `--report` uses the `GETADVANTAGE_API_KEY` repo secret. Idempotent — never clobbers a differing or pre-0.9.0 workflow without `--force`. Alias: `init --github-action`. Workflow permissions: `contents: read`, `security-events: write`, `actions: read`, `pull-requests: write`. Does **not** use `pull_request_target`. Public code scanning; private/internal also need GitHub Code Security. Not a security guarantee. |
 | `getadvantage intent` | **Intent Contract** (local change-scope proof). `intent init --goal "…" --allow <glob> [--deny …]` pins immutable `baselineCommit` (full HEAD SHA) and writes `.getadvantage/intent.json`. **Commit only that file** as a dedicated freeze before the agent starts — authorization is the **freeze commit blob**, not the worktree, not a later broadened HEAD, not `--base-ref`. After the agent works, `intent check` diffs **every** change after `baselineCommit` (committed + staged + unstaged + deleted + renamed + **non-ignored** untracked) → **GO / NO-GO** + `contractHash` + `receiptHash`. Nested git, **gitlink/submodule (mode 160000)**, and symlink changes fail closed. Gitignored untracked paths are **not** in the change set (ship-diff semantics — not a full agent filesystem seal). Local trust only (no crypto human-identity claim). `check` includes this when a trusted freeze is present; no contract → omitted (never a false “intent verified”). **Limitation:** *scope verified; semantic correctness not proven.* |
 | `getadvantage deploy` | _(Advanced)_ Deploy from a clean, detached worktree and confirm the deployment URL's project prefix. Runs a real `vercel --prod`; the project prefix is derived from your linked `.vercel` (or pass `--expect-prefix`). |
+| `getadvantage feedback` | Print a **copy-pasteable GitHub issue URL** pre-filled with redacted environment and gate metadata (CLI version, Node version, OS platform — not hostname or username — detected stack, per-check verdict counts). **Nothing is sent** — no browser open, no network request. Always exits `0` (not a gate). |
 
 ### Intent Contract (cold path)
 
@@ -420,6 +421,22 @@ On success the CLI prints the run's report URL: `→ verdict posted: https://…
   verdict — the exit code stays the gate's GO / NO-GO, so a network hiccup can't
   fail your CI. Pass `--report-required` if you *want* a failed post to exit
   non-zero.
+
+### Report a problem (`feedback`)
+
+If the gate surprised you — wrong verdict, missing check, confusing output —
+print a pre-filled issue link and paste it into a browser:
+
+```bash
+npx getadvantage feedback
+```
+
+The URL opens a new issue on the public getadvantage-cli repository with
+redacted metadata only (CLI/Node/OS platform, detected stack, check counts and
+labels). **It never opens a browser, never posts, and makes zero network
+requests** — you choose whether to submit. Secrets, absolute paths, usernames,
+and hostnames are stripped. This is instrumentation for a live experiment, not
+a claim of adoption or active support volume.
 
 ### See what would leave (`--report-dry-run`)
 

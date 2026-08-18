@@ -40,7 +40,7 @@
 
 import { binName, c, cliVersion, printResult, section } from "./util.mjs";
 import { repoRoot } from "./util.mjs";
-import { detectRepoStack } from "./detect.mjs";
+import { detectProject, detectRepoStack } from "./detect.mjs";
 import { renderMap } from "./overviews.mjs";
 import { runChecks } from "./checks-runner.mjs";
 import { deploy } from "./deploy.mjs";
@@ -67,6 +67,8 @@ import {
 import { runGithubAction } from "./action.mjs";
 import { buildSarif, writeSarifFile } from "./sarif.mjs";
 import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
+import { buildFeedbackUrl } from "./feedback.mjs";
+import os from "node:os";
 
 function parseArgs(argv) {
   // First non-flag token is the subcommand; default to "check".
@@ -227,6 +229,9 @@ ${c.bold("Commands")}
            Idempotent; ${c.bold("--force")} to replace a differing / pre-0.9.0 workflow. ${c.dim("(also: init --github-action)")}
   ${c.cyan("deploy")}   Run check, then deploy from a clean detached worktree and confirm the
            deployment URL prefix. Performs a real ${c.bold("vercel --prod")}.
+  ${c.cyan("feedback")} Print a copy-pasteable GitHub issue URL pre-filled with redacted
+           environment + gate metadata (CLI/Node/OS platform, stack, check counts).
+           ${c.bold("Nothing is sent")} — no browser open, no network. Always exits 0.
 
 ${c.bold("Flags")}
   --version / -v          Print the CLI version and exit.
@@ -416,6 +421,121 @@ Want the whole thing acted out in ~10 seconds, zero setup? ${c.cyan(`${bin} demo
 `);
 }
 
+/**
+ * Silence console + stdio so a nested `runChecks` does not pollute the feedback
+ * first screen. Restores on dispose. Product stderr for feedback is 0 bytes.
+ */
+function silenceIo() {
+  const oLog = console.log;
+  const oErr = console.error;
+  const oWarn = console.warn;
+  const oInfo = console.info;
+  const oStdout = process.stdout.write.bind(process.stdout);
+  const oStderr = process.stderr.write.bind(process.stderr);
+  console.log = () => {};
+  console.error = () => {};
+  console.warn = () => {};
+  console.info = () => {};
+  process.stdout.write = () => true;
+  process.stderr.write = () => true;
+  return () => {
+    console.log = oLog;
+    console.error = oErr;
+    console.warn = oWarn;
+    console.info = oInfo;
+    process.stdout.write = oStdout;
+    process.stderr.write = oStderr;
+  };
+}
+
+/**
+ * `getadvantage feedback` — print a copy-pasteable GitHub issue URL.
+ * Always exits 0 (not a gate). Never opens a browser, never posts, zero network.
+ * Non-git / no-remote / detached HEAD degrade cleanly (usable link, no fatal:).
+ */
+async function runFeedbackCommand() {
+  let cwd = null;
+  try {
+    cwd = repoRoot();
+  } catch {
+    // Non-git: still emit a usable link with environment-only metadata.
+    cwd = null;
+  }
+
+  let stackLabel = null;
+  let checks = [];
+  let counts = { pass: 0, fail: 0, warn: 0, skip: 0 };
+  let verdict = null;
+  let exitCode = null;
+
+  if (cwd) {
+    try {
+      const project = detectProject(cwd);
+      stackLabel = project && project.label ? project.label : null;
+    } catch {
+      /* best-effort */
+    }
+
+    // Collect per-check verdicts with human output suppressed (≤12-line screen).
+    const restore = silenceIo();
+    try {
+      const { exitCode: ec, results } = await runChecks({
+        cwd,
+        runBuild: false,
+        overview: false,
+        briefCheck: false,
+      });
+      exitCode = ec;
+      verdict = ec === 0 ? "GO" : "NO-GO";
+      checks = (results || []).map((r) => ({
+        label: r && r.label ? String(r.label) : "check",
+        status: r && r.status ? String(r.status) : "?",
+      }));
+      for (const r of results || []) {
+        if (!r) continue;
+        if (r.status === "pass") counts.pass++;
+        else if (r.status === "fail") counts.fail++;
+        else if (r.status === "warn") counts.warn++;
+        else if (r.status === "skip") counts.skip++;
+      }
+    } catch {
+      // Metadata is best-effort — never fail the feedback command.
+    } finally {
+      restore();
+    }
+  }
+
+  const built = buildFeedbackUrl({
+    cliVersion: cliVersion(),
+    nodeVersion: process.version,
+    platform: os.platform(),
+    stackLabel: stackLabel || undefined,
+    counts,
+    checks,
+    verdict: verdict || undefined,
+    exitCode: typeof exitCode === "number" ? exitCode : undefined,
+    homeDir: os.homedir(),
+    username: process.env.USERNAME || process.env.USER || process.env.LOGNAME || "",
+  });
+
+  // First screen: link + what it contains + nothing-sent. ≤12 lines. 0 stderr.
+  const bits = [
+    `CLI ${cliVersion()}`,
+    `Node ${process.version}`,
+    `OS ${os.platform()}`,
+  ];
+  if (stackLabel) bits.push(`stack ${stackLabel}`);
+  if (verdict) bits.push(`gate ${verdict}`);
+  console.log(built.url);
+  console.log("");
+  console.log(`Pre-filled with: ${bits.join(", ")}.`);
+  console.log("Nothing was sent — copy the link into a browser if you want to open an issue.");
+  if (built.truncated) {
+    console.log("(Payload truncated to fit the URL length limit.)");
+  }
+  return 0;
+}
+
 async function main() {
   let { cmd, arg, flags, positional } = parseArgs(process.argv.slice(2));
 
@@ -505,6 +625,13 @@ async function main() {
   if (cmd === "demo") {
     header();
     process.exit(await runDemo({ keep: !!flags.keep }));
+  }
+
+  // `feedback` prints a copy-pasteable GitHub issue URL. Not a gate — always
+  // exits 0. Prefer running before the hard repoRoot() failure so non-git
+  // degrades cleanly (usable link, zero raw git fatal: noise).
+  if (cmd === "feedback") {
+    process.exit(await runFeedbackCommand());
   }
 
   let cwd;
@@ -820,7 +947,7 @@ async function main() {
   const known = [
     "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
     "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
-    "github-action", "intent", "deploy", "help", "version",
+    "github-action", "intent", "deploy", "feedback", "help", "version",
   ];
   void positional; // parseArgs exposes full positional list for future multi-arg cmds
   const suggestion = didYouMean(cmd, known);

@@ -14448,6 +14448,467 @@ scenario("marketplace: notice path throw is non-fatal (emit + release path)", as
 });
 
 // ---------------------------------------------------------------------------
+// 56. Evaluator feedback loop (bet 14) — getadvantage feedback
+//     TEST_FILTER=feedback
+// ---------------------------------------------------------------------------
+
+scenario("feedback: secret value never travels (stdout/stderr/url/decoded)", async () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    // Live-shaped 33-char Stripe key — assembled so this test file's own body
+    // is not the only source (value is also planted in a committed file).
+    const secret = "sk_live_" + "A1B2C3D4E5F6G7H8I9J0K1L2M"; // 8 + 25 = 33
+    assert.equal(secret.length, 33, "precondition: 33-char live-shaped key");
+    write(repo, "leak.js", `export const KEY = "${secret}";\n`);
+    write(repo, "package.json", JSON.stringify({ name: "leaky", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: plant secret");
+
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, `feedback must exit 0 even on NO-GO tree\n${r.stderr}`);
+    const all = r.stdout + r.stderr;
+    assert.ok(!all.includes(secret), "secret must be absent from stdout+stderr");
+    assert.ok(!r.stderr || r.stderr.length === 0, `product stderr must be 0 bytes, got ${r.stderr.length}`);
+
+    const urlLine = r.stdout.split(/\r?\n/).find((l) => l.startsWith("https://"));
+    assert.ok(urlLine, `expected a URL on first screen:\n${r.stdout}`);
+    assert.ok(!urlLine.includes(secret), "secret must be absent from raw URL");
+    let decoded = urlLine;
+    try {
+      decoded = decodeURIComponent(urlLine);
+    } catch {
+      /* keep raw */
+    }
+    assert.ok(!decoded.includes(secret), "secret must be absent after decodeURIComponent");
+
+    // Also prove the pure builder redacts when the value is forced into meta.
+    const { buildFeedbackUrl } = await import(
+      pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?t=${Date.now()}`
+    );
+    const built = buildFeedbackUrl({
+      cliVersion: "0.0.0-test",
+      nodeVersion: "v20.0.0",
+      platform: "linux",
+      notes: `user pasted ${secret} by accident`,
+      checks: [{ label: "Secret scan", status: "fail" }],
+    });
+    assert.ok(!built.url.includes(secret), "builder url must not contain secret");
+    assert.ok(!built.body.includes(secret), "builder body must not contain secret");
+    assert.ok(!decodeURIComponent(built.url).includes(secret), "decoded builder url must not contain secret");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: mutation — neuter secret redaction → secret leaks (then restore)", async () => {
+  // Mutation-proven: a scratch copy with redactSecrets = identity must fail
+  // the "secret never travels" property. Product feedback.mjs is never written.
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-fb");
+    mkdirSync(scratchDir, { recursive: true });
+    // Neuter: redactSecrets returns input unchanged.
+    const neutered = original.replace(
+      /export function redactSecrets\(text\) \{[\s\S]*?\n\}/,
+      "export function redactSecrets(text) { return String(text ?? \"\"); }",
+    );
+    assert.ok(neutered !== original, "mutation must change the source");
+    writeFileSync(path.join(scratchDir, "feedback.mjs"), neutered, "utf8");
+    const mod = await import(pathToFileURL(path.join(scratchDir, "feedback.mjs")).href + `?mut=${Date.now()}`);
+    const secret = "sk_live_" + "Zz9Yy8Xx7Ww6Vv5Uu4Tt3Ss";
+    const built = mod.buildFeedbackUrl({
+      cliVersion: "0.0.0-test",
+      notes: `leaked ${secret}`,
+      platform: "linux",
+    });
+    // With redaction neutered, the secret MUST appear — otherwise the parent
+    // scenario's pass is not evidence of protection.
+    assert.ok(
+      built.body.includes(secret) || decodeURIComponent(built.url).includes(secret),
+      "neuter must let secret through — otherwise secret-redaction test is vacuous",
+    );
+    // Product file untouched.
+    assert.equal(readFileSync(productPath, "utf8"), original);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: username / absolute path never travels", async () => {
+  const base = freshBase();
+  try {
+    // Build a path that contains the OS username so a leak would be obvious.
+    const username = process.env.USERNAME || process.env.USER || "testuser";
+    const home = process.env.USERPROFILE || process.env.HOME || path.join(base, "Users", username);
+    const repo = path.join(base, "Users", username, "proj");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "pathy", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "console.log(1)\n");
+    commitAll(repo, "chore: init");
+
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const all = r.stdout + r.stderr;
+    const urlLine = all.split(/\r?\n/).find((l) => l.startsWith("https://")) || "";
+    let decoded = urlLine;
+    try {
+      decoded = decodeURIComponent(urlLine);
+    } catch {
+      /* keep */
+    }
+    const combined = all + "\n" + decoded;
+
+    // Windows user profile root
+    if (process.platform === "win32") {
+      assert.ok(!combined.includes(`C:\\Users\\${username}`), "C:\\Users\\<name> must not travel");
+      assert.ok(!combined.toLowerCase().includes(`c:/users/${username.toLowerCase()}`), "C:/Users/<name> must not travel");
+    } else {
+      assert.ok(!combined.includes(`/home/${username}`), "/home/<name> must not travel");
+      assert.ok(!combined.includes(`/Users/${username}`), "/Users/<name> must not travel");
+    }
+    assert.ok(!combined.includes("$HOME"), "$HOME must not travel");
+    if (home && home.length > 3) {
+      assert.ok(!combined.includes(home), `home dir must not travel: ${home}`);
+    }
+
+    // Pure builder with hostile notes carrying absolute paths.
+    const { buildFeedbackUrl } = await import(
+      pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?p=${Date.now()}`
+    );
+    const winPath = `C:\\Users\\${username}\\secret\\key.env`;
+    const unixPath = `/home/${username}/.ssh/id_rsa`;
+    const built = buildFeedbackUrl({
+      cliVersion: "0.0.0-test",
+      platform: process.platform,
+      notes: `config at ${winPath} and ${unixPath} and $HOME/x`,
+      homeDir: home,
+      username,
+    });
+    const dec = decodeURIComponent(built.url);
+    assert.ok(!dec.includes(winPath), "windows abs path must be redacted");
+    assert.ok(!dec.includes(unixPath), "unix abs path must be redacted");
+    assert.ok(!dec.includes(`C:\\Users\\${username}`), "user profile must be redacted");
+    assert.ok(!dec.includes(`/home/${username}`), "unix home must be redacted");
+    assert.ok(!dec.includes("$HOME"), "$HOME must be redacted");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: overlong payload truncates under MAX_URL_CHARS; valid URL; disclosed", async () => {
+  const {
+    buildFeedbackUrl,
+    MAX_URL_CHARS,
+    FEEDBACK_NEW_ISSUE_BASE,
+  } = await import(pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?cap=${Date.now()}`);
+
+  assert.equal(typeof MAX_URL_CHARS, "number");
+  assert.ok(MAX_URL_CHARS > 500, "MAX_URL_CHARS must be a real cap");
+
+  const hugeNotes = "N".repeat(MAX_URL_CHARS + 5000);
+  const manyChecks = Array.from({ length: 80 }, (_, i) => ({
+    label: `Check-${i}-${"x".repeat(40)}`,
+    status: i % 2 === 0 ? "fail" : "pass",
+  }));
+
+  // Against the exported product cap.
+  const built = buildFeedbackUrl({
+    cliVersion: "0.0.0-test",
+    nodeVersion: "v20.0.0",
+    platform: "linux",
+    notes: hugeNotes,
+    checks: manyChecks,
+    counts: { pass: 40, fail: 40, warn: 0, skip: 0 },
+  });
+  assert.equal(built.truncated, true, "overlong payload must set truncated");
+  assert.ok(built.url.length <= MAX_URL_CHARS, `url length ${built.url.length} > MAX_URL_CHARS ${MAX_URL_CHARS}`);
+  const parsed = new URL(built.url);
+  assert.equal(parsed.origin + parsed.pathname, new URL(FEEDBACK_NEW_ISSUE_BASE).origin + new URL(FEEDBACK_NEW_ISSUE_BASE).pathname);
+  assert.ok(
+    /truncated/i.test(built.body) || /truncated/i.test(decodeURIComponent(built.url)),
+    "truncation must be disclosed in body/url",
+  );
+
+  // Tight override proves the assembler, not only the default soft content size.
+  const tight = buildFeedbackUrl({
+    cliVersion: "0.0.0-test",
+    platform: "linux",
+    notes: "Z".repeat(4000),
+    maxUrlChars: 600,
+  });
+  assert.equal(tight.truncated, true, "tight maxUrlChars must truncate");
+  assert.ok(tight.url.length <= 600, `tight url length ${tight.url.length}`);
+  assert.ok(new URL(tight.url));
+
+  // Mutation: neuter the cap → URL longer than product MAX_URL_CHARS must be possible.
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-cap");
+    mkdirSync(scratchDir, { recursive: true });
+    const neutered = original
+      .replace(/export const MAX_URL_CHARS = \d+;/, "export const MAX_URL_CHARS = 999999;")
+      .replace(
+        /export function assembleFeedbackUrl\(title, body, maxChars = MAX_URL_CHARS\) \{/,
+        "export function assembleFeedbackUrl(title, body, maxChars = MAX_URL_CHARS) {\n  // mutation: ignore cap\n  maxChars = 999999;",
+      );
+    writeFileSync(path.join(scratchDir, "feedback.mjs"), neutered, "utf8");
+    const mut = await import(pathToFileURL(path.join(scratchDir, "feedback.mjs")).href + `?c=${Date.now()}`);
+    const big = mut.buildFeedbackUrl({
+      cliVersion: "0.0.0-test",
+      notes: "Q".repeat(20000),
+      checks: manyChecks,
+      maxUrlChars: 999999,
+    });
+    assert.ok(
+      big.url.length > MAX_URL_CHARS,
+      `neuter must allow url > product MAX_URL_CHARS (got ${big.url.length} vs cap ${MAX_URL_CHARS})`,
+    );
+    assert.equal(readFileSync(productPath, "utf8"), original);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: zero network proven (hostile mock server, request count 0)", async () => {
+  const base = freshBase();
+  const { createServer } = await import("node:http");
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url, host: req.headers.host });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const repo = scaffold(base);
+    // Point every common outbound knob at the mock — feedback must still
+    // make zero requests (it never posts; it only prints a URL).
+    const env = {
+      GETADVANTAGE_API_URL: `http://127.0.0.1:${port}`,
+      GETADVANTAGE_API_KEY: ["adv", "live", "f33db4ck0001dead"].join("_"),
+      GETADVANTAGE_REPORT: "1",
+      HTTP_PROXY: `http://127.0.0.1:${port}`,
+      HTTPS_PROXY: `http://127.0.0.1:${port}`,
+      http_proxy: `http://127.0.0.1:${port}`,
+      https_proxy: `http://127.0.0.1:${port}`,
+    };
+    const r = await runAsync(["feedback"], repo, env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(requests.length, 0, `feedback must make zero network requests, got ${requests.length}`);
+    assert.ok(/nothing was sent/i.test(r.stdout), r.stdout.slice(0, 800));
+    assert.ok(r.stdout.includes("https://github.com/BellmeJoe/getadvantage-cli/issues/new"), r.stdout.slice(0, 500));
+    assert.equal(r.stderr.length, 0, "stderr must be empty");
+  } finally {
+    server.close();
+    cleanup(base);
+  }
+});
+
+scenario("feedback: non-git / no-remote / detached HEAD → exit 0, usable link, no fatal:", () => {
+  // 1. Non-git directory
+  const base = freshBase();
+  try {
+    const bare = path.join(base, "not-a-repo");
+    mkdirSync(bare, { recursive: true });
+    writeFileSync(path.join(bare, "readme.txt"), "hi\n", "utf8");
+    const r = run(["feedback"], bare);
+    assert.equal(r.code, 0, `non-git must exit 0\n${r.stderr}\n${r.stdout}`);
+    const all = r.stdout + r.stderr;
+    assert.ok(!/fatal:/i.test(all), `no fatal: noise:\n${all}`);
+    assert.ok(!/not a git repository/i.test(all), `no raw git noise:\n${all}`);
+    assert.ok(
+      /https:\/\/github\.com\/BellmeJoe\/getadvantage-cli\/issues\/new/.test(r.stdout),
+      `usable link required:\n${r.stdout}`,
+    );
+    assert.ok(/nothing was sent/i.test(r.stdout), r.stdout);
+    // First screen ≤12 lines
+    const lineCount = r.stdout.split(/\r?\n/).filter((l, i, a) => i < a.length - 1 || l.length > 0).length;
+    const wc = (r.stdout.match(/\n/g) || []).length;
+    assert.ok(wc <= 12, `first screen must be ≤12 lines, got ${wc}:\n${r.stdout}`);
+    void lineCount;
+  } finally {
+    cleanup(base);
+  }
+
+  // 2. Git repo with no remote
+  const base2 = freshBase();
+  try {
+    const repo = scaffold(base2);
+    // scaffold has no origin by default
+    const remotes = g(["remote"], repo);
+    assert.equal(remotes.trim(), "", "precondition: no remotes");
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr));
+    assert.ok(/https:\/\/github\.com\/BellmeJoe\/getadvantage-cli\/issues\/new/.test(r.stdout));
+  } finally {
+    cleanup(base2);
+  }
+
+  // 3. Detached HEAD
+  const base3 = freshBase();
+  try {
+    const repo = scaffold(base3);
+    const sha = g(["rev-parse", "HEAD"], repo);
+    g(["checkout", "-q", "--detach", sha], repo);
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr));
+    assert.ok(/https:\/\/github\.com\/BellmeJoe\/getadvantage-cli\/issues\/new/.test(r.stdout));
+  } finally {
+    cleanup(base3);
+  }
+});
+
+scenario("feedback: never fabricates target from origin — constants only", async () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    // Private-looking remote that is NOT BellmeJoe/getadvantage-cli
+    g(["remote", "add", "origin", "git@github.com:acme-corp-private/super-secret-app.git"], repo);
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const urlLine = r.stdout.split(/\r?\n/).find((l) => l.startsWith("https://")) || "";
+    const parsed = new URL(urlLine);
+    assert.equal(parsed.origin, "https://github.com");
+    assert.equal(parsed.pathname, "/BellmeJoe/getadvantage-cli/issues/new");
+    // Must not point at the user's origin.
+    assert.ok(!urlLine.includes("acme-corp-private"), "must not use origin owner");
+    assert.ok(!urlLine.includes("super-secret-app"), "must not use origin repo name in URL path");
+
+    const {
+      FEEDBACK_GITHUB_ORIGIN,
+      FEEDBACK_OWNER_REPO,
+      FEEDBACK_NEW_ISSUE_BASE,
+      FEEDBACK_OWNER,
+      FEEDBACK_REPO,
+    } = await import(pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?t=${Date.now()}`);
+    assert.equal(FEEDBACK_GITHUB_ORIGIN, "https://github.com");
+    assert.equal(FEEDBACK_OWNER, "BellmeJoe");
+    assert.equal(FEEDBACK_REPO, "getadvantage-cli");
+    assert.equal(FEEDBACK_OWNER_REPO, "BellmeJoe/getadvantage-cli");
+    assert.equal(FEEDBACK_NEW_ISSUE_BASE, "https://github.com/BellmeJoe/getadvantage-cli/issues/new");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: private-repo hygiene — private remote/name absent from payload", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "internal-classified-widget", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export {}\n");
+    commitAll(repo, "chore: private-ish");
+    g(["remote", "add", "origin", "https://github.com/my-private-org/internal-classified-widget.git"], repo);
+
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, r.stderr);
+    const all = r.stdout + r.stderr;
+    let decoded = all;
+    const urlLine = all.split(/\r?\n/).find((l) => l.startsWith("https://"));
+    if (urlLine) {
+      try {
+        decoded += "\n" + decodeURIComponent(urlLine);
+      } catch {
+        /* keep */
+      }
+    }
+    assert.ok(!decoded.includes("my-private-org"), "private org must not appear in payload");
+    assert.ok(!decoded.includes("internal-classified-widget"), "private repo name must not appear in payload");
+    // Target constants are allowed.
+    assert.ok(decoded.includes("BellmeJoe/getadvantage-cli"));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: first screen ≤12 lines, exit 0 after NO-GO, stderr 0", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sample");
+    initRepo(repo);
+    const secret = "sk_live_" + "Nn0Gg1Oo2Hh3Pp4Ii5Qq6Jj";
+    write(repo, "x.js", `const k = "${secret}";\n`);
+    write(repo, "package.json", JSON.stringify({ name: "nogo", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: nogo");
+    const r = run(["feedback"], repo);
+    assert.equal(r.code, 0, "feedback is not a gate — exit 0 after NO-GO");
+    assert.equal(r.stderr.length, 0, "product stderr 0 bytes");
+    const wc = (r.stdout.match(/\n/g) || []).length;
+    assert.ok(wc <= 12, `≤12 lines, got ${wc}:\n${r.stdout}`);
+    assert.ok(/nothing was sent/i.test(r.stdout));
+    assert.ok(!r.stdout.includes(secret));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("feedback: regression pins — check first screen / SARIF / --json on clean tree", () => {
+  // Run against a clean detached worktree of HEAD so uncommitted feedback
+  // files do not perturb dirty-tree / line counts. Product check path is
+  // untouched by this lane — pins must hold.
+  const productRoot = path.join(__dirname, "..");
+  const base = freshBase();
+  const wt = path.join(base, "clean-wt");
+  try {
+    g(["worktree", "add", "--detach", wt, "HEAD"], productRoot);
+    // Ensure no leftover untracked noise inside the worktree.
+    const por = g(["status", "--porcelain"], wt);
+    assert.equal(por.trim(), "", `clean worktree required, porcelain:\n${por}`);
+
+    const r = run(["check"], wt);
+    assert.equal(r.code, 1, "product root self-check is expected NO-GO");
+    assert.equal(Buffer.byteLength(r.stderr), 0, "0 B product stderr");
+    const lines = (r.stdout.match(/\n/g) || []).length;
+    assert.equal(lines, 56, `first screen lines: got ${lines}`);
+    const vh = r.stdout.split(/\n/).findIndex((l) => /^Verdict/.test(l)) + 1;
+    assert.equal(vh, 53, `verdict header line: got ${vh}`);
+    const fl = (r.stdout.match(/tests[\\/]run\.mjs:\d+/g) || []).length;
+    assert.equal(fl, 5, `file:line count: got ${fl}`);
+
+    // SARIF byte-identical prefix
+    const sarifPath = path.join(base, "reg.sarif");
+    const rs = run(["check", "--sarif", sarifPath], wt);
+    assert.equal(rs.code, 1);
+    const sarifRaw = readFileSync(sarifPath);
+    const sarifHash = createHash("sha256").update(sarifRaw).digest("hex");
+    assert.ok(
+      sarifHash.startsWith("3aab5a242c7a5986"),
+      `SARIF sha256 prefix mismatch: ${sarifHash.slice(0, 16)} (full ${sarifHash})`,
+    );
+
+    // --json byte-identical after excluding generatedAt line
+    const rj = run(["check", "--json"], wt);
+    assert.equal(rj.code, 1);
+    const filtered = rj.stdout.split(/\r?\n/).filter((l) => !/generatedAt/.test(l)).join("\n");
+    const jsonHash = createHash("sha256").update(filtered).digest("hex");
+    assert.ok(
+      jsonHash.startsWith("cb9fec3fe5aa5cb0"),
+      `JSON sha256 prefix mismatch: ${jsonHash.slice(0, 16)} (full ${jsonHash})`,
+    );
+  } finally {
+    try {
+      g(["worktree", "remove", "--force", wt], productRoot);
+    } catch {
+      try {
+        g(["worktree", "prune"], productRoot);
+      } catch {
+        /* ignore */
+      }
+    }
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // runner
 // ---------------------------------------------------------------------------
 const filter = process.env.TEST_FILTER || "";
