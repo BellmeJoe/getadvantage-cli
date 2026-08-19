@@ -15232,8 +15232,10 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     assert.equal(rs.code, 1);
     const sarifRaw = readFileSync(sarifPath);
     const sarifHash = createHash("sha256").update(sarifRaw).digest("hex");
+    // Pin moves with package.json version (SARIF embeds tool.driver.version).
+    // Re-measured on the 0.14.0 train tip: 0ad7ec64ef4e5d9c… (was 3aab5a242c7a5986 at 0.13.1).
     assert.ok(
-      sarifHash.startsWith("3aab5a242c7a5986"),
+      sarifHash.startsWith("0ad7ec64ef4e5d9c"),
       `SARIF sha256 prefix mismatch: ${sarifHash.slice(0, 16)} (full ${sarifHash})`,
     );
 
