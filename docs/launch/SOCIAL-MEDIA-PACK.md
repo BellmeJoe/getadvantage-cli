@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.13.1 LIVE**
+# Social / advertising pack — getadvantage **0.14.0** (train tip · REVIEW_PENDING)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,22 +6,25 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Live:** **getadvantage@0.13.1** (patch, 2026-08-14). Independent
-> **REVIEW_GO (release-eligible)** at product fingerprints **`ce5c182`** (bet 1)
-> + **`ec92722`** (bet 2); docs tip `ea94bb2`; 0 open P1/P2/P3. Prefer leading
-> with the eight core GO/NO-GO claims below; Intent remains the trust-layer
-> follow-on — always *scope verified; semantic correctness not proven*.
+> **Train tip (not yet published):** **getadvantage@0.14.0** (minor, 2026-08-19).
+> Version bumped in-tree; **needs release-scoped independent audit** before tag /
+> npm / GitHub Release. Prefer leading with the eight core GO/NO-GO claims below;
+> Intent remains the trust-layer follow-on — always *scope verified; semantic
+> correctness not proven*. Published live npm remains **0.13.1** until this train
+> ships.
 >
-> **What 0.13.1 ships (patch — presentation + correctness repair on the 0.13.0
-> surface):** restores `file:line` on collapsed multi-finding secret rows (when
-> `startLine` is known; bare path when not — no `:undefined`). On
-> `--report-dry-run`, stops re-printing truncated paste-ready `secrets.ignore`
-> JSON that **0.13.0** cut mid-object under a “Paste-ready” header; densifies the
-> dry-run summary; scopes the key banner so report **body** vs **transport** are
-> distinct. Live `--report` still sends the API key as the `Authorization`
-> bearer (never printed). **No new checks. No verdict or exit change.** **Not an
-> adoption event** — named evaluators / installs / first gates / week-two reuse /
+> **What 0.14.0 ships (minor — new user-facing command):** `getadvantage feedback`
+> prints a copy-pasteable GitHub issue URL pre-filled with redacted environment
+> and gate metadata. **Nothing is sent** — no browser open, no network request,
+> always exits 0, not a gate, not telemetry. Also carries: ops retained-team
+> detector (ops-only, not packed), Marketplace listing readiness docs, README /
+> version-claim currency, redaction catalogue unification + narrowing repair.
+> **No new checks. No verdict or exit change on the gate.** **Not an adoption
+> event** — named evaluators / installs / first gates / week-two reuse /
 > retained external teams remain **0**.
+>
+> **Still live from 0.13.1 (historical intro):** collapsed secret-row `file:line`
+> restore + dry-run paste-ready JSON repair + body/transport key banner.
 >
 > **Still live from 0.13.0 (historical intro):** `--report-dry-run` transparency
 > mode — exact body that would leave, endpoint, byte size, whether a key resolved
@@ -57,9 +60,9 @@
 > GitHub Action + PR summary (`uses: BellmeJoe/getadvantage-cli@v1` — floating
 > major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases));
 > secret scan of committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback (**historical**): **getadvantage@0.12.2** / tag `v0.12.2` / `1e451ac`
-> (with **0.13.0** / `v0.13.0` / `bdc8b04` and **0.12.1** / `v0.12.1` / `e2f8665`
-> intact behind it).
+> Rollback after publish (**historical until then**): **getadvantage@0.13.1** /
+> tag `v0.13.1` / `e5b06f3` (with **0.13.0** / `v0.13.0` / `bdc8b04` and
+> **0.12.2** / `v0.12.2` / `1e451ac` intact behind it).
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -72,12 +75,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (live)** | `getadvantage@0.13.1` |
-| **Checkout** | Live **0.13.1** patch on the 0.13.0 stack: `file:line` restore on collapsed secret rows + dry-run paste-ready JSON repair + body/transport key banner + prior `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
-| **Install** | `npx getadvantage` or `npx getadvantage@0.13.1` (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.13.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.13.1) · Action `@v1` (floating major) · exact pin from [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) |
+| **npm (published live)** | `getadvantage@0.13.1` until this train publishes; in-tree tip **`0.14.0`** |
+| **Checkout** | Train tip **0.14.0** minor: new `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **Install** | `npx getadvantage` (tracks `latest`) or pin an exact tag from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (no signup) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · CI [31808631124](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/31808631124) success · product fingerprints `ce5c182` + `ec92722` · release `e5b06f3` · cold published path verified (~17.2s GO exit 0, 25 lines, 0 RLS, 0 stderr) · registry `gitHead` `e5b06f3` · tags `v0.13.1` + `v1` · suite **234/234** · pack post-bump **34 files / 334.2 kB / shasum `e46de565…`** |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** (re-measured on this train) · product fingerprints feedback `8eb494b` + redaction `ec58b49`/`53339ff`/`f19797b` · tip `3afc50b` + version bump · **REVIEW_PENDING** (no tag / no publish yet) · suite + pack re-measured on the train · 0 RLS advertised · rollback target after publish: `0.13.1` / `v0.13.1` / `e5b06f3` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -129,6 +132,7 @@ windows.
 | **First-party Action + PR summary** | One-copy `uses: BellmeJoe/getadvantage-cli@v1` (floating major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases)), update-in-place PR comment, job-summary fallback. Same GO/NO-GO gate as local `check`. Multi-finding table rows with `file:line` + paste-ready remediation, blocking first (bounded caps). | root `action.yml` · live npm · floating tag `v1` |
 | **Report transparency (`--report-dry-run`)** | Shows the exact bytes that would leave your machine before anything leaves — same body as `--report`, resolved endpoint, byte size, whether an API key resolved (never its value) — and makes **zero network calls**. Transparency only; not a security fix. Source/diffs/files still never in the report body. | `check --report-dry-run` · `fan-in --report-dry-run` | product `472ca83` · 4 hostile tests · *not a leak repair* |
 | **Invisible mode (Claude Code)** | One command installs the gate as an **automatic hook** so every agent session is gated by default; writes in-repo proof receipt with **zero telemetry**. Cursor is **detect-and-refuse** (not automatic). | `npx getadvantage init --claude-code` · status/uninstall/bypass · receipt `.getadvantage/INVISIBLE-MODE.md` | product `fe9e2ad` · cold published activation ~11.3s · *scope verified; semantic correctness not proven* |
+| **Feedback link (`feedback`)** | Prints a copy-pasteable GitHub issue URL pre-filled with redacted environment + gate metadata. **Nothing is sent** — no browser open, no network request, always exits 0, not a gate, not telemetry. | `npx getadvantage feedback` | product `8eb494b` · honest instrumentation only |
 
 ### D. Trust layer — advertise to builders who run agents (honest scope)
 
@@ -255,6 +259,7 @@ If evidence is red, **do not post**.
 | `check --sarif` | Write SARIF 2.1 after the gate; redacted; successful write keeps the gate exit (NO-GO stays non-zero); bad path/write failure exits non-zero |
 | First-party Action | Root `action.yml` composite: gate + SARIF + PR summary (**live** · `@v1` floating major; multi-finding density) |
 | `init --claude-code` | Invisible mode: automatic Claude Code hooks + receipt (**live**). Cursor = detect-and-refuse |
+| `feedback` | Print-only GitHub issue URL with redacted metadata (**0.14.0**). Nothing sent; no browser; zero network; always exit 0; not a gate |
 | `deploy` | Advanced: clean worktree vercel deploy (opt-in) |
 
 Zero runtime dependencies. Node ≥18. Local-by-default.

@@ -4,7 +4,10 @@
 **What this is:** a discovery surface so people can find the Action.  
 **What this is not:** adoption, installs, evaluators, retained teams, or week-two reuse. Never report a listing as any of those.
 
-Live product remains **getadvantage@0.13.1** / `e5b06f3`. This doc does not publish, tag, or bump.
+Published live remains **getadvantage@0.13.1** / `e5b06f3` until the **0.14.0**
+train publishes (in-tree tip bumped; **REVIEW_PENDING** — no tag / no publish
+from the train itself). Marketplace listing page may still show `v0.13.1` until
+the next founder-published Release. This doc does not publish, tag, or bump.
 
 ---
 
@@ -42,12 +45,12 @@ Repo is public. For the primary slug the distribution gap this lane made clickab
 
 **Current status (this cycle):** the Marketplace listing **is live** for primary slug `getadvantage-check`. The Marketplace Developer Agreement has **evidently already been accepted** for the publisher account (otherwise the listing page would not be live). Do **not** repeat a “first publish for `v0.13.1`” path as if it were still pending — that step has already succeeded for this release.
 
-The path below is **not obsolete**. Every **new** Release still needs the human publish checkbox. Use it for the next tag after `v0.13.1`, and for every automated Release after that.
+The path below is **not obsolete**. Every **new** Release still needs the human publish checkbox. Use it for `v0.14.0` (when this train publishes) and for every automated Release after that.
 
 Do this on a machine where you are signed into GitHub as a publisher for **BellmeJoe/getadvantage-cli**.
 
 1. **Open the new Release**  
-   Go to https://github.com/BellmeJoe/getadvantage-cli/releases and open the exact tag you just shipped (e.g. `v0.13.2` or later — not a re-do of already-published `v0.13.1`).  
+   Go to https://github.com/BellmeJoe/getadvantage-cli/releases and open the exact tag you just shipped (e.g. `v0.14.0` — not a re-do of already-published `v0.13.1`).  
    Or open `https://github.com/BellmeJoe/getadvantage-cli/releases/tag/vX.Y.Z`.
 
 2. **Edit the Release**  
@@ -89,5 +92,6 @@ If the checkbox is missing, the Release was almost always created without a root
 
 - **Marketplace listing** = shelf space / discovery.
 - **Adoption** = retained external teams / week-two reuse (north-star metric; still measured separately; currently a validated zero).
-- **Cold install** = `npx getadvantage@0.13.1` (npm), not the Marketplace badge.
+- **Cold install** = `npx getadvantage` / pin from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (npm), not the Marketplace badge.
 - Never claim Cursor support. Never re-expose parked Supabase RLS. Never treat a listing publish as a product release train.
+- Listing page version lag after an automated Release is expected until the founder ticks the per-Release Marketplace checkbox.

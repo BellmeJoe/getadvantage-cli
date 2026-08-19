@@ -56,12 +56,14 @@ that real CI time improves.
 
 ## Retained-team detector (the north-star measurement method)
 
-**LIVE 0.13.1** (patch on 0.13.0) — invisible mode from `0.12.0`; legibility +
-Action summary density through `0.12.2`; `--report-dry-run` transparency mode
-from `0.13.0` (minor — additive flag). **0.13.1** only repairs human
-presentation/correctness: collapsed secret rows regain `file:line` when known;
-dry-run no longer emits truncated paste-ready JSON and scopes body vs transport
-for the API key. **No new check. Adoption metrics unchanged (all 0).**
+**Train tip for 0.14.0** (minor on 0.13.1) — invisible mode from `0.12.0`;
+legibility + Action summary density through `0.12.2`; `--report-dry-run`
+transparency mode from `0.13.0`; **0.13.1** presentation/correctness repairs;
+**0.14.0** adds the user-facing `getadvantage feedback` command (print-only
+GitHub issue URL; nothing sent, no browser, zero network, always exit 0, not a
+gate). Ops retained-team detector remains ops-only (not packed). **No new check.
+Adoption metrics unchanged (all 0).** Live npm remains **0.13.1** until this
+train publishes.
 
 Retention is counted with **zero telemetry**, from public data only. Invisible
 mode writes an in-repo receipt (`.getadvantage/INVISIBLE-MODE.md`) whose stable
@@ -80,16 +82,14 @@ header is publicly searchable.
 
 > **DETECTOR SHIPPED 2026-08-15** — `ops/retained-team-detector.mjs`, ops tooling
 > only (absent from `package.json` `files`; ships to nobody; no product surface,
-> no telemetry, no CLI/flag/verdict). Lane-scoped `REVIEW_GO`, 0 P1/P2, 12 hostile
-> scenarios, 246/246 suite. Classifies **install** (one ISO week) vs **retained**
-> (≥2 distinct ISO weeks); rate-limit/auth/network → `UNKNOWN` + non-zero exit,
-> never a silent `0`. **First live run, 2026-08-15 weekly review: exit 0,
-> `retained-external-teams: 0`, `status: ok — zero code-search hits`**, with the
-> `npx left-pad` positive control returning 3 real third-party repositories in the
-> same session. The zero is observed absence. **P3 carried:** the tool has no
-> internal positive-control assertion, so a future GitHub API change could turn a
-> broken query into a silent `0` with HTTP 200 — today that control exists only
-> because the weekly review runs it by hand, and it must keep doing so.
+> no telemetry, no CLI/flag/verdict). Classifies **install** (one ISO week) vs
+> **retained** (≥2 distinct ISO weeks); rate-limit/auth/network/`incomplete_results`
+> → `UNKNOWN` + non-zero exit, never a silent `0`. Control-first world-fact query
+> shipped in the incomplete-results repair (`d97a9fc`). **First live run,
+> 2026-08-15 weekly review: exit 0, `retained-external-teams: 0`**, observed
+> absence under a passing control. **P3 ships disclosed on the 0.14.0 train:**
+> the detector does not print the positive control's `total_count` (staged as
+> `0.14.x-stderr-and-control-transparency`).
 
 ## Portfolio order
 
@@ -158,18 +158,20 @@ lane ships or is killed. Only one implementation lane may be open.
 7b. **Invisible mode** — `init --claude-code` installs the gate as an automatic
    hook so every agent session is gated by default; the hook writes the in-repo
    proof receipt that makes week-two reuse publicly countable with zero telemetry.
-   **Status (2026-08-14):** **LIVE 0.13.1** — invisible-mode product fingerprint
-   **`fe9e2ad`** (0.12.0); train/legibility stack through **0.12.2**;
-   `--report-dry-run` product fingerprint **`cdb923c`** (feat `472ca83` + test
-   rescope); **0.13.1** presentation/correctness train fingerprints **`ce5c182`**
-   (collapsed secret-row `file:line`) + **`ec92722`** (dry-run density + paste-ready
-   JSON repair + body/transport key banner). Agent-trigger profile
-   (`check --agent-trigger`) visibly omits Dirty-tree on hooks only; plain
-   `check` / `check --ci` still enforce Dirty-tree. Cursor remains
-   **detect-and-refuse**. `--report-dry-run` is transparency only (preview exact
-   report body; zero network; never print API key value; live `--report` still
-   sends the key as `Authorization` bearer only). Rollback: **0.12.2** /
-   `v0.12.2` / `1e451ac` (with **0.13.0** / `v0.13.0` / `bdc8b04` intact).
+   **Status (2026-08-19):** rides **0.14.0** train (tip fingerprint `3afc50b` +
+   version bump) — invisible-mode product fingerprint **`fe9e2ad`** (0.12.0);
+   train/legibility stack through **0.12.2**; `--report-dry-run` product
+   fingerprint **`cdb923c`**; **0.13.1** presentation/correctness fingerprints
+   **`ce5c182`** + **`ec92722`**; **0.14.0** adds `getadvantage feedback`
+   (product `8eb494b` + redaction catalogue `ec58b49` + narrowing repair
+   `53339ff`/`f19797b`). Agent-trigger profile (`check --agent-trigger`) visibly
+   omits Dirty-tree on hooks only; plain `check` / `check --ci` still enforce
+   Dirty-tree. Cursor remains **detect-and-refuse**. `--report-dry-run` is
+   transparency only (preview exact report body; zero network; never print API
+   key value; live `--report` still sends the key as `Authorization` bearer
+   only). Rollback after publish: **0.13.1** / `v0.13.1` / `e5b06f3` (with
+   **0.13.0** / `v0.13.0` / `bdc8b04` and **0.12.2** / `v0.12.2` / `1e451ac`
+   intact). Live npm remains **0.13.1** until the train publishes.
 
 ### P2 — make proof portable and shareable
 
@@ -213,22 +215,38 @@ lane ships or is killed. Only one implementation lane may be open.
     if a real consumer repository profiles a slow run.
 14. **Evaluator feedback loop** — generated issue/discussion link containing
     redacted environment and result metadata, never secrets.
+    **Status (2026-08-19):** **ships in 0.14.0** — product fingerprint
+    **`8eb494b`** (`feedback.mjs` + `index.mjs` wire); redaction catalogue
+    unification **`ec58b49`**; narrowing repair **`53339ff`/`f19797b`**.
+    `getadvantage feedback` prints a copy-pasteable GitHub issue URL pre-filled
+    with redacted metadata. **Nothing is sent** — no browser open, no network
+    request, always exits 0, not a gate, not telemetry. Lane-scoped
+    `REVIEW_GO` only until the release-scoped audit of this train.
 15. **GitLab and audit exports** only after observed buyer or repository demand.
 16. **Free-shelf distribution** *(added 2026-08-02; **SPLIT 2026-08-15** into 16a
     and 16b — they have different blockers and do not belong in one queue slot)*.
 
-16a. **GitHub Actions Marketplace listing** — **top-ranked bet, score 3.55 at
-    effort 1 (2026-08-15).** Re-verified live this review: 404 at all four
-    plausible slugs (`/getadvantage`, `/getadvantage-check`,
-    `/get-advantage-check`, `/getadvantage-cli`), now **13 days after the absence
-    was first recorded and still unactioned**. Bot-created API releases cannot set
-    the marketplace-publish flag, so it will never appear as a side effect of the
-    release pipeline. **The only reach surface in the entire portfolio that
-    requires no outbound message to any human**, and therefore the only one the
-    send gate cannot block. Readiness lane `0.13.x-marketplace-listing-readiness`
-    dispatched 2026-08-15. **Publishing needs one founder action no agent may
-    take:** accept the Marketplace Developer Agreement and tick "Publish this
-    Action to the GitHub Marketplace" on one release.
+16a. **GitHub Actions Marketplace listing** — **residual maintenance, re-scored
+    0.48 at effort 1 (2026-08-19).** The 3.55 top-of-portfolio score rested on
+    "listing absence + one founder click unlocks the only no-send reach
+    surface." **That premise does not hold.** Re-probed 2026-08-19T14:11:04Z
+    (`Invoke-WebRequest -Method Head`): primary slug
+    `https://github.com/marketplace/actions/getadvantage-check` returns
+    **200** — real listing, owner `BellmeJoe`, source `BellmeJoe/getadvantage-cli`,
+    install `BellmeJoe/getadvantage-cli@v1`, categories *Continuous integration*
+    + *Code quality*, version shown `v0.13.1`. The other three plausible slugs
+    (`/getadvantage`, `/get-advantage-check`, `/getadvantage-cli`) correctly
+    return **404**. The Marketplace Developer Agreement and the initial publish
+    checkbox for the live listing have **already been taken**. Readiness lane
+    `0.13.x-marketplace-listing-readiness` closed `done` at `9efe0c3`.
+    **Residual state only:** every *future* Release still needs the founder to
+    tick "Publish this Action to the GitHub Marketplace" (REST/API automation
+    still cannot set that flag) — documented in
+    `docs/launch/MARKETPLACE-LISTING.md`. Score components for the residual
+    (effort 1): reach 1 · activation 0.5 · retention 0 · trust 0 · sharing 1 →
+    `(0.25+0.125+0+0+0.1)/1 = 0.48`. **No longer top of the portfolio; not a
+    dispatchable product lane.** Listing = shelf visibility only — never
+    adoption, installs, evaluators, or retained teams.
 
 16b. **MCP registry listing** — score 2.85 at effort 1 (2026-08-15). Lists the
     **already-shipped** `mcp.mjs` surface in the MCP registry and established
@@ -237,7 +255,8 @@ lane ships or is killed. Only one implementation lane may be open.
     `BellmeJoe/*` repo — zero third-party shelf PRs ever opened.** *Honest
     distinction from 16a:* a registry listing requires a **PR to someone else's
     repository**, which is a send-class action and sits inside the send gate. It
-    is not click-free.
+    is not click-free. With 16a residual at 0.48, **16b is now the higher-ranked
+    free-shelf half** — still blocked on the send gate.
 
 ## Selection score
 
