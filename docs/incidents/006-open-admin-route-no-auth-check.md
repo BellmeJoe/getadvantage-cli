@@ -19,6 +19,8 @@ Map — what your app has (read-only)
   ⚠ API surface map — 4 routes · 1 look gated (session or cron secret) · 3 mutate (write) · 2 mutate without any obvious gate.
       ⚠ /api/admin/refund [POST] — mutates but no auth/session check found
       ⚠ /api/admin/users/:id/role [POST] — mutates but no auth/session check found
+      Confirm each ⚠ route is meant to be public (some, like a rate-limited lead/contact
+      endpoint, legitimately are) — and that the others authenticate the caller before writing.
       — full map —
       /api/admin/refund  [POST]  PUBLIC + mutates ⚠
       /api/admin/users/:id/role  [POST]  PUBLIC + mutates ⚠

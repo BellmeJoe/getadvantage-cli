@@ -14,6 +14,9 @@ Built the shape locally: one validation function, copied near-verbatim into thre
 
 ```
 Architecture — accretion scan (advisory, read-only)
+  Where the codebase is being built OVER instead of collapsed — the signal
+  an AI coding agent doesn't have. Measurement + heuristics; judgment stays human.
+
   scanned: 3 source files · 54 lines
   oversized: 0 files >600 lines (0 >1000 · 0 >1800)
   duplication: 3 repeated blocks — >=15 similar lines appearing >=3x (exact/near-exact repetition, approximate)
@@ -29,7 +32,7 @@ Collapse candidates (top 3)
        18 lines * changed in 2 of the last 16 commits * 1 duplicated block, e.g. lines 1-18 (shared with src/adminValidate.js, src/checkoutValidate.js)
 
 Verdict
-  Signal band: NOTABLE
+  Signal band: NOTABLE — how loud the accretion signals are, not a grade of your code.
   Accretion surfaced in 3 files. This is a measurement, not a
   judgment -- a human (or your agent, now informed) decides what to collapse.
   Advisory only -- accretion never blocks a ship (exit 0).

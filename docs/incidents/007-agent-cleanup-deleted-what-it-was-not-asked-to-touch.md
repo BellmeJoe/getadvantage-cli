@@ -36,6 +36,10 @@ Intent Contract
       Smallest safe next edit — path(s) outside Intent Contract allow list (src/api/auth.js, src/api/handler.js, tests/api/handler.test.js):
         Preferred: unstage/remove the out-of-scope path(s) so the commit stays inside the frozen envelope at .getadvantage/intent.json.
         Example: git restore --staged --worktree -- src/api/auth.js
+        To authorize a wider envelope: start a branch from a trusted base with NO intent history, then:
+          getadvantage intent init --goal "…" --allow "relevant/**" --allow "…"
+          git add .getadvantage/intent.json && git commit -m "chore: intent contract"
+        Note: editing a frozen .getadvantage/intent.json cannot self-authorize (unsigned local mode: one freeze per clean lineage).
       scope verified; semantic correctness not proven
 
 Verdict
