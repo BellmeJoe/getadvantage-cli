@@ -16,7 +16,7 @@ Reproduced the shape of the failure locally: a clean initial commit, then a loca
     Commit, stash, or revert before shipping. Deploy from a clean detached worktree of the intended commit.
 
 Verdict
-  ✓ 2   ⚠ 1   ✗ 1   – 3 skipped
+  ✓ 5   ⚠ 1   ✗ 1   – 3 skipped
 
   NO-GO — 1 blocking issue. Do not ship until these are clear.
 ```
