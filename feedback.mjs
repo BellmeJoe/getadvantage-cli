@@ -64,6 +64,11 @@ export const FEEDBACK_COVERS_CHECK_SECRET_IDS = Object.freeze(
  * Feedback-only extras — shapes the gate does not list (or lists more
  * narrowly) but that must still never travel in a feedback payload.
  * Keeping these is the allowed "superset" relative to checks.mjs.
+ *
+ * postgres(?:ql)? and Bearer {8,} are intentional widenings of narrower
+ * gate patterns (db-url-password requires user:pass@{8,}+host-no-slash;
+ * bearer requires token {20,}). Full-URL tails must consume the database
+ * name so a partial gate match cannot leave `/dbname` after [REDACTED].
  */
 const FEEDBACK_ONLY_SECRET_PATTERNS = [
   /\bsk_test_[A-Za-z0-9]{20,}/g,
@@ -71,12 +76,18 @@ const FEEDBACK_ONLY_SECRET_PATTERNS = [
   /\bgho_[A-Za-z0-9]{20,}/g,
   /\bghu_[A-Za-z0-9]{20,}/g,
   /\bghr_[A-Za-z0-9]{20,}/g,
+  // Wider than checks db-url-password: full scheme://… tail incl. /dbname.
+  /\bpostgres(?:ql)?:\/\/[^\s'"]+/gi,
   /\b(?:mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^\s'"]+/gi,
+  // Wider than checks bearer ({20,} + validate): any Bearer token ≥8 chars.
+  /\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi,
 ];
 
+// Feedback-only extras FIRST so the full-tail postgres URL wins over the
+// narrower gate db-url-password match (which otherwise leaves `/dbname`).
 const SECRET_REDACTION_REGEXES = [
-  ...CHECK_SECRET_REDACTION.map((p) => p.re),
   ...FEEDBACK_ONLY_SECRET_PATTERNS,
+  ...CHECK_SECRET_REDACTION.map((p) => p.re),
 ];
 
 /**

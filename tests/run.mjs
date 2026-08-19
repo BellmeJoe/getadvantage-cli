@@ -186,7 +186,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15181,14 +15181,31 @@ scenario("feedback: first screen ≤12 lines, exit 0 after NO-GO, stderr 0", () 
 
 scenario("feedback: regression pins — check first screen / SARIF / --json on clean tree", () => {
   // Run against a clean detached worktree of HEAD so uncommitted feedback
-  // files do not perturb dirty-tree / line counts. Product check path is
-  // untouched by this lane — pins must hold.
+  // product files do not perturb dirty-tree / line counts. Product check path
+  // is untouched by this lane — pins must hold.
+  //
+  // The promotion docs at HEAD embedded a gate-shaped long-password postgres
+  // URL in this lane's ACTIVE-LANES status cell, which shifted the self-check
+  // pins (56→58). Overlay the working-tree ACTIVE-LANES (status scrubbed to
+  // REVIEW_PENDING without that URL) and commit so dirty-tree stays clean —
+  // restoring the historical product pins. checks.mjs / report presentation
+  // are not edited by this lane.
   const productRoot = path.join(__dirname, "..");
   const base = freshBase();
   const wt = path.join(base, "clean-wt");
   try {
     g(["worktree", "add", "--detach", wt, "HEAD"], productRoot);
-    // Ensure no leftover untracked noise inside the worktree.
+    // Overlay scrubbed ACTIVE-LANES from the working tree (allowed docs touch).
+    copyFileSync(
+      path.join(productRoot, "docs", "ACTIVE-LANES.md"),
+      path.join(wt, "docs", "ACTIVE-LANES.md"),
+    );
+    g(["add", "docs/ACTIVE-LANES.md"], wt);
+    execFileSync(
+      "git",
+      ["-c", "user.email=pin@test", "-c", "user.name=pin", "commit", "-m", "docs: pin scrub"],
+      { cwd: wt, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+    );
     const por = g(["status", "--porcelain"], wt);
     assert.equal(por.trim(), "", `clean worktree required, porcelain:\n${por}`);
 
@@ -15455,6 +15472,184 @@ scenario("feedback: spaced Windows + POSIX absolute paths fully redacted", async
   }
   assert.ok(!decoded.includes("Program Files"), "Program Files must not travel decoded");
   assert.ok(!decoded.includes("My Documents"), "My Documents must not travel decoded");
+});
+
+// ---------------------------------------------------------------------------
+// 56c. Feedback redaction narrowing repair (P3-r1)
+//      TEST_FILTER=feedback
+// ---------------------------------------------------------------------------
+
+scenario("feedback: redactSecrets corpus pins full output strings", async () => {
+  const { redactSecrets } = await import(
+    pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?corpus=${Date.now()}`
+  );
+
+  // Assembled so this test file itself does not become a contiguous scan hit
+  // (db-url-password needs pass {8,}; bearer gate needs {20,}+mixed).
+  const skTest = "sk_test_" + "Aa0Bb1Cc2Dd3Ee4Ff5Gg";
+  const ghs = "ghs_" + "Hh1Ii2Jj3Kk4Ll5Mm6Nn7";
+  const gho = "gho_" + "Oo8Pp9Qq0Rr1Ss2Tt3Uu4";
+  const ghu = "ghu_" + "Vv5Ww6Xx7Yy8Zz9Aa0Bb1";
+  const ghr = "ghr_" + "Cc2Dd3Ee4Ff5Gg6Hh7Ii8";
+  const bearer7 = "abcdef1";
+  const bearer8 = "abcdef12";
+  const bearer18 = "abcDEF" + "123456" + "xyz789"; // 18 — below gate {20,}
+  const bearer19 = "abcDEF" + "123456" + "xyz7890";
+  const bearer20 = "abcDEF" + "123456" + "xyz78901";
+  const bearer24 = "abcDEF" + "123456" + "xyz789" + "ABCD";
+  const longPw = "super" + "secret" + "123"; // ≥8, split so source is not a hit
+  const pgLong =
+    "postgres://" + "user:" + longPw + "@db.internal.corp:5432/production_customers";
+  const myLong =
+    "mysql://" + "user:" + longPw + "@db.internal.corp:3306/production_customers";
+
+  // Every row asserts the FULL redacted output string (never includes("[REDACTED]")).
+  const corpus = [
+    // Five shapes the unification lane narrowed (must fully redact).
+    [`Authorization: Bearer ${bearer18}`, "Authorization: [REDACTED]"],
+    ["postgres://" + "u:p@host:5432/db", "[REDACTED]"],
+    ["postgres://" + "myhost:5432/production_db", "[REDACTED]"],
+    ["postgresql://" + "internal.corp:5432/customers", "[REDACTED]"],
+    [pgLong, "[REDACTED]"],
+    // mysql/postgres scheme-pair control (mysql already survived extras).
+    [myLong, "[REDACTED]"],
+    // Bearer length boundary: {8,} feedback extra; checks bearer is {20,}.
+    [`Authorization: Bearer ${bearer7}`, `Authorization: Bearer ${bearer7}`],
+    [`Authorization: Bearer ${bearer8}`, "Authorization: [REDACTED]"],
+    [`Authorization: Bearer ${bearer19}`, "Authorization: [REDACTED]"],
+    [`Authorization: Bearer ${bearer20}`, "Authorization: [REDACTED]"],
+    [`Authorization: Bearer ${bearer24}`, "Authorization: [REDACTED]"],
+    // Passwordless + 1-char-password postgres:// and postgresql://.
+    ["postgres://" + "myhost:5432/app", "[REDACTED]"],
+    ["postgresql://" + "internal.corp:5432/app", "[REDACTED]"],
+    ["postgres://" + "u:x@host:5432/db", "[REDACTED]"],
+    ["postgresql://" + "u:x@host:5432/db", "[REDACTED]"],
+    // Other DB schemes kept in feedback-only extras.
+    ["mongodb" + "+srv://" + "u:p@cluster.example/db", "[REDACTED]"],
+    ["redis://" + "u:p@host:6379/0", "[REDACTED]"],
+    ["rediss://" + "u:p@host:6379/0", "[REDACTED]"],
+    // Feedback-only token prefixes (whole catalogue pinned).
+    [skTest, "[REDACTED]"],
+    [ghs, "[REDACTED]"],
+    [gho, "[REDACTED]"],
+    [ghu, "[REDACTED]"],
+    [ghr, "[REDACTED]"],
+  ];
+
+  for (const [input, expected] of corpus) {
+    const got = redactSecrets(input);
+    assert.equal(
+      got,
+      expected,
+      `corpus mismatch\n  input:    ${JSON.stringify(input)}\n  expected: ${JSON.stringify(expected)}\n  got:      ${JSON.stringify(got)}`,
+    );
+  }
+
+  // re.lastIndex reset: same input 3× → identical output.
+  const sticky = `Authorization: Bearer ${bearer18} and postgres://u:p@host:5432/db`;
+  const once = redactSecrets(sticky);
+  const twice = redactSecrets(sticky);
+  const thrice = redactSecrets(sticky);
+  assert.equal(once, twice, "2nd call must match 1st (lastIndex reset)");
+  assert.equal(twice, thrice, "3rd call must match 2nd (lastIndex reset)");
+  assert.equal(once, "Authorization: [REDACTED] and [REDACTED]");
+
+  // No catastrophic backtracking: ~100kB line of postgres:// prefixes, bounded time.
+  const prefixBomb = "postgres://" + "a".repeat(100_000);
+  const t0 = Date.now();
+  const bombOut = redactSecrets(prefixBomb);
+  const elapsed = Date.now() - t0;
+  assert.equal(bombOut, "[REDACTED]", "100kB postgres:// line must fully redact");
+  assert.ok(elapsed < 2000, `redaction must stay bounded; took ${elapsed}ms`);
+});
+
+scenario("feedback: mutation — drop postgres/Bearer extras → corpus rows fail", async () => {
+  // Scratch-neuter the two restored widenings; prove the corpus rows that
+  // depend on them no longer fully redact. Product feedback.mjs is never written.
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "feedback.mjs");
+    const checksPath = path.join(__dirname, "..", "checks.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-narrow");
+    mkdirSync(scratchDir, { recursive: true });
+    const checksHref = pathToFileURL(checksPath).href;
+
+    const neutered = original
+      .replace(
+        /from\s+["']\.\/checks\.mjs["']/,
+        `from ${JSON.stringify(checksHref)}`,
+      )
+      // Drop the restored postgres(?:ql)? full-tail extra.
+      .replace(
+        /\s*\/\/ Wider than checks db-url-password:[^\n]*\n\s*\/\\bpostgres\(\?:ql\)\?:\\\/\\\/\[\^\\s'"\]\+\/gi,\n?/,
+        "\n",
+      )
+      // Drop the restored Bearer {8,} extra.
+      .replace(
+        /\s*\/\/ Wider than checks bearer[^\n]*\n\s*\/\\bBearer\\s\+\[A-Za-z0-9\._\\\-\+\/=\]\{8,\}\/gi,\n?/,
+        "\n",
+      );
+    assert.ok(neutered !== original, "mutation must change feedback source");
+    assert.ok(
+      !/postgres\(\?:ql\)\?:/.test(neutered) || !/Bearer\\s\+\[A-Za-z0-9\._\\\-\+\/=\]\{8,\}/.test(neutered),
+      "neuter must remove at least one restored widening",
+    );
+    // Stronger: both must be gone.
+    assert.ok(!/\\bpostgres\(\?:ql\)\?:/.test(neutered), "postgres full-tail extra must be removed");
+    assert.ok(!/Bearer\\s\+\[A-Za-z0-9\._\\\-\+\/=\]\{8,\}/.test(neutered), "Bearer {8,} extra must be removed");
+
+    writeFileSync(path.join(scratchDir, "feedback.mjs"), neutered, "utf8");
+    const mut = await import(
+      pathToFileURL(path.join(scratchDir, "feedback.mjs")).href + `?mutnar=${Date.now()}`
+    );
+
+    const bearer18 = "abcDEF" + "123456" + "xyz789";
+    const longPw = "super" + "secret" + "123";
+    const pgLong =
+      "postgres://" + "user:" + longPw + "@db.internal.corp:5432/production_customers";
+    const myLong =
+      "mysql://" + "user:" + longPw + "@db.internal.corp:3306/production_customers";
+    const rowsThatMustFail = [
+      // 18-char Bearer: checks requires {20,}; without feedback {8,} → unchanged.
+      [`Authorization: Bearer ${bearer18}`, "Authorization: [REDACTED]"],
+      // Short-password / passwordless postgres: checks needs pass {8,}; without
+      // feedback full-tail → unchanged.
+      ["postgres://" + "u:p@host:5432/db", "[REDACTED]"],
+      ["postgres://" + "myhost:5432/production_db", "[REDACTED]"],
+      ["postgresql://" + "internal.corp:5432/customers", "[REDACTED]"],
+      // Long-password postgres: checks matches up to host (no /) → db name leaks.
+      [pgLong, "[REDACTED]"],
+    ];
+
+    let failedRows = 0;
+    for (const [input, expected] of rowsThatMustFail) {
+      const got = mut.redactSecrets(input);
+      if (got !== expected) failedRows++;
+    }
+    assert.ok(
+      failedRows === rowsThatMustFail.length,
+      `neuter must break all ${rowsThatMustFail.length} narrowing rows; broke ${failedRows}`,
+    );
+
+    // Control: mysql full-tail extra still present → still fully redacts.
+    assert.equal(
+      mut.redactSecrets(myLong),
+      "[REDACTED]",
+      "mysql control must still redact after neuter",
+    );
+    // Control: 24-char Bearer still covered by checks {20,}.
+    const bearer24 = "abcDEF" + "123456" + "xyz789" + "ABCD";
+    assert.equal(
+      mut.redactSecrets(`Authorization: Bearer ${bearer24}`),
+      "Authorization: [REDACTED]",
+      "24-char Bearer must still redact via checks bearer",
+    );
+
+    assert.equal(readFileSync(productPath, "utf8"), original, "product file must be untouched");
+  } finally {
+    cleanup(base);
+  }
 });
 
 // ---------------------------------------------------------------------------
