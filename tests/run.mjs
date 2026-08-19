@@ -15201,11 +15201,18 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
       path.join(wt, "docs", "ACTIVE-LANES.md"),
     );
     g(["add", "docs/ACTIVE-LANES.md"], wt);
-    execFileSync(
-      "git",
-      ["-c", "user.email=pin@test", "-c", "user.name=pin", "commit", "-m", "docs: pin scrub"],
-      { cwd: wt, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
-    );
+    // Commit only when the overlay actually staged something. Once HEAD itself
+    // carries the scrubbed status cell the overlay is a no-op, and an
+    // unconditional `git commit` would exit non-zero ("nothing to commit") and
+    // fail this scenario on every clean checkout, CI included.
+    const staged = g(["diff", "--cached", "--name-only"], wt).trim();
+    if (staged) {
+      execFileSync(
+        "git",
+        ["-c", "user.email=pin@test", "-c", "user.name=pin", "commit", "-m", "docs: pin scrub"],
+        { cwd: wt, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+      );
+    }
     const por = g(["status", "--porcelain"], wt);
     assert.equal(por.trim(), "", `clean worktree required, porcelain:\n${por}`);
 
