@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.14.0** (train tip · REVIEW_PENDING)
+# Social / advertising pack — getadvantage **0.14.0** (LIVE)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,12 +6,14 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **Train tip (not yet published):** **getadvantage@0.14.0** (minor, 2026-08-19).
-> Version bumped in-tree; **needs release-scoped independent audit** before tag /
-> npm / GitHub Release. Prefer leading with the eight core GO/NO-GO claims below;
-> Intent remains the trust-layer follow-on — always *scope verified; semantic
-> correctness not proven*. Published live npm remains **0.13.1** until this train
-> ships.
+> **LIVE:** **getadvantage@0.14.0** published **2026-08-20 17:09 +03:00**
+> (minor). `dist-tags.latest` **0.14.0**, registry `gitHead` `cc9d39a`, tags
+> `v0.14.0` and floating `v1` both peel to `cc9d39a`, GitHub Release
+> `getadvantage 0.14.0`, CI run `32378293939` (all 15 steps success, suite
+> **283/283**, evidence **8/8**). Released under a release-scoped independent
+> `REVIEW_GO` at `cc9d39a` with 0 open P1/P2. Prefer leading with the eight core
+> GO/NO-GO claims below; Intent remains the trust-layer follow-on — always
+> *scope verified; semantic correctness not proven*.
 >
 > **What 0.14.0 ships (minor — new user-facing command):** `getadvantage feedback`
 > prints a copy-pasteable GitHub issue URL pre-filled with redacted environment
@@ -19,9 +21,13 @@
 > always exits 0, not a gate, not telemetry. Also carries: ops retained-team
 > detector (ops-only, not packed), Marketplace listing readiness docs, README /
 > version-claim currency, redaction catalogue unification + narrowing repair.
-> **No new checks. No verdict or exit change on the gate.** **Not an adoption
-> event** — named evaluators / installs / first gates / week-two reuse /
-> retained external teams remain **0**.
+> **No new checks. No verdict or exit change on the gate.** Also carries a
+> correctness fix (`cc9d39a`): secret **auth identity is now line-ending
+> independent**, so a `secrets.ignore` allowlist entry authored on Windows now
+> actually suppresses the same multi-line secret when the gate runs on Linux CI,
+> and the reverse. Before this, the same secret could carry two different auth
+> ids across platforms. **Not an adoption event** — named evaluators / installs /
+> first gates / week-two reuse / retained external teams remain **0**.
 >
 > **Still live from 0.13.1 (historical intro):** collapsed secret-row `file:line`
 > restore + dry-run paste-ready JSON repair + body/transport key banner.
@@ -60,7 +66,7 @@
 > GitHub Action + PR summary (`uses: BellmeJoe/getadvantage-cli@v1` — floating
 > major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases));
 > secret scan of committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback after publish (**historical until then**): **getadvantage@0.13.1** /
+> Rollback target for live **0.14.0**: **getadvantage@0.13.1** /
 > tag `v0.13.1` / `e5b06f3` (with **0.13.0** / `v0.13.0` / `bdc8b04` and
 > **0.12.2** / `v0.12.2` / `1e451ac` intact behind it).
 
@@ -75,12 +81,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (published live)** | `getadvantage@0.13.1` until this train publishes; in-tree tip **`0.14.0`** |
-| **Checkout** | Train tip **0.14.0** minor: new `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **npm (published live)** | **`getadvantage@0.14.0`** (live 2026-08-20; registry `gitHead` `cc9d39a`) |
+| **Checkout** | Live **0.14.0** minor: new `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
 | **Install** | `npx getadvantage` (tracks `latest`) or pin an exact tag from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** (re-measured on this train) · product fingerprints feedback `8eb494b` + redaction `ec58b49`/`53339ff`/`f19797b` · tip `3afc50b` + version bump · **REVIEW_PENDING** (no tag / no publish yet) · suite + pack re-measured on the train · 0 RLS advertised · rollback target after publish: `0.13.1` / `v0.13.1` / `e5b06f3` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** (re-measured on a CI-equivalent LF checkout of the released commit) · full suite **283/283** · release fingerprint **`cc9d39a`** · published `dist.shasum` `c3992fb30f2aaf7177be1df3d58b34825e85190e` · tag `v0.14.0` + floating `v1` both peel to `cc9d39a` · CI run `32378293939` · post-release cold `npx getadvantage@0.14.0 check` on a fresh temp repo → **GO, exit 0, 6.5s** · 0 RLS advertised · rollback: `0.13.1` / `v0.13.1` / `e5b06f3` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
