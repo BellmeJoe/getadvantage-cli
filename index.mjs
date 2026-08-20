@@ -38,7 +38,7 @@
 //                                       [--commit <ref>] [--token-env VERCEL_TOKEN]
 //                                       [--build] [--force]
 
-import { binName, c, cliVersion, printResult, section } from "./util.mjs";
+import { binName, c, classifyGitCwd, cliVersion, printResult, section } from "./util.mjs";
 import { repoRoot } from "./util.mjs";
 import { detectProject, detectRepoStack } from "./detect.mjs";
 import { renderMap } from "./overviews.mjs";
@@ -634,13 +634,32 @@ async function main() {
     process.exit(await runFeedbackCommand());
   }
 
+  // Classify first so bare vs non-git get factually correct guidance on
+  // stdout (not stderr). Exit 1 unchanged; no raw git fatal: noise.
   let cwd;
-  try {
-    cwd = repoRoot();
-  } catch {
-    console.error(c.red("✗ This folder isn't a git repository yet — getAdvantage gates the git history of your project."));
-    console.error(c.gray("  → Try it with no setup:  getadvantage demo"));
-    console.error(c.gray("  → Or gate this folder:   git init && git add -A   (then re-run getadvantage check)"));
+  const gitCwd = classifyGitCwd();
+  if (gitCwd.kind === "worktree") {
+    cwd = gitCwd.root;
+  } else if (gitCwd.kind === "bare") {
+    console.log(
+      c.red(
+        "✗ This is a bare repository — getAdvantage gates a working tree; run it in a clone.",
+      ),
+    );
+    console.log(c.gray("  → Try it with no setup:  getadvantage demo"));
+    process.exit(1);
+  } else {
+    console.log(
+      c.red(
+        "✗ This folder isn't a git repository yet — getAdvantage gates the git history of your project.",
+      ),
+    );
+    console.log(c.gray("  → Try it with no setup:  getadvantage demo"));
+    console.log(
+      c.gray(
+        "  → Or gate this folder:   git init && git add -A   (then re-run getadvantage check)",
+      ),
+    );
     process.exit(1);
   }
 

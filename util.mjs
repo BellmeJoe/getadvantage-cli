@@ -141,14 +141,59 @@ export function gitFilesZ(args, opts = {}) {
   }
 }
 
+/**
+ * Classify the git status of a working directory without letting git's own
+ * fatal: noise reach the user. Presentation strings stay in the caller
+ * (index.mjs); this helper is reusable detection only.
+ *
+ * @param {string} [cwd]
+ * @returns {{ kind: "worktree", root: string } | { kind: "bare" } | { kind: "non-git" }}
+ */
+export function classifyGitCwd(cwd = process.cwd()) {
+  // Bare first: --show-toplevel fails on bare (no work tree), while
+  // --is-bare-repository returns "true". Checking bare before toplevel
+  // keeps the two failure modes distinguishable.
+  try {
+    const bare = execFileSync("git", ["rev-parse", "--is-bare-repository"], {
+      encoding: "utf8",
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (bare === "true") return { kind: "bare" };
+  } catch {
+    // Not a git directory, or git unavailable — fall through.
+  }
+
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (root) return { kind: "worktree", root };
+  } catch {
+    // Not a work tree.
+  }
+
+  return { kind: "non-git" };
+}
+
+/** True when `cwd` is a bare git repository (no working tree). */
+export function isBareRepository(cwd = process.cwd()) {
+  return classifyGitCwd(cwd).kind === "bare";
+}
+
 /** Repo root (absolute). Suppresses git's own stderr noise — the caller
- *  prints ONE clean "not a git repository" line instead. */
+ *  prints ONE clean guidance line instead. Throws for bare and non-git
+ *  (use `classifyGitCwd` when those must be distinguished). */
 export function repoRoot(cwd = process.cwd()) {
-  return execFileSync("git", ["rev-parse", "--show-toplevel"], {
-    encoding: "utf8",
-    cwd,
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  const cls = classifyGitCwd(cwd);
+  if (cls.kind === "worktree") return cls.root;
+  const err = new Error(
+    cls.kind === "bare" ? "bare repository" : "not a git repository",
+  );
+  err.code = cls.kind;
+  throw err;
 }
 
 /**
@@ -429,7 +474,8 @@ export function relPath(abs, cwd) {
 //   • READS prefer .getadvantage/<file>, falling back to .ship-safe/<file>
 //     (per file, so a half-migrated repo never silently loses history).
 //   • When the legacy dir is still being read, a one-time migration note is
-//     printed to stderr (stderr so it can never pollute --json stdout).
+//     printed to stdout (user-facing guidance is not an error). Under --json,
+//     index.mjs routes console.log → stderr so the machine document stays pure.
 
 export const MARKER_DIR = ".getadvantage";
 export const LEGACY_MARKER_DIR = ".ship-safe";
@@ -438,7 +484,7 @@ let legacyMarkerNoteShown = false;
 function noteLegacyMarkerDir() {
   if (legacyMarkerNoteShown) return;
   legacyMarkerNoteShown = true;
-  console.error(
+  console.log(
     c.gray(
       `  (Found legacy ${LEGACY_MARKER_DIR}/ state — still readable, but new state now writes to ` +
         `${MARKER_DIR}/. Move or delete ${LEGACY_MARKER_DIR}/ whenever convenient.)`,

@@ -290,6 +290,14 @@ export function formatReport(result) {
   const externalCount =
     retained.length + installs.length + unknownShape.length;
 
+  // Evidence the positive control that authorised this success report.
+  // Printed whenever status is ok so a reader can see the control passed
+  // (not merely infer it from the absence of UNKNOWN).
+  const controlLine =
+    result.controlTotalCount != null
+      ? `# positive-control-total-count: ${result.controlTotalCount}`
+      : null;
+
   // Zero external repos found → plain `0` (north-star first-class result).
   if (externalCount === 0 && excluded.length === 0 && (result.totalSearchHits || 0) === 0) {
     lines.push("0");
@@ -299,6 +307,7 @@ export function formatReport(result) {
     lines.push(`# selfOwner: ${result.selfOwner || DEFAULT_SELF_OWNER}`);
     lines.push("# status: ok — zero code-search hits");
     lines.push(`# retained-external-teams: 0`);
+    if (controlLine) lines.push(controlLine);
     lines.push("");
     return lines.join("\n");
   }
@@ -314,6 +323,7 @@ export function formatReport(result) {
     lines.push(`# retained-external-teams: 0`);
     lines.push(`# search-hits: ${result.totalSearchHits || 0}`);
     lines.push(`# excluded: ${excluded.length}`);
+    if (controlLine) lines.push(controlLine);
     lines.push("");
     lines.push("## Excluded (with reason)");
     for (const e of excluded) {
@@ -327,6 +337,7 @@ export function formatReport(result) {
   lines.push(`# generated: ${generated}`);
   lines.push(`# selfOwner: ${result.selfOwner || DEFAULT_SELF_OWNER}`);
   lines.push("# status: ok");
+  if (controlLine) lines.push(controlLine);
   lines.push("");
   lines.push("## North-star: retained external teams (week-two reuse)");
   lines.push(String(retainedCount));
@@ -337,6 +348,9 @@ export function formatReport(result) {
   lines.push(`- unknown-shape: ${unknownShape.length}`);
   lines.push(`- excluded: ${excluded.length}`);
   lines.push(`- search-hits: ${result.totalSearchHits || 0}`);
+  if (result.controlTotalCount != null) {
+    lines.push(`- positive-control-total-count: ${result.controlTotalCount}`);
+  }
   lines.push("");
 
   if (retained.length) {
@@ -708,6 +722,8 @@ export async function runDetector(opts = {}) {
     unknownShape,
     excluded,
     totalSearchHits,
+    // Evidences the positive control that authorised this success report.
+    controlTotalCount: controlCount,
   };
   const report = formatReport(result);
   emit(report, opts);

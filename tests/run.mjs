@@ -183,6 +183,10 @@
 //  55. Marketplace listing readiness  — action.yml publishing contract (mutation-
 //                                     proven) + non-fatal release notice
 //                                     (TEST_FILTER=marketplace)
+//  58. stderr + control transparency  — H1 non-git / H2 zero-commit / H3 detached
+//                                     HEAD / H4 bare: guidance on stdout, stderr
+//                                     0 B; bare message factually correct
+//                                     (TEST_FILTER=hostile-cwd)
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -2384,11 +2388,13 @@ scenario("marker dir: legacy .ship-safe/ still read (with note); writes → .get
     );
 
     // gauge READS the legacy marker (so no "No save-point yet") + notes the migration.
+    // Guidance (not an error) travels on stdout — stderr must stay empty.
     const r1 = run(["gauge"], repo);
     assert.equal(r1.code, 0, r1.stderr);
+    assert.equal(Buffer.byteLength(r1.stderr), 0, "legacy migration note must not use stderr");
     assert.ok(/Session weight/.test(r1.stdout), `expected a gauge read, got:\n${r1.stdout}`);
     assert.ok(!/No save-point yet/.test(r1.stdout));
-    assert.ok(/legacy \.ship-safe\//.test(r1.stderr), "expected the one-time migration note on stderr");
+    assert.ok(/legacy \.ship-safe\//.test(r1.stdout), "expected the one-time migration note on stdout");
 
     // handoff WRITES to the new dir…
     const r2 = run(["handoff"], repo);
@@ -2399,7 +2405,8 @@ scenario("marker dir: legacy .ship-safe/ still read (with note); writes → .get
     // …and once the new marker exists, reads prefer it (no legacy note anymore).
     const r3 = run(["gauge"], repo);
     assert.equal(r3.code, 0, r3.stderr);
-    assert.ok(!/legacy \.ship-safe\//.test(r3.stderr), "new marker present — the legacy note must stop");
+    assert.ok(!/legacy \.ship-safe\//.test(r3.stdout), "new marker present — the legacy note must stop");
+    assert.ok(!/legacy \.ship-safe\//.test(r3.stderr), "legacy note must not reappear on stderr either");
   } finally {
     cleanup(base);
   }
@@ -14031,11 +14038,18 @@ scenario("retained-team: control passes + production 0 incomplete_results false 
   assert.equal(exitCode, 0, report);
   assert.equal(result.status, "ok");
   assert.equal(result.totalSearchHits, 0);
+  assert.equal(result.controlTotalCount, 2060, "success result must carry control total_count");
   assert.ok(
     report.split(/\r?\n/).some((l) => l.trim() === "0"),
     `must print plain 0:\n${report}`,
   );
   assert.ok(!report.includes("UNKNOWN"));
+  // Control transparency: success report evidences the positive control.
+  assert.match(
+    report,
+    /positive-control-total-count:\s*2060/,
+    `success report must print control total_count:\n${report}`,
+  );
   // Control ran before production.
   const controlIdx = urls.findIndex(isRetainedTeamControlSearchUrl);
   const prodIdx = urls.findIndex(
@@ -14096,6 +14110,45 @@ scenario("retained-team: control incomplete_results true but count>0 → still p
   assert.equal(exitCode, 0, report);
   assert.equal(result.status, "ok");
   assert.ok(report.split(/\r?\n/).some((l) => l.trim() === "0"));
+  assert.equal(result.controlTotalCount, 2060);
+  assert.match(report, /positive-control-total-count:\s*2060/);
+});
+
+scenario("retained-team: formatReport success evidences positive-control total_count", () => {
+  // Pure formatReport pin — control transparency without a fetch round-trip.
+  const zero = formatReport({
+    status: "ok",
+    selfOwner: "BellmeJoe",
+    generatedAt: "2026-08-20T00:00:00.000Z",
+    retained: [],
+    installs: [],
+    unknownShape: [],
+    excluded: [],
+    totalSearchHits: 0,
+    controlTotalCount: 2060,
+  });
+  assert.ok(zero.split(/\r?\n/).some((l) => l.trim() === "0"));
+  assert.match(zero, /positive-control-total-count:\s*2060/);
+
+  const withHits = formatReport({
+    status: "ok",
+    selfOwner: "BellmeJoe",
+    generatedAt: "2026-08-20T00:00:00.000Z",
+    retained: [
+      {
+        fullName: "ext/a",
+        weeks: ["2026-W01", "2026-W02"],
+        path: ".getadvantage/INVISIBLE-MODE.md",
+      },
+    ],
+    installs: [],
+    unknownShape: [],
+    excluded: [],
+    totalSearchHits: 1,
+    controlTotalCount: 99,
+  });
+  assert.match(withHits, /positive-control-total-count:\s*99/);
+  assert.ok(!withHits.includes("UNKNOWN"));
 });
 
 scenario("retained-team: zero real network — injected fetch; no github.com host", async () => {
@@ -15804,6 +15857,123 @@ scenario("auth-identity: mutation — skip normalisation → CRLF/LF identities 
     assert.ok(crlfChars > lfChars, "neuter must leave CR bytes in the char count");
 
     assert.equal(readFileSync(productPath, "utf8"), original, "product util.mjs must be untouched");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 58. stderr + control transparency — cold-path H1–H4
+//     (0.14.x-stderr-and-control-transparency)
+//     Measured acceptance table from agent-ops brief 2026-08-19 20:45.
+//     TEST_FILTER=hostile-cwd
+// ---------------------------------------------------------------------------
+
+scenario("hostile-cwd H1: non-git folder — exit 1, stdout guidance, stderr 0 B", () => {
+  const base = freshBase();
+  const dir = path.join(base, "nongit");
+  try {
+    mkdirSync(dir, { recursive: true });
+    const r = run(["check"], dir);
+    assert.equal(r.code, 1, `H1 must exit 1:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H1 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H1 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.match(
+      r.stdout,
+      /isn't a git repository yet/i,
+      `H1 must print the non-git message:\n${r.stdout}`,
+    );
+    assert.ok(!/fatal:/i.test(r.stdout), "H1 must not leak raw git fatal:");
+    assert.ok(!/fatal:/i.test(r.stderr), "H1 stderr must not carry fatal:");
+    assert.match(r.stdout, /getadvantage demo/i);
+    assert.match(r.stdout, /git init && git add -A/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("hostile-cwd H2: zero-commit repo — exit 0, stdout non-empty, stderr 0 (regression pin)", () => {
+  const base = freshBase();
+  const repo = path.join(base, "zero-commit");
+  try {
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        { name: "zero-commit", version: "1.0.0", private: true, type: "module" },
+        null,
+        2,
+      ) + "\n",
+    );
+    // Deliberately no commit — empty history, working tree present.
+    const r = run(["check"], repo);
+    assert.equal(r.code, 0, `H2 must stay exit 0:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H2 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H2 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H2 must not leak fatal:");
+    assert.ok(
+      !/isn't a git repository yet/i.test(r.stdout),
+      "H2 must not use the non-git message",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("hostile-cwd H3: detached HEAD — exit 0, stdout non-empty, stderr 0 (regression pin)", () => {
+  const base = freshBase();
+  const repo = path.join(base, "detached");
+  try {
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        { name: "detached", version: "1.0.0", private: true, type: "module" },
+        null,
+        2,
+      ) + "\n",
+    );
+    write(repo, "app.js", "console.log(1);\n");
+    commitAll(repo, "init");
+    const sha = g(["rev-parse", "HEAD"], repo);
+    g(["checkout", "--detach", sha], repo);
+    const r = run(["check"], repo);
+    assert.equal(r.code, 0, `H3 must stay exit 0:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H3 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H3 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H3 must not leak fatal:");
+    assert.ok(
+      !/isn't a git repository yet/i.test(r.stdout),
+      "H3 must not use the non-git message",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("hostile-cwd H4: bare repo — exit 1, stdout bare message, stderr 0, no git-init remedy", () => {
+  const base = freshBase();
+  const bare = path.join(base, "bare.git");
+  try {
+    mkdirSync(bare, { recursive: true });
+    g(["init", "--bare", "-q"], bare);
+    const r = run(["check"], bare);
+    assert.equal(r.code, 1, `H4 must exit 1:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H4 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H4 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.match(r.stdout, /\bbare\b/i, `H4 must mention bare:\n${r.stdout}`);
+    assert.ok(
+      !/isn't a git repository yet/i.test(r.stdout),
+      "H4 must not use the non-git message (a bare repo IS a git repository)",
+    );
+    assert.ok(
+      !/git init && git add -A/i.test(r.stdout),
+      "H4 must not recommend git init && git add -A (no work tree)",
+    );
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H4 must not leak fatal:");
+    assert.match(r.stdout, /working tree|clone/i);
   } finally {
     cleanup(base);
   }

@@ -87,9 +87,10 @@ header is publicly searchable.
 > → `UNKNOWN` + non-zero exit, never a silent `0`. Control-first world-fact query
 > shipped in the incomplete-results repair (`d97a9fc`). **First live run,
 > 2026-08-15 weekly review: exit 0, `retained-external-teams: 0`**, observed
-> absence under a passing control. **P3 ships disclosed on the 0.14.0 train:**
-> the detector does not print the positive control's `total_count` (staged as
-> `0.14.x-stderr-and-control-transparency`).
+> absence under a passing control. **P3 closed in lane
+> `0.14.x-stderr-and-control-transparency` (REVIEW_PENDING):** success reports
+> now print `# positive-control-total-count: N` so the report evidences its own
+> control.
 
 ## Portfolio order
 
@@ -248,15 +249,17 @@ lane ships or is killed. Only one implementation lane may be open.
     dispatchable product lane.** Listing = shelf visibility only — never
     adoption, installs, evaluators, or retained teams.
 
-16b. **MCP registry listing** — score 2.85 at effort 1 (2026-08-15). Lists the
-    **already-shipped** `mcp.mjs` surface in the MCP registry and established
-    awesome-lists; no product code. Verified gap: account-wide
-    `gh search prs --author=@me` returns 8 lifetime PRs, **every one on a
-    `BellmeJoe/*` repo — zero third-party shelf PRs ever opened.** *Honest
-    distinction from 16a:* a registry listing requires a **PR to someone else's
-    repository**, which is a send-class action and sits inside the send gate. It
-    is not click-free. With 16a residual at 0.48, **16b is now the higher-ranked
-    free-shelf half** — still blocked on the send gate.
+16b. **MCP registry listing** — score **2.45** at effort 1 (re-scored 2026-08-19
+    12:45: reach 4 · activation 3 · retention 1 · trust 1 · sharing 3 →
+    `(1.0+0.75+0.2+0.2+0.3)/1 = 2.45`; NORTHSTAR previously carried the stale
+    **2.85** figure from 2026-08-15). Lists the **already-shipped** `mcp.mjs`
+    surface in the MCP registry and established awesome-lists; no product code.
+    Verified gap: account-wide `gh search prs --author=@me` returns 8 lifetime
+    PRs, **every one on a `BellmeJoe/*` repo — zero third-party shelf PRs ever
+    opened.** *Honest distinction from 16a:* a registry listing requires a **PR
+    to someone else's repository**, which is a send-class action and sits inside
+    the send gate. It is not click-free. With 16a residual at 0.48, **16b is now
+    the higher-ranked free-shelf half** — still blocked on the send gate.
 
 ## Selection score
 
