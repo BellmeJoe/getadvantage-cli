@@ -183,9 +183,9 @@
 //  55. Marketplace listing readiness  — action.yml publishing contract (mutation-
 //                                     proven) + non-fatal release notice
 //                                     (TEST_FILTER=marketplace)
-//  58. stderr + control transparency  — H1 non-git / H2 zero-commit / H3 detached
-//                                     HEAD / H4 bare: guidance on stdout, stderr
-//                                     0 B; bare message factually correct
+//  58. stderr + control transparency  — H1–H4 human stdout; H5/H6 --json
+//                                     stdout empty|JSON (never human/ANSI);
+//                                     bare message factually correct
 //                                     (TEST_FILTER=hostile-cwd)
 
 import { createHash } from "node:crypto";
@@ -15285,13 +15285,16 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     assert.equal(rs.code, 1);
     const sarifRaw = readFileSync(sarifPath);
     const sarifHash = createHash("sha256").update(sarifRaw).digest("hex");
-    // SARIF byte-identical prefix. Pin moves with package.json version
-    // (tool.driver.version embed) and with auth-identity normalisation:
-    // multi-line PEM auth/length is LF-normalised, so CRLF and LF trees share
-    // one prefix. Re-measured after the fix: 151858bc4150024b… (was
-    // platform-split 0ad7ec64ef4e5d9c Windows / 151858bc4150024b Linux).
+    // SARIF content pin. Shape pins above (56 / verdict 53 / 5 file:line /
+    // 0 B stderr) are unchanged by this lane. Content hashes move only because
+    // hostile-fixture startLine values in tests/run.mjs shifted when this
+    // lane appended TOC + scenarios (same 5 findings / rules / auth ids /
+    // messages; only region.startLine differed). Before/after proof
+    // (parent ca21118 → this lane):
+    //   startLine: 1398→1402, 1508→1512, 4283→4290, 4582→4589, 8697→8704
+    //   SARIF sha256 prefix: 151858bc4150024b → 0587eb58938dda2c
     assert.ok(
-      sarifHash.startsWith("151858bc4150024b"),
+      sarifHash.startsWith("0587eb58938dda2c"),
       `SARIF sha256 prefix mismatch: ${sarifHash.slice(0, 16)} (full ${sarifHash})`,
     );
 
@@ -15300,10 +15303,10 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     assert.equal(rj.code, 1);
     const filtered = rj.stdout.split(/\r?\n/).filter((l) => !/generatedAt/.test(l)).join("\n");
     const jsonHash = createHash("sha256").update(filtered).digest("hex");
-    // Same EOL-independence as SARIF. Re-measured: 9aaf3e35bc699e04…
-    // (was cb9fec3fe5aa5cb0 Windows / 9aaf3e35bc699e04 Linux before the fix).
+    // Same intentional startLine-only move as SARIF.
+    // Was 9aaf3e35bc699e04 (0.14.0 / ca21118) → 94b1592e8c88762c.
     assert.ok(
-      jsonHash.startsWith("9aaf3e35bc699e04"),
+      jsonHash.startsWith("94b1592e8c88762c"),
       `JSON sha256 prefix mismatch: ${jsonHash.slice(0, 16)} (full ${jsonHash})`,
     );
   } finally {
@@ -15863,7 +15866,7 @@ scenario("auth-identity: mutation — skip normalisation → CRLF/LF identities 
 });
 
 // ---------------------------------------------------------------------------
-// 58. stderr + control transparency — cold-path H1–H4
+// 58. stderr + control transparency — cold-path H1–H6
 //     (0.14.x-stderr-and-control-transparency)
 //     Measured acceptance table from agent-ops brief 2026-08-19 20:45.
 //     TEST_FILTER=hostile-cwd
@@ -15974,6 +15977,57 @@ scenario("hostile-cwd H4: bare repo — exit 1, stdout bare message, stderr 0, n
     );
     assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H4 must not leak fatal:");
     assert.match(r.stdout, /working tree|clone/i);
+  } finally {
+    cleanup(base);
+  }
+});
+
+/** Assert --json early-exit stdout is machine-pure: empty or one JSON doc. */
+function assertJsonStdoutMachinePure(r, label) {
+  assert.equal(r.code, 1, `${label} must exit 1:\n${r.stdout}\n${r.stderr}`);
+  assert.ok(
+    !/\u001b\[/.test(r.stdout),
+    `${label} stdout must have no ANSI escapes:\n${JSON.stringify(r.stdout)}`,
+  );
+  const trimmed = r.stdout.trim();
+  if (trimmed.length > 0) {
+    let doc;
+    try {
+      doc = JSON.parse(r.stdout);
+    } catch (e) {
+      assert.fail(
+        `${label} stdout must be empty or valid JSON (got human text):\n${r.stdout}`,
+      );
+    }
+    assert.equal(doc.exitCode, 1, `${label} JSON exitCode must be 1`);
+    if ("verdict" in doc) assert.equal(doc.verdict, "NO-GO");
+    if ("command" in doc) assert.equal(doc.command, "check");
+  }
+  assert.ok(!/fatal:/i.test(r.stdout + r.stderr), `${label} must not leak fatal:`);
+  // Under --json, human guidance may land on stderr (routed). Do not require
+  // stderr === 0. Do not require guidance on either stream.
+}
+
+scenario("hostile-cwd H5: non-git --json — exit 1, stdout empty|JSON, no human/ANSI", () => {
+  const base = freshBase();
+  const dir = path.join(base, "nongit-json");
+  try {
+    mkdirSync(dir, { recursive: true });
+    const r = run(["check", "--json"], dir);
+    assertJsonStdoutMachinePure(r, "H5");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("hostile-cwd H6: bare --json — exit 1, stdout empty|JSON, no human/ANSI", () => {
+  const base = freshBase();
+  const bare = path.join(base, "bare-json.git");
+  try {
+    mkdirSync(bare, { recursive: true });
+    g(["init", "--bare", "-q"], bare);
+    const r = run(["check", "--json"], bare);
+    assertJsonStdoutMachinePure(r, "H6");
   } finally {
     cleanup(base);
   }

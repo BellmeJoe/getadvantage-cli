@@ -474,8 +474,14 @@ export function relPath(abs, cwd) {
 //   • READS prefer .getadvantage/<file>, falling back to .ship-safe/<file>
 //     (per file, so a half-migrated repo never silently loses history).
 //   • When the legacy dir is still being read, a one-time migration note is
-//     printed to stdout (user-facing guidance is not an error). Under --json,
-//     index.mjs routes console.log → stderr so the machine document stays pure.
+//     printed via console.log (user-facing guidance is not an error). Under
+//     --json, that note only stays off the machine channel when a command
+//     entry has already installed routeHumanOutputToStderr() — map / check /
+//     intent / fan-in / architecture at their handler starts. The pre-command
+//     git-classify early exits in index.mjs install the same route on their
+//     --json bare/non-git branches before printing, then exit with no JSON
+//     document (stdout empty; guidance on stderr). Worktree success still
+//     leaves routing to those five command sites.
 
 export const MARKER_DIR = ".getadvantage";
 export const LEGACY_MARKER_DIR = ".ship-safe";

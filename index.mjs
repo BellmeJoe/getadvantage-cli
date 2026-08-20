@@ -634,13 +634,19 @@ async function main() {
     process.exit(await runFeedbackCommand());
   }
 
-  // Classify first so bare vs non-git get factually correct guidance on
-  // stdout (not stderr). Exit 1 unchanged; no raw git fatal: noise.
+  // Classify first so bare vs non-git get factually correct guidance.
+  // Human mode: guidance on stdout, stderr 0 B (lane H1/H4). Under --json,
+  // route console.log → stderr here — this block runs before the five
+  // command-entry routeHumanOutputToStderr() sites, and we exit before any
+  // machine document is emitted (same channel shape as unknown-flag under
+  // --json: exit 1, stdout empty, detail on stderr). Do not install routing
+  // on the worktree success path (those five sites still own it).
   let cwd;
   const gitCwd = classifyGitCwd();
   if (gitCwd.kind === "worktree") {
     cwd = gitCwd.root;
   } else if (gitCwd.kind === "bare") {
+    if (flags.json) routeHumanOutputToStderr();
     console.log(
       c.red(
         "✗ This is a bare repository — getAdvantage gates a working tree; run it in a clone.",
@@ -649,6 +655,7 @@ async function main() {
     console.log(c.gray("  → Try it with no setup:  getadvantage demo"));
     process.exit(1);
   } else {
+    if (flags.json) routeHumanOutputToStderr();
     console.log(
       c.red(
         "✗ This folder isn't a git repository yet — getAdvantage gates the git history of your project.",
