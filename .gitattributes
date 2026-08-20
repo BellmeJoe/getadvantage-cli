@@ -1,0 +1,22 @@
+# Defence in depth for cross-platform identity: keep working-tree text as LF
+# so multi-line secret matches (e.g. PEM blocks) do not absorb stray CR bytes
+# on Windows. Product identity still normalises in util.mjs — this is not a
+# substitute for that fix.
+* text=auto eol=lf
+
+# Binary carve-outs (none currently packed; keep common types from EOL conversion)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.wasm binary
+*.node binary

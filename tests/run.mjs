@@ -15232,10 +15232,13 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     assert.equal(rs.code, 1);
     const sarifRaw = readFileSync(sarifPath);
     const sarifHash = createHash("sha256").update(sarifRaw).digest("hex");
-    // Pin moves with package.json version (SARIF embeds tool.driver.version).
-    // Re-measured on the 0.14.0 train tip: 0ad7ec64ef4e5d9c… (was 3aab5a242c7a5986 at 0.13.1).
+    // SARIF byte-identical prefix. Pin moves with package.json version
+    // (tool.driver.version embed) and with auth-identity normalisation:
+    // multi-line PEM auth/length is LF-normalised, so CRLF and LF trees share
+    // one prefix. Re-measured after the fix: 151858bc4150024b… (was
+    // platform-split 0ad7ec64ef4e5d9c Windows / 151858bc4150024b Linux).
     assert.ok(
-      sarifHash.startsWith("0ad7ec64ef4e5d9c"),
+      sarifHash.startsWith("151858bc4150024b"),
       `SARIF sha256 prefix mismatch: ${sarifHash.slice(0, 16)} (full ${sarifHash})`,
     );
 
@@ -15244,8 +15247,10 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     assert.equal(rj.code, 1);
     const filtered = rj.stdout.split(/\r?\n/).filter((l) => !/generatedAt/.test(l)).join("\n");
     const jsonHash = createHash("sha256").update(filtered).digest("hex");
+    // Same EOL-independence as SARIF. Re-measured: 9aaf3e35bc699e04…
+    // (was cb9fec3fe5aa5cb0 Windows / 9aaf3e35bc699e04 Linux before the fix).
     assert.ok(
-      jsonHash.startsWith("cb9fec3fe5aa5cb0"),
+      jsonHash.startsWith("9aaf3e35bc699e04"),
       `JSON sha256 prefix mismatch: ${jsonHash.slice(0, 16)} (full ${jsonHash})`,
     );
   } finally {
@@ -15656,6 +15661,149 @@ scenario("feedback: mutation — drop postgres/Bearer extras → corpus rows fai
     );
 
     assert.equal(readFileSync(productPath, "utf8"), original, "product file must be untouched");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 57. Auth identity line-ending independence (0.14.0-crlf-auth-identity-repair)
+//     TEST_FILTER=auth-identity
+// ---------------------------------------------------------------------------
+
+scenario("auth-identity: CRLF and LF matches yield equal auth id and char count", async () => {
+  // Same secret body, two line-ending encodings. After normalisation both must
+  // share one auth id and one display char count — otherwise Windows-authored
+  // allowlists silently miss Linux CI (and the reverse).
+  //
+  // PEM headers are split across string literals so this scenario source does
+  // not itself plant extra private-key findings into the product self-check.
+  const stamp = Date.now();
+  const { fingerprint, secretAuthId, normalizeSecretMatchText } = await import(
+    pathToFileURL(path.join(__dirname, "..", "util.mjs")).href + `?ai=${stamp}`
+  );
+
+  const pemHdr = "-----BEGIN " + "RSA PRIVATE KEY-----";
+  const pemFtr = "-----END " + "RSA PRIVATE KEY-----";
+  const lfPem =
+    pemHdr +
+    "\n" +
+    "MIIEowIBAAKCAQEA3333333333333333333333333333333333333333333333333\n" +
+    "CCCC3333KEYEOL3333CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n" +
+    pemFtr;
+  const crlfPem = lfPem.replace(/\n/g, "\r\n");
+  const crPem = lfPem.replace(/\n/g, "\r");
+
+  assert.notEqual(lfPem, crlfPem, "fixture must differ by CRLF encoding");
+  assert.notEqual(lfPem.length, crlfPem.length, "CRLF fixture must be longer before normalisation");
+  assert.equal(normalizeSecretMatchText(crlfPem), lfPem, "CRLF normalises to LF body");
+  assert.equal(normalizeSecretMatchText(crPem), lfPem, "lone CR normalises to LF body");
+
+  const authLf = secretAuthId(lfPem);
+  const authCrlf = secretAuthId(crlfPem);
+  const authCr = secretAuthId(crPem);
+  assert.equal(authCrlf, authLf, "auth id must be identical for CRLF vs LF");
+  assert.equal(authCr, authLf, "auth id must be identical for CR vs LF");
+  assert.match(authLf, /^[0-9a-f]{64}$/);
+
+  const fpLf = fingerprint(lfPem);
+  const fpCrlf = fingerprint(crlfPem);
+  const fpCr = fingerprint(crPem);
+  assert.equal(fpCrlf, fpLf, "display fingerprint must be identical for CRLF vs LF");
+  assert.equal(fpCr, fpLf, "display fingerprint must be identical for CR vs LF");
+  assert.ok(/\(\d+ chars\)/.test(fpLf), `expected char count in fingerprint: ${fpLf}`);
+  const charCount = Number((fpLf.match(/\((\d+) chars\)/) || [])[1]);
+  assert.equal(charCount, lfPem.length, "char count must reflect normalised LF length");
+  assert.notEqual(charCount, crlfPem.length, "char count must not absorb CR bytes");
+
+  // Single-line secrets are unaffected but must still round-trip identically.
+  const stripe = "sk_live_" + "e1o2l3t4e5s6t7u8v9w0x1y2z3";
+  assert.equal(secretAuthId(stripe + "\r\n"), secretAuthId(stripe + "\n"));
+  assert.equal(fingerprint(stripe + "\r\n"), fingerprint(stripe + "\n"));
+
+  // End-to-end: materialise the same PEM twice on disk (CRLF file vs LF file)
+  // and assert product --json findings share auth id + fp char count.
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "eol-auth");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "eol-auth", version: "1.0.0", private: true }, null, 2) + "\n");
+    // write() is utf8 text; force exact bytes for each encoding.
+    writeFileSync(path.join(repo, "keys-lf.pem"), lfPem + "\n", "utf8");
+    writeFileSync(path.join(repo, "keys-crlf.pem"), crlfPem + "\r\n", "utf8");
+    commitAll(repo, "chore: plant LF and CRLF PEM twins");
+
+    const r = run(["check", "--json", "--no-brief-check", "--no-overview"], repo);
+    assert.equal(r.code, 1, `expected NO-GO on planted PEMs\n${r.stderr}\n${r.stdout}`);
+    const doc = JSON.parse(r.stdout);
+    const secret = (doc.checks || []).find((c) => c.id === "secret" || /secret/i.test(c.label || ""));
+    assert.ok(secret, "secret check must be present");
+    const findings = secret.findings || [];
+    const lfHit = findings.find((f) => (f.file || "").includes("keys-lf.pem"));
+    const crlfHit = findings.find((f) => (f.file || "").includes("keys-crlf.pem"));
+    assert.ok(lfHit, `LF PEM finding missing:\n${JSON.stringify(findings, null, 2)}`);
+    assert.ok(crlfHit, `CRLF PEM finding missing:\n${JSON.stringify(findings, null, 2)}`);
+    assert.equal(lfHit.authId, crlfHit.authId, "product authId must match across EOL encodings");
+    assert.equal(lfHit.fp, crlfHit.fp, "product display fp must match across EOL encodings");
+    assert.equal(lfHit.authId, authLf, "product authId must match util.secretAuthId(LF)");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("auth-identity: mutation — skip normalisation → CRLF/LF identities diverge", async () => {
+  // Scratch-neuter normalizeSecretMatchText to identity. Product util.mjs is
+  // never written. Proves the parent equality scenario is not vacuous.
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "util.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-util");
+    mkdirSync(scratchDir, { recursive: true });
+
+    const neutered = original.replace(
+      /export function normalizeSecretMatchText\(match\) \{[\s\S]*?\n\}/,
+      "export function normalizeSecretMatchText(match) { return String(match ?? \"\"); }",
+    );
+    assert.ok(neutered !== original, "mutation must change util source");
+    assert.ok(
+      /return String\(match \?\? ""\);/.test(neutered),
+      "neuter must turn normalisation into identity",
+    );
+    writeFileSync(path.join(scratchDir, "util.mjs"), neutered, "utf8");
+
+    const mut = await import(
+      pathToFileURL(path.join(scratchDir, "util.mjs")).href + `?mutai=${Date.now()}`
+    );
+
+    const pemHdr = "-----BEGIN " + "RSA PRIVATE KEY-----";
+    const pemFtr = "-----END " + "RSA PRIVATE KEY-----";
+    const lfPem =
+      pemHdr +
+      "\n" +
+      "MIIEowIBAAKCAQEA4444444444444444444444444444444444444444444444444\n" +
+      "DDDD4444KEYMUT4444DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD\n" +
+      pemFtr;
+    const crlfPem = lfPem.replace(/\n/g, "\r\n");
+
+    assert.notEqual(
+      mut.secretAuthId(lfPem),
+      mut.secretAuthId(crlfPem),
+      "neuter must make CRLF and LF auth ids diverge",
+    );
+    assert.notEqual(
+      mut.fingerprint(lfPem),
+      mut.fingerprint(crlfPem),
+      "neuter must make CRLF and LF fingerprints diverge",
+    );
+    // Char counts must also diverge (CR bytes absorbed).
+    const lfChars = Number((mut.fingerprint(lfPem).match(/\((\d+) chars\)/) || [])[1]);
+    const crlfChars = Number((mut.fingerprint(crlfPem).match(/\((\d+) chars\)/) || [])[1]);
+    assert.equal(lfChars, lfPem.length);
+    assert.equal(crlfChars, crlfPem.length);
+    assert.ok(crlfChars > lfChars, "neuter must leave CR bytes in the char count");
+
+    assert.equal(readFileSync(productPath, "utf8"), original, "product util.mjs must be untouched");
   } finally {
     cleanup(base);
   }

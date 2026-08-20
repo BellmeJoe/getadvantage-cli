@@ -151,6 +151,18 @@ export function repoRoot(cwd = process.cwd()) {
   }).trim();
 }
 
+/**
+ * Normalize matched secret text before identity / display-length computation.
+ * CRLF and lone CR both collapse to LF so the same secret yields the same
+ * `auth` id and `(N chars)` on Windows and Linux working trees.
+ * Used by both `fingerprint` and `secretAuthId` so the two cannot drift.
+ * @param {string} match
+ * @returns {string}
+ */
+export function normalizeSecretMatchText(match) {
+  return String(match ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 /** Mask a matched secret to a recognisable fingerprint — NEVER echo the full
  *  value. Mirrors app/lib/safety.ts `fingerprint()`.
  *  Keeps a well-known public prefix intact (sk_live_, ghp_, sk-ant-, …) so the
@@ -160,25 +172,28 @@ export function repoRoot(cwd = process.cwd()) {
  *  distinct secrets can share the same prefix/tail/length form. Use
  *  `secretAuthId()` for policy matching. */
 export function fingerprint(match) {
-  let head = match.slice(0, 6);
-  if (match.length > 14) {
-    const pre = match.slice(0, 12).match(/^.+[_-]/);
-    if (pre && match.length - pre[0].length >= 8) head = pre[0];
+  const text = normalizeSecretMatchText(match);
+  let head = text.slice(0, 6);
+  if (text.length > 14) {
+    const pre = text.slice(0, 12).match(/^.+[_-]/);
+    if (pre && text.length - pre[0].length >= 8) head = pre[0];
   }
-  const tail = match.length > 14 ? match.slice(-4) : "";
-  return `${head}…${tail} (${match.length} chars)`;
+  const tail = text.length > 14 ? text.slice(-4) : "";
+  return `${head}…${tail} (${text.length} chars)`;
 }
 
 /**
  * Collision-resistant authorization identity for a secret match.
- * SHA-256 hex of the raw match bytes (UTF-8). Safe to print and to store in
- * repo policy (`secrets.ignore.hashes` / legacy `fingerprints` field when the
- * entry is a full digest). Never confusable with the display fingerprint.
+ * SHA-256 hex of the line-ending-normalised match bytes (UTF-8). Safe to print
+ * and to store in repo policy (`secrets.ignore.hashes` / legacy `fingerprints`
+ * field when the entry is a full digest). Never confusable with the display
+ * fingerprint. Line endings are normalised so Windows CRLF and Linux LF trees
+ * produce the same allowlist id for the same secret.
  * @param {string} match
  * @returns {string} 64-char lowercase hex
  */
 export function secretAuthId(match) {
-  return createHash("sha256").update(String(match ?? ""), "utf8").digest("hex");
+  return createHash("sha256").update(normalizeSecretMatchText(match), "utf8").digest("hex");
 }
 
 /** Pluralization suffix: `${n} issue${pl(n)}` → "1 issue" / "2 issues". */
