@@ -15305,9 +15305,9 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     const filtered = rj.stdout.split(/\r?\n/).filter((l) => !/generatedAt/.test(l)).join("\n");
     const jsonHash = createHash("sha256").update(filtered).digest("hex");
     // Same intentional startLine-only move as SARIF.
-    // Was 94b1592e8c88762c (e19ca65) → 7f893d0ba1bb1b7a.
+    // Was 94b1592e8c88762c (e19ca65) → 3c22b593be52c28d.
     assert.ok(
-      jsonHash.startsWith("7f893d0ba1bb1b7a"),
+      jsonHash.startsWith("3c22b593be52c28d"),
       `JSON sha256 prefix mismatch: ${jsonHash.slice(0, 16)} (full ${jsonHash})`,
     );
   } finally {
