@@ -15289,13 +15289,13 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     // SARIF content pin. Shape pins above (56 / verdict 53 / 5 file:line /
     // 0 B stderr) are unchanged by this lane. Content hashes move only because
     // hostile-fixture startLine values in tests/run.mjs shifted when this
-    // lane appended TOC + scenarios (same 5 findings / rules / auth ids /
-    // messages; only region.startLine differed). Before/after proof
-    // (parent ca21118 → this lane):
-    //   startLine: 1398→1402, 1508→1512, 4283→4290, 4582→4589, 8697→8704
-    //   SARIF sha256 prefix: 151858bc4150024b → 0587eb58938dda2c
+    // lane extended the §58 TOC (+1 line) and imports for H9/H10 (same 5
+    // findings / rules / auth ids / messages; only region.startLine differed).
+    // Before/after proof (parent e19ca65 / 872762e tip pins → this lane):
+    //   startLine: 1402→1403, 1512→1513, 4290→4291, 4589→4590, 8704→8705
+    //   SARIF sha256 prefix: 0587eb58938dda2c → e78018570a23be1c
     assert.ok(
-      sarifHash.startsWith("0587eb58938dda2c"),
+      sarifHash.startsWith("e78018570a23be1c"),
       `SARIF sha256 prefix mismatch: ${sarifHash.slice(0, 16)} (full ${sarifHash})`,
     );
 
@@ -15305,9 +15305,9 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
     const filtered = rj.stdout.split(/\r?\n/).filter((l) => !/generatedAt/.test(l)).join("\n");
     const jsonHash = createHash("sha256").update(filtered).digest("hex");
     // Same intentional startLine-only move as SARIF.
-    // Was 9aaf3e35bc699e04 (0.14.0 / ca21118) → 94b1592e8c88762c.
+    // Was 94b1592e8c88762c (e19ca65) → 7f893d0ba1bb1b7a.
     assert.ok(
-      jsonHash.startsWith("94b1592e8c88762c"),
+      jsonHash.startsWith("7f893d0ba1bb1b7a"),
       `JSON sha256 prefix mismatch: ${jsonHash.slice(0, 16)} (full ${jsonHash})`,
     );
   } finally {
