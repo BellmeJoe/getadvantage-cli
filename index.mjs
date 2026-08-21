@@ -634,8 +634,8 @@ async function main() {
     process.exit(await runFeedbackCommand());
   }
 
-  // Classify first so bare vs non-git get factually correct guidance.
-  // Human mode: guidance on stdout, stderr 0 B (lane H1/H4). Under --json,
+  // Classify first so bare / non-git / unreadable get factually correct guidance.
+  // Human mode: guidance on stdout, stderr 0 B (lane H1/H4/H9). Under --json,
   // route console.log → stderr here — this block runs before the five
   // command-entry routeHumanOutputToStderr() sites, and we exit before any
   // machine document is emitted (same channel shape as unknown-flag under
@@ -650,6 +650,20 @@ async function main() {
     console.log(
       c.red(
         "✗ This is a bare repository — getAdvantage gates a working tree; run it in a clone.",
+      ),
+    );
+    console.log(c.gray("  → Try it with no setup:  getadvantage demo"));
+    process.exit(1);
+  } else if (gitCwd.kind === "unreadable") {
+    if (flags.json) routeHumanOutputToStderr();
+    console.log(
+      c.red(
+        "✗ This folder's git repository could not be read — likely a permissions problem on .git.",
+      ),
+    );
+    console.log(
+      c.gray(
+        "  → Fix permissions on the .git directory, then re-run getadvantage check",
       ),
     );
     console.log(c.gray("  → Try it with no setup:  getadvantage demo"));

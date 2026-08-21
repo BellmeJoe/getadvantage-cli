@@ -185,13 +185,14 @@
 //                                     (TEST_FILTER=marketplace)
 //  58. stderr + control transparency  — H1–H4 human stdout; H5/H6 --json
 //                                     stdout empty|JSON (never human/ANSI);
-//                                     bare message factually correct
+//                                     bare message factually correct;
+//                                     H9 unreadable .git; H10 corrupt .git file
 //                                     (TEST_FILTER=hostile-cwd)
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
@@ -15866,8 +15867,9 @@ scenario("auth-identity: mutation — skip normalisation → CRLF/LF identities 
 });
 
 // ---------------------------------------------------------------------------
-// 58. stderr + control transparency — cold-path H1–H6
-//     (0.14.x-stderr-and-control-transparency)
+// 58. stderr + control transparency — cold-path H1–H6 + H9/H10
+//     (0.14.x-stderr-and-control-transparency +
+//      0.14.x-unreadable-repo-classification)
 //     Measured acceptance table from agent-ops brief 2026-08-19 20:45.
 //     TEST_FILTER=hostile-cwd
 // ---------------------------------------------------------------------------
@@ -16028,6 +16030,204 @@ scenario("hostile-cwd H6: bare --json — exit 1, stdout empty|JSON, no human/AN
     g(["init", "--bare", "-q"], bare);
     const r = run(["check", "--json"], bare);
     assertJsonStdoutMachinePure(r, "H6");
+  } finally {
+    cleanup(base);
+  }
+});
+
+/**
+ * Make `.git` unreadable. Returns { ok, reason, restore } — caller must
+ * restore before cleanup. Skip (ok:false) when the platform cannot apply a
+ * denial that actually blocks git/fs reads.
+ */
+function makeDotGitUnreadable(repo) {
+  const gitDir = path.join(repo, ".git");
+  if (process.platform === "win32") {
+    const domain = process.env.USERDOMAIN;
+    const name = process.env.USERNAME || userInfo().username;
+    const user = domain ? `${domain}\\${name}` : name;
+    const deny = spawnSync(
+      "icacls",
+      [gitDir, "/deny", `${user}:(OI)(CI)(R,X)`, "/T"],
+      { encoding: "utf8" },
+    );
+    const restore = () => {
+      spawnSync("icacls", [gitDir, "/remove:d", user, "/T"], { encoding: "utf8" });
+      spawnSync("icacls", [gitDir, "/grant", `${user}:(OI)(CI)(F)`], {
+        encoding: "utf8",
+      });
+    };
+    // Verify denial took effect: metadata present but unreadable to Node and/or git.
+    let denied = false;
+    try {
+      readdirSync(gitDir);
+    } catch {
+      denied = true;
+    }
+    try {
+      readFileSync(path.join(gitDir, "HEAD"));
+    } catch {
+      denied = true;
+    }
+    const probe = spawnSync("git", ["rev-parse", "--is-bare-repository"], {
+      cwd: repo,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (probe.status === 0) denied = false;
+    if (!denied) {
+      restore();
+      return {
+        ok: false,
+        reason: `icacls deny did not block reads (status=${deny.status}); skipping H9`,
+        restore: () => {},
+      };
+    }
+    return { ok: true, reason: "", restore };
+  }
+
+  // POSIX: chmod 000 on .git
+  let prevMode;
+  try {
+    prevMode = lstatSync(gitDir).mode;
+    execFileSync("chmod", ["000", gitDir], { encoding: "utf8" });
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `chmod 000 unavailable or failed (${e && e.message ? e.message : e}); skipping H9`,
+      restore: () => {},
+    };
+  }
+  const restore = () => {
+    try {
+      execFileSync("chmod", ["755", gitDir], { encoding: "utf8" });
+      if (prevMode != null) {
+        try {
+          execFileSync("chmod", [(prevMode & 0o777).toString(8), gitDir], {
+            encoding: "utf8",
+          });
+        } catch {
+          /* best-effort */
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  };
+  let denied = false;
+  try {
+    readdirSync(gitDir);
+  } catch {
+    denied = true;
+  }
+  const probe = spawnSync("git", ["rev-parse", "--is-bare-repository"], {
+    cwd: repo,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (probe.status === 0) denied = false;
+  if (!denied) {
+    restore();
+    return {
+      ok: false,
+      reason: "chmod 000 did not block reads; skipping H9",
+      restore: () => {},
+    };
+  }
+  return { ok: true, reason: "", restore };
+}
+
+scenario("hostile-cwd H9: unreadable .git — exit 1, could-not-read, no git-init", () => {
+  const base = freshBase();
+  const repo = path.join(base, "unreadable-git");
+  let restore = () => {};
+  try {
+    initRepo(repo);
+    write(
+      repo,
+      "package.json",
+      JSON.stringify(
+        { name: "unreadable-git", version: "1.0.0", private: true, type: "module" },
+        null,
+        2,
+      ) + "\n",
+    );
+    const made = makeDotGitUnreadable(repo);
+    restore = made.restore;
+    if (!made.ok) {
+      console.log(`  SKIP  hostile-cwd H9: ${made.reason}`);
+      return;
+    }
+    const r = run(["check"], repo);
+    assert.equal(r.code, 1, `H9 must exit 1:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H9 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H9 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.match(
+      r.stdout,
+      /could not be read/i,
+      `H9 must say the repo could not be read:\n${r.stdout}`,
+    );
+    assert.match(r.stdout, /permission/i, `H9 must name permissions:\n${r.stdout}`);
+    assert.ok(
+      !/isn't a git repository yet/i.test(r.stdout),
+      "H9 must not use the non-git message",
+    );
+    assert.ok(
+      !/git init && git add -A/i.test(r.stdout),
+      "H9 must not prescribe git init (repo already present)",
+    );
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H9 must not leak fatal:");
+    // Fixed strings only — no absolute path leak.
+    assert.ok(
+      !r.stdout.includes(repo) && !r.stdout.includes(base),
+      "H9 must not interpolate cwd/absolute paths into guidance",
+    );
+    assert.match(r.stdout, /getadvantage demo/i);
+
+    const rj = run(["check", "--json"], repo);
+    assertJsonStdoutMachinePure(rj, "H9 --json");
+  } finally {
+    try {
+      restore();
+    } catch {
+      /* ignore */
+    }
+    cleanup(base);
+  }
+});
+
+scenario("hostile-cwd H10: corrupt .git file — exit 1, unreadable branch, no git-init", () => {
+  const base = freshBase();
+  const dir = path.join(base, "corrupt-gitfile");
+  try {
+    mkdirSync(dir, { recursive: true });
+    // Truncated/invalid gitfile (not a directory) — git fails, repo metadata present.
+    writeFileSync(path.join(dir, ".git"), "x", "utf8");
+    const r = run(["check"], dir);
+    assert.equal(r.code, 1, `H10 must exit 1:\n${r.stdout}\n${r.stderr}`);
+    assert.ok(Buffer.byteLength(r.stdout) > 0, "H10 stdout must be non-empty");
+    assert.equal(Buffer.byteLength(r.stderr), 0, `H10 stderr must be 0 B, got:\n${r.stderr}`);
+    assert.match(
+      r.stdout,
+      /could not be read/i,
+      `H10 must use the unreadable message (not non-git):\n${r.stdout}`,
+    );
+    assert.ok(
+      !/isn't a git repository yet/i.test(r.stdout),
+      "H10 must not fall into the non-git branch",
+    );
+    assert.ok(
+      !/git init && git add -A/i.test(r.stdout),
+      "H10 must not prescribe git init (.git already present)",
+    );
+    assert.ok(!/fatal:/i.test(r.stdout + r.stderr), "H10 must not leak fatal:");
+    assert.ok(
+      !r.stdout.includes(dir) && !r.stdout.includes(base),
+      "H10 must not interpolate cwd/absolute paths into guidance",
+    );
+
+    const rj = run(["check", "--json"], dir);
+    assertJsonStdoutMachinePure(rj, "H10 --json");
   } finally {
     cleanup(base);
   }

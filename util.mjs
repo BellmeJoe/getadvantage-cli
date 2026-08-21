@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -142,40 +142,78 @@ export function gitFilesZ(args, opts = {}) {
 }
 
 /**
+ * True when cwd carries a `.git` path (file or directory). EPERM/EACCES on
+ * lstat still means metadata is present but unreadable — used to separate
+ * Windows ACL-denied repos from genuinely non-git folders (git reports both
+ * with the same "not a git repository (or any of the parent directories)" line).
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function gitMetadataPresent(cwd) {
+  try {
+    lstatSync(path.join(cwd, ".git"));
+    return true;
+  } catch (e) {
+    if (e && (e.code === "EPERM" || e.code === "EACCES")) return true;
+    return false;
+  }
+}
+
+/** Canonical git phrasing for "there is no repository here". Not a loose
+ *  match on the word `fatal` — only this parent-directories form. */
+function isCanonicalNotAGitRepository(stderr) {
+  return /not a git repository \(or any of the parent directories\)/i.test(
+    String(stderr || ""),
+  );
+}
+
+/**
  * Classify the git status of a working directory without letting git's own
  * fatal: noise reach the user. Presentation strings stay in the caller
  * (index.mjs); this helper is reusable detection only.
  *
+ * Distinguishes three cold-path failures: bare, non-git, and unreadable
+ * (repo metadata present / git failed for a non-"not a repository" reason).
+ *
  * @param {string} [cwd]
- * @returns {{ kind: "worktree", root: string } | { kind: "bare" } | { kind: "non-git" }}
+ * @returns {{ kind: "worktree", root: string } | { kind: "bare" } | { kind: "non-git" } | { kind: "unreadable" }}
  */
 export function classifyGitCwd(cwd = process.cwd()) {
   // Bare first: --show-toplevel fails on bare (no work tree), while
   // --is-bare-repository returns "true". Checking bare before toplevel
   // keeps the two failure modes distinguishable.
+  let failStderr = "";
   try {
     const bare = execFileSync("git", ["rev-parse", "--is-bare-repository"], {
       encoding: "utf8",
       cwd,
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     if (bare === "true") return { kind: "bare" };
-  } catch {
-    // Not a git directory, or git unavailable — fall through.
+  } catch (e) {
+    failStderr += String(e && e.stderr != null ? e.stderr : "");
   }
 
   try {
     const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       encoding: "utf8",
       cwd,
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     }).trim();
     if (root) return { kind: "worktree", root };
-  } catch {
-    // Not a work tree.
+  } catch (e) {
+    failStderr += String(e && e.stderr != null ? e.stderr : "");
   }
 
-  return { kind: "non-git" };
+  // Decide from git's actual failure, not from absence of success.
+  // Canonical "not a git repository (or any of the parent directories)" with
+  // no local `.git` → non-git. Anything else (permission/read errors, invalid
+  // gitfile, or `.git` present while git still emits the canonical line —
+  // Windows ACL) → unreadable. Never prescribe `git init` for the latter.
+  if (isCanonicalNotAGitRepository(failStderr) && !gitMetadataPresent(cwd)) {
+    return { kind: "non-git" };
+  }
+  return { kind: "unreadable" };
 }
 
 /** True when `cwd` is a bare git repository (no working tree). */
@@ -184,14 +222,18 @@ export function isBareRepository(cwd = process.cwd()) {
 }
 
 /** Repo root (absolute). Suppresses git's own stderr noise — the caller
- *  prints ONE clean guidance line instead. Throws for bare and non-git
- *  (use `classifyGitCwd` when those must be distinguished). */
+ *  prints ONE clean guidance line instead. Throws for bare, non-git, and
+ *  unreadable (use `classifyGitCwd` when those must be distinguished). */
 export function repoRoot(cwd = process.cwd()) {
   const cls = classifyGitCwd(cwd);
   if (cls.kind === "worktree") return cls.root;
-  const err = new Error(
-    cls.kind === "bare" ? "bare repository" : "not a git repository",
-  );
+  const msg =
+    cls.kind === "bare"
+      ? "bare repository"
+      : cls.kind === "unreadable"
+        ? "repository unreadable"
+        : "not a git repository";
+  const err = new Error(msg);
   err.code = cls.kind;
   throw err;
 }
@@ -479,9 +521,9 @@ export function relPath(abs, cwd) {
 //     entry has already installed routeHumanOutputToStderr() — map / check /
 //     intent / fan-in / architecture at their handler starts. The pre-command
 //     git-classify early exits in index.mjs install the same route on their
-//     --json bare/non-git branches before printing, then exit with no JSON
-//     document (stdout empty; guidance on stderr). Worktree success still
-//     leaves routing to those five command sites.
+//     --json bare/non-git/unreadable branches before printing, then exit with
+//     no JSON document (stdout empty; guidance on stderr). Worktree success
+//     still leaves routing to those five command sites.
 
 export const MARKER_DIR = ".getadvantage";
 export const LEGACY_MARKER_DIR = ".ship-safe";
