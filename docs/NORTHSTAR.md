@@ -47,6 +47,13 @@ expectation adopted in the week plan, not an ambition.
 12-month target; further latency work is not fundable without profiling evidence
 that real CI time improves.
 
+> **Re-measured 2026-08-22 at `0.14.0`** (weekly review; fresh `git init`,
+> isolated `npm_config_cache`): **2.85s** to a GO verdict, exit 0. The **full
+> activation path** — cold `npx` → `init --claude-code` → first gate → receipt on
+> disk — is **5.41s** (check 2.85s + init 2.56s), receipt verified present. Target
+> is *hold* < 60s; held with ~11x margin on the whole adoption path. **No latency
+> work is fundable.**
+
 > **Re-measured 2026-08-15 at `0.13.1`** (weekly review; fresh `git init`,
 > isolated `npm_config_cache`): **2.03s** and **4.98s** across two runs, exit 0,
 > GO. The **full activation path** — cold `npx` → `init --claude-code` → first
@@ -87,7 +94,11 @@ header is publicly searchable.
 > → `UNKNOWN` + non-zero exit, never a silent `0`. Control-first world-fact query
 > shipped in the incomplete-results repair (`d97a9fc`). **First live run,
 > 2026-08-15 weekly review: exit 0, `retained-external-teams: 0`**, observed
-> absence under a passing control. **P3 closed in lane
+> absence under a passing control. **Re-run 2026-08-22 weekly review:
+> `retained-external-teams: 0` with `# positive-control-total-count: 2044`** —
+> observed absence, not a broken query. The `UNKNOWN` path was verified the same
+> cycle: with `GITHUB_TOKEN` unset the detector prints `UNKNOWN`, refuses to
+> report a `0`, and **exits 1**. **P3 closed in lane
 > `0.14.x-stderr-and-control-transparency` (REVIEW_PENDING):** success reports
 > now print `# positive-control-total-count: N` so the report evidences its own
 > control.
@@ -188,6 +199,13 @@ lane ships or is killed. Only one implementation lane may be open.
    dogfood friction, and it depends on the receipt existing first.*
 10. **Shareable verified summary** — honest Markdown/JSON output for PRs,
     handoffs, and badges. Never turn a partial check into a security seal.
+    *Re-scored 2026-08-22 to **1.03** at effort 2 (reach 2 · activation 1 ·
+    retention 2 · trust 2 · sharing 5), down from 1.25. Downgraded on a new
+    competitive finding: four teams in the 08-15..08-22 window found, filed and
+    fixed their own committed-secret defect within a day, and `Resolvr-io/apogee#104`
+    credits the find verbatim to "2026-08 security scan (GLM 5.3, z.ai) — PR #90".
+    Shareable proof differentiates less when generic AI reviewers already run inside
+    these repos. Still deprioritized, justification below unchanged.*
     *Deprioritized 2026-08-15: **zero demand evidence** in ~40 ledger entries.
     Written justification, as the rule requires — it is the only bet whose growth
     mechanism is user-to-user propagation, the one channel depending on neither
@@ -216,7 +234,9 @@ lane ships or is killed. Only one implementation lane may be open.
     if a real consumer repository profiles a slow run.
 14. **Evaluator feedback loop** — generated issue/discussion link containing
     redacted environment and result metadata, never secrets.
-    **Status (2026-08-19):** **ships in 0.14.0** — product fingerprint
+    **Status (2026-08-22): LIVE 0.14.0 — DELIVERED, removed from the bet queue.**
+    Published 2026-08-20, registry `gitHead` `cc9d39a`, re-verified live by the
+    2026-08-22 weekly review. Shipped in 0.14.0 — — product fingerprint
     **`8eb494b`** (`feedback.mjs` + `index.mjs` wire); redaction catalogue
     unification **`ec58b49`**; narrowing repair **`53339ff`/`f19797b`**.
     `getadvantage feedback` prints a copy-pasteable GitHub issue URL pre-filled
@@ -258,8 +278,32 @@ lane ships or is killed. Only one implementation lane may be open.
     PRs, **every one on a `BellmeJoe/*` repo — zero third-party shelf PRs ever
     opened.** *Honest distinction from 16a:* a registry listing requires a **PR
     to someone else's repository**, which is a send-class action and sits inside
-    the send gate. It is not click-free. With 16a residual at 0.48, **16b is now
+    the send gate. It is not click-free.
+    **Status (2026-08-22): HALF-EXECUTED, and the send-gate question is settled in
+    practice.** On 2026-08-21 the accelerator opened the account's first two
+    third-party shelf PRs — `punkpeye/awesome-mcp-servers#12582` and
+    `devsecops/awesome-devsecops#175` — both verified **open** by the weekly review.
+    **One named blocker on `#12582`:** its listing bot requires the server to be
+    submitted to and passing checks on `glama.ai/mcp/servers` (Dockerfile added
+    there) plus a Glama score badge in the PR body. Agent-executable, needs no
+    founder click, unactioned. Score stays **2.45**; the evidence under it improved. With 16a residual at 0.48, **16b is now
     the higher-ranked free-shelf half** — still blocked on the send gate.
+
+> **PORTFOLIO ORDER NOTE, 2026-08-22 weekly review.** The highest-scoring item in
+> the portfolio is no longer in this file. **Move 1 query-battery inversion scores
+> 3.65 at effort 1** (reach 5 · activation 4 · retention 3 · trust 3 · sharing 2)
+> and is a *targeting instrument* owned by the growth/accelerator lanes, not product
+> code. It ranks first because the portfolio scores by outcome link, not by which
+> lane owns the work: three consecutive weeks of **0/20 in-ICP Move 1 touches** now
+> have a diagnosed structural cause, and Move 1 is the north star's only live path
+> to a retained external team. Evidence and the one-variable change are in
+> `agent-opseviews6-08-22-getadvantage-northstar-weekly.md` §4 — in short,
+> the battery searches **issue text**, so every hit is by construction a defect the
+> team already found; only 5 of 21 candidates failed on the 2-10 contributor floor,
+> so **the floor is right and the query is wrong**. **Consequence for this file:
+> when the open implementation lane closes, do not promote another product code
+> lane.** The top two portfolio items are distribution, and an empty product board
+> in `REFILLING` is not a fault.
 
 ## Selection score
 
