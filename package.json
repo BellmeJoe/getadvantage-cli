@@ -16,7 +16,6 @@
     "*.mjs",
     "action.yml",
     "action/",
-    "tests/",
     "README.md"
   ],
   "engines": {

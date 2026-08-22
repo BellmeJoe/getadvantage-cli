@@ -194,6 +194,11 @@
 //                                     S3 reflected-message redaction;
 //                                     PRINT_PINS=1 / TEST_FILTER=print-pins
 //                                     harness (TEST_FILTER=arrival)
+//  60. Packed tarball hygiene (0.14.x) — tests/ not shipped; F1 listing empty of
+//                                     package/tests/; F2 no secret-shaped payload
+//                                     in packed contents (publish.yml regex);
+//                                     F3 cold --version + clean check GO;
+//                                     mutation: re-add tests/ fails F1/F2
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -4519,20 +4524,224 @@ function readdirPack(dir) {
 }
 
 /**
- * List a packed .tgz without false failures when GNU tar is on PATH and the
- * archive path is a Windows drive path (`C:\…`). GNU tar parses `C:` as an
- * rsh host (`Cannot connect to C: resolve failed`); bsdtar does not.
+ * List/extract a packed .tgz without false failures when GNU tar is on PATH
+ * and the archive path is a Windows drive path (`C:\…`). GNU tar parses `C:`
+ * as an rsh host (`Cannot connect to C: resolve failed`); bsdtar does not.
  *
  * Prefer Windows System32 tar.exe (bsdtar) when present. Never pass
  * `--force-local` unconditionally — System32 bsdtar rejects that flag.
  */
-function listTgz(tgzAbs) {
-  let bin = "tar";
+function tarBin() {
   if (process.platform === "win32") {
     const systemTar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
-    if (existsSync(systemTar)) bin = systemTar;
+    if (existsSync(systemTar)) return systemTar;
   }
-  return execFileSync(bin, ["-tzf", tgzAbs], { encoding: "utf8" });
+  return "tar";
+}
+
+function listTgz(tgzAbs) {
+  return execFileSync(tarBin(), ["-tzf", tgzAbs], { encoding: "utf8" });
+}
+
+function extractTgz(tgzAbs, destDir) {
+  mkdirSync(destDir, { recursive: true });
+  execFileSync(tarBin(), ["-xzf", tgzAbs, "-C", destDir], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/**
+ * POSIX body of `.github/workflows/publish.yml` `grep -RInE '...'` on the
+ * publish-self-gate fixture. Named so the pack-content gate (F2) and the
+ * fixture walk cannot silently drift from the workflow grep.
+ */
+const PUBLISH_SELF_GATE_SECRET_SHAPE_POSIX =
+  "sk_live_|sk_test_|gh[pousr]_|-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|postgres(ql)?://[^[:space:]]+:[^[:space:]]+@";
+
+/**
+ * JS equivalent of PUBLISH_SELF_GATE_SECRET_SHAPE_POSIX. Mechanical
+ * translation only: `[:space:]` → `\\s`. Groups stay as in the workflow
+ * grep so a pattern edit in publish.yml fails the lockstep assert below
+ * rather than quietly changing only one gate.
+ */
+const PUBLISH_SELF_GATE_SECRET_SHAPE = new RegExp(
+  PUBLISH_SELF_GATE_SECRET_SHAPE_POSIX.replace(/\[:space:\]/g, "\\s"),
+  "i",
+);
+
+function assertPublishSelfGateSecretShapeLockstep() {
+  const ymlPath = path.join(__dirname, "..", ".github", "workflows", "publish.yml");
+  const yml = readFileSync(ymlPath, "utf8");
+  const m = yml.match(/grep -RInE '([^']+)'/);
+  assert.ok(m, "publish.yml must contain the secret-shape grep -RInE");
+  assert.equal(
+    m[1],
+    PUBLISH_SELF_GATE_SECRET_SHAPE_POSIX,
+    "publish.yml grep drifted from PUBLISH_SELF_GATE_SECRET_SHAPE_POSIX",
+  );
+}
+
+/**
+ * Product files contain secret PREFIXES by design (scanner regex source,
+ * redaction replacements, docs ellipsis, schematic comments). Those must
+ * not trip F2. A match of PUBLISH_SELF_GATE_SECRET_SHAPE is a PREFIX
+ * (ignored) rather than a PAYLOAD when:
+ *
+ *  - `sk_live_` / `sk_test_` / `gh[pousr]_` is NOT followed by [A-Za-z0-9]
+ *    (scanner source has `[A-Za-z0-9]{n,}`; redaction/docs use `…`;
+ *    util.mjs comments use `sk_live_, ghp_`).
+ *  - `postgres://user:PASS@host` — the exact schematic in checks.mjs
+ *    documenting the db-url-password shape (host is the literal word
+ *    "host", no port/domain).
+ *
+ * PEM `-----BEGIN … PRIVATE KEY-----` matches are always payloads:
+ * product regex source uses extra groups/classes and does not match this
+ * alternative. Re-adding `"tests/"` packs tests/run.mjs, which IS an
+ * adversarial corpus of full payloads — F2 must fail on that scratch pack.
+ *
+ * Must not edit product `*.mjs` to dodge this. Must not add `.npmignore`.
+ */
+function isPublishSecretShapePrefixOnly(text, m) {
+  const token = m[0];
+  if (/^(?:sk_live_|sk_test_|gh[pousr]_)$/i.test(token)) {
+    const next = text[m.index + token.length] || "";
+    return !/[A-Za-z0-9]/.test(next);
+  }
+  if (/^postgres/i.test(token)) {
+    const after = text.slice(m.index + token.length);
+    const host = (after.match(/^[A-Za-z0-9._-]+/) || [""])[0];
+    return token === "postgres://user:PASS@" && host === "host";
+  }
+  return false;
+}
+
+function secretShapePayloadHits(text) {
+  const re = new RegExp(PUBLISH_SELF_GATE_SECRET_SHAPE.source, "gi");
+  const hits = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex += 1;
+      continue;
+    }
+    if (isPublishSecretShapePrefixOnly(text, m)) continue;
+    hits.push({ index: m.index, match: m[0] });
+  }
+  return hits;
+}
+
+function packedTestsEntries(listing) {
+  return listing
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\\/g, "/").trim())
+    .filter((l) => l && /(?:^|\/)package\/tests(?:\/|$)/.test(l));
+}
+
+function walkPackedFiles(dir, acc = []) {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, ent.name);
+    if (ent.isDirectory()) walkPackedFiles(abs, acc);
+    else acc.push(abs);
+  }
+  return acc;
+}
+
+/** Read EVERY packed file's contents (not the listing) and collect F2 hits. */
+function packedSecretShapePayloadHits(extractRoot) {
+  const hits = [];
+  for (const abs of walkPackedFiles(extractRoot)) {
+    const text = readFileSync(abs, "utf8");
+    for (const h of secretShapePayloadHits(text)) {
+      hits.push({
+        file: path.relative(extractRoot, abs).replace(/\\/g, "/"),
+        match: h.match.slice(0, 80),
+        index: h.index,
+      });
+    }
+  }
+  return hits;
+}
+
+function copyTree(src, dest) {
+  mkdirSync(dest, { recursive: true });
+  for (const ent of readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, ent.name);
+    const to = path.join(dest, ent.name);
+    if (ent.isDirectory()) copyTree(from, to);
+    else if (ent.isFile()) copyFileSync(from, to);
+  }
+}
+
+/**
+ * Scratch copy of allowlisted pack inputs + optional tests/. Mutates ONLY
+ * the copy's package.json (never the live tree).
+ */
+function writePackScratch(dest, { includeTests }) {
+  const src = path.join(__dirname, "..");
+  mkdirSync(dest, { recursive: true });
+  for (const name of readdirSync(src)) {
+    if (name.endsWith(".mjs")) copyFileSync(path.join(src, name), path.join(dest, name));
+  }
+  for (const name of ["README.md", "LICENSE", "action.yml"]) {
+    const p = path.join(src, name);
+    if (existsSync(p)) copyFileSync(p, path.join(dest, name));
+  }
+  copyTree(path.join(src, "action"), path.join(dest, "action"));
+  if (includeTests) copyTree(path.join(src, "tests"), path.join(dest, "tests"));
+  const pkg = JSON.parse(readFileSync(path.join(src, "package.json"), "utf8"));
+  const files = (pkg.files || []).filter((f) => f !== "tests/" && f !== "tests");
+  if (includeTests) files.push("tests/");
+  pkg.files = files;
+  writeFileSync(path.join(dest, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+}
+
+function npmPackTo(srcDir, destDir) {
+  mkdirSync(destDir, { recursive: true });
+  execFileSync("npm", ["pack", srcDir, "--pack-destination", destDir], {
+    cwd: destDir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: process.platform === "win32",
+  });
+  return path.join(destDir, readdirPack(destDir));
+}
+
+function assertPackedHygiene(tgz, { expectTests, label }) {
+  const listing = listTgz(tgz);
+  const testsHits = packedTestsEntries(listing);
+  const extractDir = path.join(path.dirname(tgz), `extract-${label}`);
+  extractTgz(tgz, extractDir);
+  // F2 reads every packed file's contents, not the listing.
+  const files = walkPackedFiles(extractDir);
+  assert.ok(files.length > 0, `${label}: extracted pack must contain files`);
+  const payloadHits = packedSecretShapePayloadHits(extractDir);
+  if (expectTests) {
+    assert.ok(
+      testsHits.length > 0,
+      `${label} F1 fail-before: re-adding tests/ must pack package/tests/; listing:\n${listing.slice(0, 800)}`,
+    );
+    assert.ok(
+      payloadHits.length > 0,
+      `${label} F2 fail-before: re-adding tests/ must pack a secret-shaped payload`,
+    );
+    assert.ok(
+      payloadHits.some((h) => /tests\/run\.mjs/.test(h.file)),
+      `${label} F2 fail-before: tests/run.mjs must be the adversarial corpus`,
+    );
+  } else {
+    assert.equal(
+      testsHits.length,
+      0,
+      `${label} F1: packed tests/ must be empty, got:\n${testsHits.join("\n")}`,
+    );
+    assert.equal(
+      payloadHits.length,
+      0,
+      `${label} F2: packed secret-shaped payload:\n${payloadHits.map((h) => `${h.file}: ${h.match}`).join("\n")}`,
+    );
+  }
+  return { listing, testsHits, payloadHits, files };
 }
 
 // ---------------------------------------------------------------------------
@@ -6780,8 +6989,8 @@ scenario("publish self-gate fixture: clean nested-git GO; product root still NO-
   assert.ok(existsSync(path.join(fixture, "package.json")), "fixture package.json required");
   assert.ok(existsSync(path.join(fixture, "src", "app.js")), "fixture src/app.js required");
   assert.ok(existsSync(path.join(fixture, "README.md")), "fixture README required");
-  const secretShape =
-    /sk_live_|sk_test_|gh[pousr]_|-----BEGIN (?:[A-Z0-9 ]+)?PRIVATE KEY-----|postgres(?:ql)?:\/\/[^\s:]+:[^\s@]+@/i;
+  assertPublishSelfGateSecretShapeLockstep();
+  const secretShape = PUBLISH_SELF_GATE_SECRET_SHAPE;
   function walkTexts(dir, acc = []) {
     for (const name of readdirSync(dir, { withFileTypes: true })) {
       if (name.name === "node_modules" || name.name === ".git") continue;
@@ -6894,6 +7103,24 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     const tgz = path.join(packDir, readdirPack(packDir));
     const listing = listTgz(tgz);
     const norm = listing.replace(/\\/g, "/");
+    // F1 — no test harness in the tarball.
+    assert.equal(
+      packedTestsEntries(listing).length,
+      0,
+      `F1: packed tests/ must be empty:\n${packedTestsEntries(listing).join("\n")}\n${listing.slice(0, 800)}`,
+    );
+    assert.ok(!(JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf8")).files || []).includes("tests/"), "live files allowlist must not contain tests/");
+    assert.ok(!existsSync(path.join(pkgRoot, ".npmignore")), "must not add .npmignore (allowlist-only)");
+    // F2 — no secret-shaped PAYLOAD in packed contents (every file, not listing).
+    assertPublishSelfGateSecretShapeLockstep();
+    const extracted = path.join(base, "extracted-real");
+    extractTgz(tgz, extracted);
+    const f2hits = packedSecretShapePayloadHits(extracted);
+    assert.equal(
+      f2hits.length,
+      0,
+      `F2: packed secret-shaped payload:\n${f2hits.map((h) => `${h.file}: ${h.match}`).join("\n")}`,
+    );
     const must = [
       "package/action.yml",
       "package/action/main.mjs",
@@ -6964,6 +7191,33 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     write(sample, "app.js", "console.log('ok');\n");
     commitAll(sample, "chore: cold");
     const bin = path.join(installed, "index.mjs");
+    assert.ok(!existsSync(path.join(installed, "tests")), "F1 cold install must not ship tests/");
+
+    // F3 — cold path still works without tests/: --version + check GO on a clean fixture.
+    const ver = spawnSync(process.execPath, [bin, "--version"], {
+      cwd: cold,
+      encoding: "utf8",
+      env: buildEnv(),
+      timeout: 30_000,
+    });
+    assert.equal(ver.status, 0, `F3 --version:\n${ver.stderr}\n${ver.stdout}`);
+    assert.equal((ver.stdout || "").trim(), pkg.version, "F3 --version must print packed package.json version");
+    assert.equal(pkg.version, "0.14.0");
+
+    const f3clean = path.join(base, "f3-clean");
+    initRepo(f3clean);
+    write(f3clean, "package.json", '{"name":"f3-clean","version":"1.0.0","private":true}\n');
+    write(f3clean, "app.js", "console.log('ok');\n");
+    commitAll(f3clean, "chore: f3 clean");
+    const f3go = spawnSync(
+      process.execPath,
+      [bin, "check", "--json", "--no-overview", "--no-brief-check"],
+      { cwd: f3clean, encoding: "utf8", env: buildEnv(), timeout: 120_000 },
+    );
+    assert.equal(f3go.status, 0, `F3 clean check must GO:\n${f3go.stderr}\n${f3go.stdout}`);
+    const f3doc = JSON.parse((f3go.stdout || "").trim() || "{}");
+    assert.equal(f3doc.verdict, "GO", `F3 verdict:\n${f3go.stdout}`);
+
     const r = spawnSync(process.execPath, [bin, "github-action"], {
       cwd: sample,
       encoding: "utf8",
@@ -6984,6 +7238,36 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     assert.ok(/^runs:/m.test(actionYml));
     assert.ok(/using:\s*composite/.test(actionYml));
     assert.ok(/action\/main\.mjs/.test(actionYml));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("packed package: tests/ hygiene F1/F2 mutation proof", () => {
+  // Fail-before / pass-after on a scratch copy — never write the mutation
+  // to the live package.json. Reuses readdirPack / listTgz / extractTgz.
+  const base = freshBase();
+  try {
+    assertPublishSelfGateSecretShapeLockstep();
+    const livePkgPath = path.join(__dirname, "..", "package.json");
+    const liveBefore = readFileSync(livePkgPath, "utf8");
+    assert.ok(!/\n\s*"tests\/"\s*,?/.test(liveBefore), "live package.json must not allowlist tests/");
+
+    // --- fail-before: re-add "tests/" on a scratch copy, pack, F1/F2 FAIL ---
+    const hostileScratch = path.join(base, "scratch-hostile");
+    writePackScratch(hostileScratch, { includeTests: true });
+    const hostilePkg = JSON.parse(readFileSync(path.join(hostileScratch, "package.json"), "utf8"));
+    assert.ok((hostilePkg.files || []).includes("tests/"), "scratch mutation must re-add tests/");
+    const hostileTgz = npmPackTo(hostileScratch, path.join(base, "pack-hostile"));
+    assertPackedHygiene(hostileTgz, { expectTests: true, label: "fail-before" });
+
+    // Live package.json must still be untouched after the scratch pack.
+    assert.equal(readFileSync(livePkgPath, "utf8"), liveBefore, "mutation must not dirty live package.json");
+
+    // --- pass-after: pack the real tree (tests/ excluded), F1/F2 PASS ---
+    const realTgz = npmPackTo(path.join(__dirname, ".."), path.join(base, "pack-real"));
+    assertPackedHygiene(realTgz, { expectTests: false, label: "pass-after" });
+    assert.equal(readFileSync(livePkgPath, "utf8"), liveBefore, "pass-after pack must not dirty live package.json");
   } finally {
     cleanup(base);
   }
@@ -15253,6 +15537,10 @@ scenario("feedback: first screen ≤12 lines, exit 0 after NO-GO, stderr 0", () 
  * (startLines shifted); remeasured via PRINT_PINS=1 / measureRegressionPins:
  *   SARIF prefix 65cd3729e2a746ec · JSON excl. generatedAt prefix 9d99c38fe87d2b8e
  *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
+ * After §60 packed-tarball-hygiene scenarios (startLines shifted); remeasured
+ * via PRINT_PINS=1 / measureRegressionPins:
+ *   SARIF prefix c1a719fa61cd57de · JSON excl. generatedAt prefix 774fe2e0a845b88e
+ *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
  */
 function measureRegressionPins(productRoot = path.join(__dirname, "..")) {
   const base = freshBase();
@@ -15343,17 +15631,17 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
 
   // SARIF content pin. Shape pins above (56 / verdict 53 / 5 file:line /
   // 0 B stderr) are unchanged. Content hashes moved because this lane
-  // appended §59 arrival scenarios + S1/S2/S3 hostiles, shifting hostile-fixture
+  // appended §60 packed-tarball-hygiene scenarios, shifting hostile-fixture
   // startLines in tests/run.mjs. Remeasured via PRINT_PINS=1 / measureRegressionPins:
-  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec (SARIF)
-  //   3c22b593be52c28d → 8f3298b40a681903 → 9d99c38fe87d2b8e (JSON excl. generatedAt)
+  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec → c1a719fa61cd57de (SARIF)
+  //   3c22b593be52c28d → 8f3298b40a681903 → 9d99c38fe87d2b8e → 774fe2e0a845b88e (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("65cd3729e2a746ec"),
+    pins.sarifHash.startsWith("c1a719fa61cd57de"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("9d99c38fe87d2b8e"),
+    pins.jsonHash.startsWith("774fe2e0a845b88e"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17048,11 +17336,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("65cd3729e2a746ec"),
+    pins.sarifHash.startsWith("c1a719fa61cd57de"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("9d99c38fe87d2b8e"),
+    pins.jsonHash.startsWith("774fe2e0a845b88e"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
