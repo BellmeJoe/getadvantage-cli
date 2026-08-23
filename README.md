@@ -77,6 +77,20 @@ npx getadvantage mcp        # run the MCP server (an agent calls the brain mid-s
 npx getadvantage fan-out 3  # 3 parallel lanes sharing one brain (then `fan-in`)
 ```
 
+If you run it outside a git working tree, it exits `1` with a specific
+message on **stdout** (stderr stays empty). Under `--json` the same text is
+routed to **stderr** and stdout stays empty — no machine document is emitted.
+
+- **Not a git repository:**
+  `✗ This folder isn't a git repository yet — getAdvantage gates the git history of your project.`
+  Next: `getadvantage demo`, or `git init && git add -A` then re-run `getadvantage check`.
+- **Bare repository:**
+  `✗ This is a bare repository — getAdvantage gates a working tree; run it in a clone.`
+  Next: run it in a clone. Do not `git init` here.
+- **Unreadable `.git`:**
+  `✗ This folder's git repository could not be read — likely a permissions problem on .git.`
+  Next: fix permissions on `.git`, then re-run `getadvantage check`. Do not `git init` — the repository is already there.
+
 Or add it to your project:
 
 ```bash

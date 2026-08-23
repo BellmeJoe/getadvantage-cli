@@ -7202,7 +7202,7 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     });
     assert.equal(ver.status, 0, `F3 --version:\n${ver.stderr}\n${ver.stdout}`);
     assert.equal((ver.stdout || "").trim(), pkg.version, "F3 --version must print packed package.json version");
-    assert.equal(pkg.version, "0.14.0");
+    assert.equal(pkg.version, "0.14.1");
 
     const f3clean = path.join(base, "f3-clean");
     initRepo(f3clean);
@@ -15541,6 +15541,10 @@ scenario("feedback: first screen ≤12 lines, exit 0 after NO-GO, stderr 0", () 
  * via PRINT_PINS=1 / measureRegressionPins:
  *   SARIF prefix c1a719fa61cd57de · JSON excl. generatedAt prefix 774fe2e0a845b88e
  *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
+ * After 0.14.1 package.json bump (SARIF embeds tool.driver.version); remeasured
+ * via PRINT_PINS=1 / measureRegressionPins:
+ *   SARIF prefix 222e78abc645a707 · JSON excl. generatedAt prefix 774fe2e0a845b88e
+ *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
  */
 function measureRegressionPins(productRoot = path.join(__dirname, "..")) {
   const base = freshBase();
@@ -15633,10 +15637,12 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // 0 B stderr) are unchanged. Content hashes moved because this lane
   // appended §60 packed-tarball-hygiene scenarios, shifting hostile-fixture
   // startLines in tests/run.mjs. Remeasured via PRINT_PINS=1 / measureRegressionPins:
-  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec → c1a719fa61cd57de (SARIF)
+  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec → c1a719fa61cd57de → 222e78abc645a707 (SARIF)
   //   3c22b593be52c28d → 8f3298b40a681903 → 9d99c38fe87d2b8e → 774fe2e0a845b88e (JSON excl. generatedAt)
+  // Pin moves with package.json version (SARIF embeds tool.driver.version).
+  // Re-measured on the 0.14.1 release commit: 222e78abc645a707… (was c1a719fa61cd57de at 0.14.0).
   assert.ok(
-    pins.sarifHash.startsWith("c1a719fa61cd57de"),
+    pins.sarifHash.startsWith("222e78abc645a707"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
@@ -17336,7 +17342,7 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("c1a719fa61cd57de"),
+    pins.sarifHash.startsWith("222e78abc645a707"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
