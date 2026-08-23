@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.14.0** (LIVE)
+# Social / advertising pack — getadvantage **0.14.1** (LIVE)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,28 +6,31 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **LIVE:** **getadvantage@0.14.0** published **2026-08-20 17:09 +03:00**
-> (minor). `dist-tags.latest` **0.14.0**, registry `gitHead` `cc9d39a`, tags
-> `v0.14.0` and floating `v1` both peel to `cc9d39a`, GitHub Release
-> `getadvantage 0.14.0`, CI run `32378293939` (all 15 steps success, suite
-> **283/283**, evidence **8/8**). Released under a release-scoped independent
-> `REVIEW_GO` at `cc9d39a` with 0 open P1/P2. Prefer leading with the eight core
-> GO/NO-GO claims below; Intent remains the trust-layer follow-on — always
-> *scope verified; semantic correctness not proven*.
+> **LIVE:** **getadvantage@0.14.1** published **2026-08-23** (patch).
+> `dist-tags.latest` **0.14.1**, registry `gitHead` `f098c5e`, tags `v0.14.1`
+> (peels to `f098c5e`) and floating `v1` (peels to `f098c5e`), GitHub Release
+> `getadvantage 0.14.1`, CI run [`32623562202`](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/32623562202)
+> (all steps success, suite **318/318**, evidence **8/8**). Released under a
+> train-scoped independent `REVIEW_GO (release-eligible)` at product fingerprints
+> `872762e` + `8910380` + `a31f30f` + `3d5f592` with 0 open P1/P2. Prefer leading
+> with the eight core GO/NO-GO claims below; Intent remains the trust-layer
+> follow-on — always *scope verified; semantic correctness not proven*.
 >
-> **What 0.14.0 ships (minor — new user-facing command):** `getadvantage feedback`
-> prints a copy-pasteable GitHub issue URL pre-filled with redacted environment
-> and gate metadata. **Nothing is sent** — no browser open, no network request,
-> always exits 0, not a gate, not telemetry. Also carries: ops retained-team
-> detector (ops-only, not packed), Marketplace listing readiness docs, README /
-> version-claim currency, redaction catalogue unification + narrowing repair.
-> **No new checks. No verdict or exit change on the gate.** Also carries a
-> correctness fix (`cc9d39a`): secret **auth identity is now line-ending
-> independent**, so a `secrets.ignore` allowlist entry authored on Windows now
-> actually suppresses the same multi-line secret when the gate runs on Linux CI,
-> and the reverse. Before this, the same secret could carry two different auth
-> ids across platforms. **Not an adoption event** — named evaluators / installs /
-> first gates / week-two reuse / retained external teams remain **0**.
+> **What 0.14.1 ships (patch):** three distinct first-contact messages for a
+> **bare repo**, **unreadable `.git`**, and **non-git folder** (human guidance on
+> **stdout**, 0 B stderr; under `--json` the same text is routed to stderr and
+> stdout stays empty — no machine document). Packed tarball drops `tests/` so
+> the adversarial-secret corpus no longer ships to consumer `node_modules`.
+> **No new command, check, flag, or capability. No verdict or exit change on the
+> gate.** The request-time policy gate is **not** live. **Not an adoption
+> event** — named evaluators / installs / first gates / week-two reuse /
+> retained external teams remain **0**.
+>
+> **Still live from 0.14.0 (historical intro):** `getadvantage feedback` prints a
+> copy-pasteable GitHub issue URL pre-filled with redacted environment and gate
+> metadata. **Nothing is sent** — no browser open, no network request, always
+> exits 0, not a gate, not telemetry. Secret **auth identity is line-ending
+> independent**. Ops retained-team detector is ops-only (not packed).
 >
 > **Still live from 0.13.1 (historical intro):** collapsed secret-row `file:line`
 > restore + dry-run paste-ready JSON repair + body/transport key banner.
@@ -66,9 +69,9 @@
 > GitHub Action + PR summary (`uses: BellmeJoe/getadvantage-cli@v1` — floating
 > major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases));
 > secret scan of committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback target for live **0.14.0**: **getadvantage@0.13.1** /
-> tag `v0.13.1` / `e5b06f3` (with **0.13.0** / `v0.13.0` / `bdc8b04` and
-> **0.12.2** / `v0.12.2` / `1e451ac` intact behind it).
+> Rollback target for live **0.14.1**: **getadvantage@0.14.0** /
+> tag `v0.14.0` / `cc9d39a` (with **0.13.1** / `v0.13.1` / `e5b06f3` intact
+> behind it).
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -81,12 +84,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (published live)** | **`getadvantage@0.14.0`** (live 2026-08-20; registry `gitHead` `cc9d39a`) |
-| **Checkout** | Live **0.14.0** minor: new `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **npm (published live)** | **`getadvantage@0.14.1`** (live 2026-08-23; registry `gitHead` `f098c5e`) |
+| **Checkout** | Live **0.14.1** patch: first-contact classification (bare / unreadable `.git` / non-git) + packed-tarball hygiene (`tests/` no longer ships) + prior 0.14.0 `feedback` + 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
 | **Install** | `npx getadvantage` (tracks `latest`) or pin an exact tag from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.14.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.14.1) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** (re-measured on a CI-equivalent LF checkout of the released commit) · full suite **283/283** · release fingerprint **`cc9d39a`** · published `dist.shasum` `c3992fb30f2aaf7177be1df3d58b34825e85190e` · tag `v0.14.0` + floating `v1` both peel to `cc9d39a` · CI run `32378293939` · post-release cold `npx getadvantage@0.14.0 check` on a fresh temp repo → **GO, exit 0, 6.5s** · 0 RLS advertised · rollback: `0.13.1` / `v0.13.1` / `e5b06f3` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · full suite **318/318** · release fingerprint **`f098c5e`** · published `dist.shasum` `ecaf0b752d7357b4441c4f59b2380788621dad6e` · tag `v0.14.1` peels to `f098c5e` · floating `v1` peels to `f098c5e` · CI run [`32623562202`](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/32623562202) · post-release cold `npx -y getadvantage@0.14.1 --version` → `0.14.1`; cold `check` in an empty non-git folder → exit 1, 233 B stdout first-contact guidance, 0 B stderr · 0 RLS advertised · policy gate **not** live · rollback: `0.14.0` / `v0.14.0` / `cc9d39a` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -118,7 +121,7 @@ windows.
 | **Tracked `.env`** | A committed `.env` is a leak by itself. | part of `check` | Evidence: tracked-env |
 | **Dirty-tree guard** | Stops “I deployed my uncommitted mess” (vercel --prod ships the working tree). | part of `check` | Evidence: dirty-tree |
 | **Honest skips** | No TypeScript? No fake typecheck fail. Not checkable ≠ silent GO on manifests. | part of `check` | Honesty principle + tests |
-| **First-run rescue** | Outside a git repo: points to `demo` / `git init`, not a brick wall. | any command outside repo | Evidence: outside-git-rescue |
+| **First-run rescue** | Outside a working tree: distinct messages for non-git (`demo` / `git init`), bare repo (run in a clone — do not `git init`), and unreadable `.git` (fix permissions — do not `git init`). Human text on stdout, 0 B stderr. | any command outside a worktree | Evidence: outside-git-rescue · hostile-cwd H1/H4/H9/H10 · cold published empty-folder path |
 
 ### B. Orientation — advertise as “also”
 
