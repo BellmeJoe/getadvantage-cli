@@ -20,8 +20,13 @@ import { fingerprint, secretAuthId, stripBom, MARKER_DIR, LEGACY_MARKER_DIR, c, 
 import { scanText } from "./scan.mjs";
 
 export const GATE_MAX_STDIN_BYTES = 1_048_576;
-export const GATE_STDIN_TIMEOUT_MS = 1800;
-export const GATE_STDIN_IDLE_MS = 800;
+// Hang guards, not correctness bounds. Ordinary producer latency (a program
+// that computes then emits, curl TTFB, a streaming writer) is seconds, not
+// sub-second. 30s of silence is a stuck pipe; 2 min total still bounds a
+// producer that dribbles bytes just inside the idle window. 1 MiB at ~9 KB/s
+// still fits. H7 (stdin that never closes) must terminate on these.
+export const GATE_STDIN_TIMEOUT_MS = 120_000;
+export const GATE_STDIN_IDLE_MS = 30_000;
 export const GATE_PROOF_DIR = "gate-proofs";
 
 const AUTH_PREFIX_LEN = 8;
@@ -378,7 +383,7 @@ export function writeGateProof(cwd, record) {
   }
 }
 
-function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHash }) {
+function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHash, truncated = false }) {
   return {
     version: 1,
     command: "gate",
@@ -386,12 +391,13 @@ function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHa
     bytes,
     sha256,
     action,
+    truncated: !!truncated,
     hits: blockingHits(hits).map(sanitizeHit),
     redactionMapHash: mapHash,
   };
 }
 
-function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, exitCode }) {
+function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, exitCode, truncated = false }) {
   return {
     command: "gate",
     verdict: action,
@@ -399,6 +405,7 @@ function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, 
     action,
     bytes,
     sha256,
+    truncated: !!truncated,
     hits: blockingHits(hits).map(sanitizeHit),
     redactionMapHash: mapHash,
     generatedAt: new Date().toISOString(),
@@ -406,9 +413,18 @@ function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, 
 }
 
 // ---------------------------------------------------------------------------
-// Stdin bound (1 MiB + ≤2s wall clock). Must not hang.
+// Stdin bound (1 MiB + idle/total hang guards). Must not hang. A partial
+// read is never a successful scan — callers must fail closed on truncated.
 // ---------------------------------------------------------------------------
 
+/**
+ * Bounded stdin read. Resolves `{ buf, truncated, reason }`.
+ * `truncated` is true when the byte cap overflowed, the idle timer fired
+ * with the stream still open, the total timer fired with the stream still
+ * open, or the stream errored. False on a clean `end` — including a clean
+ * `end` that lands exactly on `maxBytes`.
+ * `reason` is `max-bytes` | `idle` | `total` | `error` | null.
+ */
 export function readStdinBounded({
   maxBytes = GATE_MAX_STDIN_BYTES,
   totalMs = GATE_STDIN_TIMEOUT_MS,
@@ -420,7 +436,7 @@ export function readStdinBounded({
     let total = 0;
     let settled = false;
     let idleTimer = null;
-    const finish = () => {
+    const finish = (why) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -436,7 +452,7 @@ export function readStdinBounded({
         /* ignore */
       }
       try {
-        stream.removeListener("error", onEnd);
+        stream.removeListener("error", onError);
       } catch {
         /* ignore */
       }
@@ -455,39 +471,48 @@ export function readStdinBounded({
       } catch {
         /* ignore */
       }
-      resolve(Buffer.concat(chunks, total));
+      const truncated = why !== "end";
+      resolve({
+        buf: Buffer.concat(chunks, total),
+        truncated,
+        reason: truncated ? why : null,
+      });
     };
     const bumpIdle = () => {
       if (idleTimer) clearTimeout(idleTimer);
-      if (idleMs > 0) idleTimer = setTimeout(finish, idleMs);
+      if (idleMs > 0) idleTimer = setTimeout(() => finish("idle"), idleMs);
     };
-    const timer = setTimeout(finish, totalMs);
+    const timer = setTimeout(() => finish("total"), totalMs);
     const onData = (chunk) => {
       if (settled) return;
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       const room = maxBytes - total;
       if (room <= 0) {
-        finish();
+        finish("max-bytes");
         return;
       }
-      const take = buf.length > room ? buf.subarray(0, room) : buf;
-      chunks.push(take);
-      total += take.length;
-      if (total >= maxBytes) {
-        finish();
+      if (buf.length > room) {
+        chunks.push(buf.subarray(0, room));
+        total += room;
+        finish("max-bytes");
         return;
       }
+      chunks.push(buf);
+      total += buf.length;
+      // Exact fill is not truncation until more data arrives, a timer
+      // fires with the stream still open, or a clean `end` lands.
       bumpIdle();
     };
-    const onEnd = () => finish();
+    const onEnd = () => finish("end");
+    const onError = () => finish("error");
     if (stream.readableEnded) {
-      finish();
+      finish("end");
       return;
     }
     bumpIdle();
     stream.on("data", onData);
     stream.on("end", onEnd);
-    stream.on("error", onEnd);
+    stream.on("error", onError);
     try {
       if (typeof stream.resume === "function") stream.resume();
     } catch {
@@ -508,7 +533,13 @@ export function printGateUsage() {
   console.error(`                   … | ${bin} gate --json`);
   console.error("  BLOCK (default): non-zero exit, payload withheld from stdout.");
   console.error("  --redact:        mask matches, write the rest, exit 0.");
+  console.error(
+    `  Stdin bounds: max ${GATE_MAX_STDIN_BYTES} bytes (1 MiB); idle ${GATE_STDIN_IDLE_MS} ms; total ${GATE_STDIN_TIMEOUT_MS} ms.`,
+  );
+  console.error("  Hitting a bound: non-zero exit, nothing of the payload on stdout, named reason");
+  console.error("  on stderr, proof action INCOMPLETE (never PASS). Close stdin when the prompt is complete.");
   console.error("  Local proof under .getadvantage/gate-proofs/. Not inbound. Not a proxy.");
+  console.error("  Not in published getadvantage@0.14.1. Not live as a request interceptor.");
 }
 
 function printBlockHuman(evalResult) {
@@ -544,6 +575,43 @@ function printBlockHuman(evalResult) {
   console.error(c.gray("  The payload was not written to stdout."));
 }
 
+function printIncompleteHuman(reason) {
+  const bound =
+    reason === "max-bytes"
+      ? `stdin exceeded ${GATE_MAX_STDIN_BYTES} bytes (1 MiB)`
+      : reason === "idle"
+        ? `stdin idle for ${GATE_STDIN_IDLE_MS} ms with the stream still open`
+        : reason === "total"
+          ? `stdin read exceeded ${GATE_STDIN_TIMEOUT_MS} ms with the stream still open`
+          : reason === "error"
+            ? "stdin closed with an error before a clean end"
+            : "stdin read was incomplete";
+  console.error(c.red(`✗ Policy gate INCOMPLETE — ${bound}`));
+  console.error(c.gray("  Unread bytes were not scanned. The gate did not PASS this payload."));
+  if (reason === "max-bytes") {
+    console.error(
+      c.gray(
+        `  Remedy: shorten the prompt to at most ${GATE_MAX_STDIN_BYTES} bytes (1 MiB) and re-pipe.`,
+      ),
+    );
+  } else if (reason === "idle") {
+    console.error(
+      c.gray(
+        `  Remedy: keep stdin flowing, or close it when the prompt is complete. A pause longer than ${GATE_STDIN_IDLE_MS} ms is treated as a hang.`,
+      ),
+    );
+  } else if (reason === "total") {
+    console.error(
+      c.gray(
+        `  Remedy: finish writing and close stdin within ${GATE_STDIN_TIMEOUT_MS} ms.`,
+      ),
+    );
+  } else {
+    console.error(c.gray("  Remedy: re-pipe the prompt so stdin ends cleanly."));
+  }
+  console.error(c.gray("  The payload was not written to stdout."));
+}
+
 export function printGateHelp() {
   const bin = binName();
   console.log(`${c.bold("gate")} — request-time policy gate (outbound stdin filter).`);
@@ -558,8 +626,16 @@ export function printGateHelp() {
   console.log("  and an optional project denylist in .getadvantage/config.json:");
   console.log('    { "version": 1, "gate": { "denylist": ["PROJECT-CODENAME"] } }');
   console.log("");
+  console.log("Stdin bounds (hitting one fails closed — non-zero exit, nothing of the");
+  console.log("payload on stdout, named reason on stderr, proof action INCOMPLETE never PASS):");
+  console.log(`  max ${GATE_MAX_STDIN_BYTES} bytes (1 MiB); idle ${GATE_STDIN_IDLE_MS} ms; total ${GATE_STDIN_TIMEOUT_MS} ms.`);
+  console.log("  Close stdin when the prompt is complete. A pause longer than the idle bound,");
+  console.log("  a read longer than the total bound, or a payload over the byte cap is treated");
+  console.log("  as incomplete, not as a successful scan.");
+  console.log("");
   console.log("Not inbound. Not a proxy or daemon. Local proof only");
   console.log("(`.getadvantage/gate-proofs/`). Never writes the raw secret.");
+  console.log("Not in published getadvantage@0.14.1. Not live as a request interceptor.");
 }
 
 // ---------------------------------------------------------------------------
@@ -585,11 +661,40 @@ export async function runPolicyGate(opts = {}) {
     return 1;
   }
 
-  const buf = await readStdinBounded();
-  const text = buf.toString("utf8");
-  const evaluated = evaluatePayload(text, { cwd, redact: !!flags.redact });
+  const { buf, truncated, reason } = await readStdinBounded();
   const bytes = buf.length;
   const sha256 = payloadSha256(buf);
+
+  if (truncated) {
+    const exitCode = 1;
+    const proof = buildProofRecord({
+      action: "INCOMPLETE",
+      hits: [],
+      bytes,
+      sha256,
+      redactionMapHash: null,
+      truncated: true,
+    });
+    writeGateProof(cwd, proof);
+    printIncompleteHuman(reason);
+    if (emitJson) {
+      emitJson(
+        buildJsonDoc({
+          action: "INCOMPLETE",
+          hits: [],
+          bytes,
+          sha256,
+          redactionMapHash: null,
+          exitCode,
+          truncated: true,
+        }),
+      );
+    }
+    return exitCode;
+  }
+
+  const text = buf.toString("utf8");
+  const evaluated = evaluatePayload(text, { cwd, redact: !!flags.redact });
   const exitCode = evaluated.action === "BLOCK" ? 1 : 0;
 
   const proof = buildProofRecord({
@@ -598,6 +703,7 @@ export async function runPolicyGate(opts = {}) {
     bytes,
     sha256,
     redactionMapHash: evaluated.redactionMapHash,
+    truncated: false,
   });
   writeGateProof(cwd, proof);
 
@@ -611,6 +717,7 @@ export async function runPolicyGate(opts = {}) {
         sha256,
         redactionMapHash: evaluated.redactionMapHash,
         exitCode,
+        truncated: false,
       }),
     );
     return exitCode;

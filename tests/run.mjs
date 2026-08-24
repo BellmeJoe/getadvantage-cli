@@ -203,15 +203,25 @@
 //                                     (TEST_FILTER=gate). A1–A7 acceptance,
 //                                     H1–H9 hostile fixtures mutation-proven,
 //                                     PII + denylist, hit-count + ship-time pins.
+//                                     Fail-closed stdin bounds (idle / over-cap,
+//                                     mutation-proven) + exact-cap end is not
+//                                     truncation.
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { checkSupabaseRls } from "../checks.mjs";
+import {
+  GATE_MAX_STDIN_BYTES,
+  GATE_STDIN_IDLE_MS,
+  GATE_STDIN_TIMEOUT_MS,
+  readStdinBounded,
+} from "../gate.mjs";
 
 /** Same as util.mjs secretAuthId — local so scenarios never import production modules. */
 function hashOf(match) {
@@ -273,6 +283,122 @@ function listGateProofs(cwd) {
   return readdirSync(dir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => path.join(dir, f));
+}
+
+function latestGateProof(cwd) {
+  const files = listGateProofs(cwd);
+  assert.ok(files.length >= 1, `expected a gate proof under ${cwd}`);
+  files.sort();
+  return JSON.parse(readFileSync(files[files.length - 1], "utf8"));
+}
+
+function assertProofHasNoSecretMaterial(rec, secret) {
+  const blob = JSON.stringify(rec);
+  assert.ok(!("text" in rec), "proof must not carry text");
+  assert.ok(!("term" in rec), "proof must not carry term");
+  assert.ok(!("redacted" in rec), "proof must not carry redacted");
+  if (secret) {
+    assert.ok(!blob.includes(secret), `proof must not contain raw secret`);
+  }
+  for (const h of rec.hits || []) {
+    assert.ok(!("raw" in h), "proof hits must never carry raw");
+    assert.ok(!("text" in h), "proof hits must never carry text");
+    assert.ok(!("term" in h), "proof hits must never carry term");
+    assert.ok(!("redacted" in h), "proof hits must never carry redacted");
+  }
+}
+
+/**
+ * Spawn `node argv…` with a piped stdin. Ignores EPIPE (child may destroy
+ * stdin on overflow / fail-closed). `second` is written after `pauseMs`.
+ * Never uses spawnSync — over-cap input can SIGPIPE the parent write.
+ */
+function runGatePiped(nodeArgv, cwd, { first, second = null, pauseMs = 0, timeoutMs, neverEnd = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, nodeArgv, {
+      cwd,
+      env: buildEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const out = [];
+    const err = [];
+    child.stdout.on("data", (d) => out.push(d));
+    child.stderr.on("data", (d) => err.push(d));
+    child.stdin.on("error", () => {});
+    const killer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+    }, timeoutMs);
+    child.on("error", (e) => {
+      clearTimeout(killer);
+      reject(e);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(killer);
+      resolve({
+        code: code == null ? -1 : code,
+        signal,
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(err).toString("utf8"),
+        stdoutBuf: Buffer.concat(out),
+      });
+    });
+    const writeChunk = (data) =>
+      new Promise((done) => {
+        if (data == null || data === "") return done();
+        let settled = false;
+        const once = () => {
+          if (settled) return;
+          settled = true;
+          done();
+        };
+        try {
+          const ok = child.stdin.write(data, () => once());
+          if (!ok) child.stdin.once("drain", once);
+        } catch {
+          once();
+        }
+      });
+    (async () => {
+      await writeChunk(first);
+      if (neverEnd) return;
+      if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
+      await writeChunk(second);
+      try {
+        child.stdin.end();
+      } catch {
+        /* EPIPE */
+      }
+    })().catch(() => {});
+  });
+}
+
+function writeTruncationMutatedHarness(scratchDir) {
+  mkdirSync(scratchDir, { recursive: true });
+  const productPath = path.join(__dirname, "..", "gate.mjs");
+  const original = readFileSync(productPath, "utf8");
+  const rewritten = rewriteGateImports(original);
+  const needle = "const truncated = why !== \"end\";";
+  const neutered = rewritten.replace(
+    needle,
+    "const truncated = false; // MUTATION: ignore truncation",
+  );
+  assert.ok(neutered !== rewritten, "mutation must force truncated = false");
+  assert.ok(neutered.includes("MUTATION"), "mutation marker missing");
+  writeFileSync(path.join(scratchDir, "gate.mjs"), neutered, "utf8");
+  const gateHref = pathToFileURL(path.join(scratchDir, "gate.mjs")).href;
+  const harnessPath = path.join(scratchDir, "harness.mjs");
+  writeFileSync(
+    harnessPath,
+    `import { runPolicyGate } from ${JSON.stringify(gateHref)};\n` +
+      `const code = await runPolicyGate({ cwd: process.cwd() });\n` +
+      `process.exit(code);\n`,
+    "utf8",
+  );
+  return harnessPath;
 }
 
 function rewriteScanImports(src) {
@@ -15688,13 +15814,17 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // via PRINT_PINS=1 / measureRegressionPins:
   //   222e78abc645a707 → 490479735d4e4ae3 (SARIF)
   //   774fe2e0a845b88e → 6b48ca7405be78b1 (JSON excl. generatedAt)
+  // After 0.15.x fail-closed truncation scenarios (startLines + two new
+  // sk_live_ fixtures in tests/run.mjs); remeasured via PRINT_PINS=1:
+  //   490479735d4e4ae3 → 8a401a85a29f9188 (SARIF)
+  //   6b48ca7405be78b1 → e20342b55a90650b (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("490479735d4e4ae3"),
+    pins.sarifHash.startsWith("8a401a85a29f9188"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("6b48ca7405be78b1"),
+    pins.jsonHash.startsWith("e20342b55a90650b"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17389,11 +17519,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("490479735d4e4ae3"),
+    pins.sarifHash.startsWith("8a401a85a29f9188"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("6b48ca7405be78b1"),
+    pins.jsonHash.startsWith("e20342b55a90650b"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -17831,6 +17961,10 @@ scenario("gate A1: hello world pass-through byte-identical", () => {
     assert.ok(!/fatal:|ENOENT/i.test(r.stdout + r.stderr), r.stderr);
     const proofs = listGateProofs(base);
     assert.ok(proofs.length >= 1, "empty-of-hits still writes a proof record");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "PASS");
+    assert.equal(rec.truncated, false, "clean end must not be marked truncated");
+    assertProofHasNoSecretMaterial(rec);
   } finally {
     cleanup(base);
   }
@@ -17883,6 +18017,7 @@ scenario("gate A4: --json machine doc on stdout", () => {
     assert.equal(doc.command, "gate");
     assert.equal(doc.verdict, "PASS");
     assert.equal(doc.exitCode, 0);
+    assert.equal(doc.truncated, false);
     assert.equal(doc.bytes, Buffer.byteLength("hello world"));
     assert.match(doc.sha256, /^[0-9a-f]{64}$/);
     assert.ok(Array.isArray(doc.hits));
@@ -17936,7 +18071,7 @@ scenario("gate A6: non-git folder, no fatal/ENOENT noise", () => {
 scenario("gate A7: 1MB payload completes under 2s", () => {
   const base = freshBase();
   try {
-    const payload = "hello world ".repeat(Math.ceil(1_048_576 / 12)).slice(0, 1_048_576);
+    const payload = "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
     const t0 = Date.now();
     const r = runGate(["gate"], base, payload);
     const elapsed = Date.now() - t0;
@@ -18180,40 +18315,26 @@ scenario("gate H7: empty stdin + stdin that never closes is bounded", async () =
     assert.equal(empty.code, 0, empty.stderr);
     assert.equal(empty.stdout, "", "empty stdin → empty stdout");
     assert.ok(listGateProofs(base).length >= 1, "empty stdin still writes a proof");
+    const emptyProof = latestGateProof(base);
+    assert.equal(emptyProof.action, "PASS");
+    assert.equal(emptyProof.truncated, false);
 
-    const child = spawn(process.execPath, [INDEX, "gate"], {
-      cwd: base,
-      env: buildEnv(),
-      stdio: ["pipe", "pipe", "pipe"],
+    const hang = await runGatePiped([INDEX, "gate"], base, {
+      first: "hello",
+      neverEnd: true,
+      timeoutMs: GATE_STDIN_IDLE_MS + 10_000,
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => {
-      stdout += d;
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d;
-    });
-    child.stdin.write("hello");
-    // never end()
-    const exited = await new Promise((resolve) => {
-      const t = setTimeout(() => resolve("timeout"), 3000);
-      child.on("close", (code) => {
-        clearTimeout(t);
-        resolve(code);
-      });
-    });
-    if (exited === "timeout") {
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
-      }
-    }
-    assert.notEqual(exited, "timeout", "child must exit without stdin end()");
-    assert.equal(exited, 0, `expected exit 0, stderr:\n${stderr}`);
-    assert.equal(stdout, "hello");
-    assert.ok(!/fatal:|ENOENT/i.test(stderr), stderr);
+    assert.notEqual(hang.signal, "SIGTERM", "child must exit without stdin end() (hang guard)");
+    assert.notEqual(hang.code, 0, `hang must fail closed, stderr:\n${hang.stderr}`);
+    assert.equal(hang.stdout, "", "truncated hang must not emit the partial payload");
+    assert.ok(/INCOMPLETE/i.test(hang.stderr), hang.stderr);
+    assert.ok(/idle/i.test(hang.stderr), `must name the idle bound:\n${hang.stderr}`);
+    assert.ok(!/fatal:|ENOENT/i.test(hang.stderr), hang.stderr);
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "INCOMPLETE");
+    assert.equal(rec.truncated, true);
+    assert.notEqual(rec.action, "PASS");
+    assertProofHasNoSecretMaterial(rec);
   } finally {
     cleanup(base);
   }
@@ -18287,11 +18408,208 @@ scenario("gate help and did-you-mean include the policy gate", () => {
     assert.ok(/gate/.test(help.stdout), "printHelp lists gate");
     const ghelp = runGate(["gate", "--help"], base, "");
     assert.equal(ghelp.code, 0, ghelp.stderr);
-    assert.ok(/policy gate|outbound/i.test(ghelp.stdout + ghelp.stderr), ghelp.stdout + ghelp.stderr);
+    const helpBlob = ghelp.stdout + ghelp.stderr;
+    assert.ok(/policy gate|outbound/i.test(helpBlob), helpBlob);
+    assert.ok(
+      helpBlob.includes(String(GATE_MAX_STDIN_BYTES)) && /1 MiB/.test(helpBlob),
+      `help must disclose the byte cap:\n${helpBlob}`,
+    );
+    assert.ok(
+      helpBlob.includes(String(GATE_STDIN_IDLE_MS)) && helpBlob.includes(String(GATE_STDIN_TIMEOUT_MS)),
+      `help must disclose idle and total timeouts:\n${helpBlob}`,
+    );
+    assert.ok(/INCOMPLETE/.test(helpBlob), `help must name INCOMPLETE:\n${helpBlob}`);
+    assert.ok(
+      /Not in published getadvantage@0\.14\.1/.test(helpBlob),
+      `help must stay conservative on availability:\n${helpBlob}`,
+    );
     const repo = scaffold(base);
     const typo = run(["gte"], repo);
     assert.equal(typo.code, 1);
     assert.ok(/Did you mean/.test(typo.stderr) && /gate/.test(typo.stderr), typo.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate: clean end at exactly GATE_MAX_STDIN_BYTES is not truncation", async () => {
+  const base = freshBase();
+  try {
+    const exact = Buffer.alloc(64, 0x61);
+    const streamExact = new PassThrough();
+    const pExact = readStdinBounded({
+      stream: streamExact,
+      maxBytes: 64,
+      idleMs: 400,
+      totalMs: 2000,
+    });
+    streamExact.write(exact);
+    streamExact.end();
+    const gotExact = await pExact;
+    assert.equal(gotExact.truncated, false, "exact-cap + clean end is not truncation");
+    assert.equal(gotExact.reason, null);
+    assert.equal(gotExact.buf.length, 64);
+
+    const streamOver = new PassThrough();
+    const pOver = readStdinBounded({
+      stream: streamOver,
+      maxBytes: 64,
+      idleMs: 400,
+      totalMs: 2000,
+    });
+    streamOver.write(Buffer.alloc(65, 0x61));
+    streamOver.end();
+    const gotOver = await pOver;
+    assert.equal(gotOver.truncated, true, "cap + 1 must truncate");
+    assert.equal(gotOver.reason, "max-bytes");
+    assert.equal(gotOver.buf.length, 64);
+
+    const streamIdle = new PassThrough();
+    const pIdle = readStdinBounded({
+      stream: streamIdle,
+      maxBytes: 64,
+      idleMs: 200,
+      totalMs: 2000,
+    });
+    streamIdle.write("hi");
+    const gotIdle = await pIdle;
+    assert.equal(gotIdle.truncated, true, "idle with stream open must truncate");
+    assert.equal(gotIdle.reason, "idle");
+
+    const payload = "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
+    const r = runGate(["gate"], base, payload);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout.length, GATE_MAX_STDIN_BYTES);
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "PASS");
+    assert.equal(rec.truncated, false);
+    assert.equal(rec.bytes, GATE_MAX_STDIN_BYTES);
+    assertProofHasNoSecretMaterial(rec);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate: slow producer past idle with secret in chunk 2 fail-closed (mutation-proven)", async () => {
+  const base = freshBase();
+  try {
+    const intro = "Please summarise the following log.\n";
+    const secret = "sk_live_" + "slowprodsecretxxxxxxxx";
+    const realDir = path.join(base, "real");
+    const mutDir = path.join(base, "mut");
+    mkdirSync(realDir, { recursive: true });
+    mkdirSync(mutDir, { recursive: true });
+
+    const real = await runGatePiped([INDEX, "gate"], realDir, {
+      first: intro,
+      second: `AWS key ${secret}\n`,
+      pauseMs: GATE_STDIN_IDLE_MS + 500,
+      timeoutMs: GATE_STDIN_IDLE_MS + 15_000,
+    });
+    assert.notEqual(real.code, 0, `real CLI must not PASS a truncated read\n${real.stderr}`);
+    assert.equal(real.stdout, "", "must not print the partial payload");
+    assert.ok(!real.stdout.includes(secret) && !real.stderr.includes(secret), "secret must be absent");
+    assert.ok(/INCOMPLETE/i.test(real.stderr), real.stderr);
+    assert.ok(/idle/i.test(real.stderr), `must name the idle bound:\n${real.stderr}`);
+    const realProof = latestGateProof(realDir);
+    assert.equal(realProof.action, "INCOMPLETE");
+    assert.equal(realProof.truncated, true);
+    assert.notEqual(realProof.action, "PASS");
+    assertProofHasNoSecretMaterial(realProof, secret);
+
+    const harness = writeTruncationMutatedHarness(path.join(base, "scratch"));
+    const mut = await runGatePiped([harness], mutDir, {
+      first: intro,
+      second: `AWS key ${secret}\n`,
+      pauseMs: GATE_STDIN_IDLE_MS + 500,
+      timeoutMs: GATE_STDIN_IDLE_MS + 15_000,
+    });
+    assert.equal(mut.code, 0, `neutered truncated flag must false-PASS; stderr:\n${mut.stderr}`);
+    assert.ok(mut.stdout.includes(intro.trim()), `neutered flag must emit the partial payload:\n${JSON.stringify(mut.stdout)}`);
+    assert.ok(!mut.stdout.includes(secret), "unread secret still must not appear (read ended before chunk 2)");
+    const mutProof = latestGateProof(mutDir);
+    assert.equal(mutProof.action, "PASS", "neutered flag must write a PASS proof (mutation proof)");
+    assert.equal(mutProof.truncated, false);
+    assertProofHasNoSecretMaterial(mutProof, secret);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate: over-cap payload with secret past the cap fail-closed (mutation-proven)", async () => {
+  const base = freshBase();
+  try {
+    const secret = "sk_live_" + "pastcapsecretxxxxxxxx1";
+    const payload = Buffer.concat([
+      Buffer.alloc(GATE_MAX_STDIN_BYTES, 0x61),
+      Buffer.from(`\n${secret}\n`, "utf8"),
+    ]);
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES + secret.length + 2);
+    const realDir = path.join(base, "real");
+    const mutDir = path.join(base, "mut");
+    mkdirSync(realDir, { recursive: true });
+    mkdirSync(mutDir, { recursive: true });
+    mkdirSync(path.join(realDir, ".getadvantage"), { recursive: true });
+    writeFileSync(
+      path.join(realDir, ".getadvantage", "config.json"),
+      JSON.stringify({ version: 1, gate: { disable: true } }) + "\n",
+      "utf8",
+    );
+
+    const real = await runGatePiped([INDEX, "gate"], realDir, {
+      first: payload,
+      timeoutMs: 20_000,
+    });
+    assert.notEqual(real.code, 0, `real CLI must not PASS an over-cap read\n${real.stderr}`);
+    assert.equal(real.stdout, "", "must not print the truncated prefix");
+    assert.ok(!real.stdout.includes(secret) && !real.stderr.includes(secret), "secret past cap must be absent");
+    assert.ok(/INCOMPLETE/i.test(real.stderr), real.stderr);
+    assert.ok(/1 MiB|1048576/i.test(real.stderr), `must name the byte cap:\n${real.stderr}`);
+    const realProof = latestGateProof(realDir);
+    assert.equal(realProof.action, "INCOMPLETE");
+    assert.equal(realProof.truncated, true);
+    assert.equal(realProof.bytes, GATE_MAX_STDIN_BYTES);
+    assert.notEqual(realProof.action, "PASS");
+    assertProofHasNoSecretMaterial(realProof, secret);
+
+    const red = await runGatePiped([INDEX, "gate", "--redact"], realDir, {
+      first: payload,
+      timeoutMs: 20_000,
+    });
+    assert.notEqual(red.code, 0, `truncated --redact must not exit 0\n${red.stderr}`);
+    assert.equal(red.stdout, "", "truncated --redact must not emit a redacted prefix");
+
+    const j = await runGatePiped([INDEX, "gate", "--json"], realDir, {
+      first: payload,
+      timeoutMs: 20_000,
+    });
+    assert.notEqual(j.code, 0, j.stderr);
+    assert.ok(!j.stdout.includes(secret), "json stdout must not carry the secret");
+    const doc = JSON.parse(j.stdout);
+    assert.equal(doc.action, "INCOMPLETE");
+    assert.equal(doc.verdict, "INCOMPLETE");
+    assert.equal(doc.truncated, true);
+    assert.equal(doc.exitCode, 1);
+    assert.ok(!("text" in doc) && !("term" in doc) && !("redacted" in doc));
+
+    const harness = writeTruncationMutatedHarness(path.join(base, "scratch-cap"));
+    const mut = await runGatePiped([harness], mutDir, {
+      first: payload,
+      timeoutMs: 20_000,
+    });
+    assert.equal(mut.code, 0, `neutered truncated flag must false-PASS; stderr:\n${mut.stderr}`);
+    assert.equal(
+      mut.stdoutBuf.length,
+      GATE_MAX_STDIN_BYTES,
+      `neutered flag must emit the truncated prefix (${mut.stdoutBuf.length} bytes)`,
+    );
+    assert.ok(!mut.stdout.includes(secret), "secret past the cap must stay unread");
+    const mutProof = latestGateProof(mutDir);
+    assert.equal(mutProof.action, "PASS", "neutered flag must write a PASS proof (mutation proof)");
+    assert.equal(mutProof.truncated, false);
+    assert.equal(mutProof.bytes, GATE_MAX_STDIN_BYTES);
+    assertProofHasNoSecretMaterial(mutProof, secret);
   } finally {
     cleanup(base);
   }
