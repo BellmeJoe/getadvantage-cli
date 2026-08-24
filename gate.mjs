@@ -383,7 +383,16 @@ export function writeGateProof(cwd, record) {
   }
 }
 
-function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHash, truncated = false }) {
+/** Closed enum for proof / `--json` `reason`. Success path is JSON `null`. */
+const GATE_REASON_CLOSED = new Set(["max-bytes", "idle", "total", "error"]);
+
+export function closedTruncationReason(reason, truncated) {
+  if (!truncated) return null;
+  if (GATE_REASON_CLOSED.has(reason)) return reason;
+  return "error";
+}
+
+function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHash, truncated = false, reason = null }) {
   return {
     version: 1,
     command: "gate",
@@ -392,12 +401,13 @@ function buildProofRecord({ action, hits, bytes, sha256, redactionMapHash: mapHa
     sha256,
     action,
     truncated: !!truncated,
+    reason: closedTruncationReason(reason, truncated),
     hits: blockingHits(hits).map(sanitizeHit),
     redactionMapHash: mapHash,
   };
 }
 
-function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, exitCode, truncated = false }) {
+function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, exitCode, truncated = false, reason = null }) {
   return {
     command: "gate",
     verdict: action,
@@ -406,6 +416,7 @@ function buildJsonDoc({ action, hits, bytes, sha256, redactionMapHash: mapHash, 
     bytes,
     sha256,
     truncated: !!truncated,
+    reason: closedTruncationReason(reason, truncated),
     hits: blockingHits(hits).map(sanitizeHit),
     redactionMapHash: mapHash,
     generatedAt: new Date().toISOString(),
@@ -538,6 +549,9 @@ export function printGateUsage() {
   );
   console.error("  Hitting a bound: non-zero exit, nothing of the payload on stdout, named reason");
   console.error("  on stderr, proof action INCOMPLETE (never PASS). Close stdin when the prompt is complete.");
+  console.error("  Base64 evasion decodes one level; a twice-encoded secret is not detected.");
+  console.error("  PASS writes the raw stdin bytes; --redact re-encodes UTF-8, so non-UTF-8 input");
+  console.error("  may contain U+FFFD replacement characters.");
   console.error("  Local proof under .getadvantage/gate-proofs/. Not inbound. Not a proxy.");
   console.error("  Not in published getadvantage@0.14.1. Not live as a request interceptor.");
 }
@@ -633,6 +647,11 @@ export function printGateHelp() {
   console.log("  a read longer than the total bound, or a payload over the byte cap is treated");
   console.log("  as incomplete, not as a successful scan.");
   console.log("");
+  console.log("Limits (this process, this payload — not a completeness claim):");
+  console.log("  Base64 evasion decodes one level; a twice-encoded secret is not detected.");
+  console.log("  PASS writes the raw stdin bytes (byte-identical). --redact re-encodes a string");
+  console.log("  as UTF-8, so non-UTF-8 input may contain U+FFFD replacement characters.");
+  console.log("");
   console.log("Not inbound. Not a proxy or daemon. Local proof only");
   console.log("(`.getadvantage/gate-proofs/`). Never writes the raw secret.");
   console.log("Not in published getadvantage@0.14.1. Not live as a request interceptor.");
@@ -674,6 +693,7 @@ export async function runPolicyGate(opts = {}) {
       sha256,
       redactionMapHash: null,
       truncated: true,
+      reason,
     });
     writeGateProof(cwd, proof);
     printIncompleteHuman(reason);
@@ -687,6 +707,7 @@ export async function runPolicyGate(opts = {}) {
           redactionMapHash: null,
           exitCode,
           truncated: true,
+          reason,
         }),
       );
     }
@@ -704,6 +725,7 @@ export async function runPolicyGate(opts = {}) {
     sha256,
     redactionMapHash: evaluated.redactionMapHash,
     truncated: false,
+    reason: null,
   });
   writeGateProof(cwd, proof);
 
@@ -718,6 +740,7 @@ export async function runPolicyGate(opts = {}) {
         redactionMapHash: evaluated.redactionMapHash,
         exitCode,
         truncated: false,
+        reason: null,
       }),
     );
     return exitCode;

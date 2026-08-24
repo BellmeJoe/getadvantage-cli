@@ -4909,6 +4909,12 @@ function assertPackedHygiene(tgz, { expectTests, label }) {
       0,
       `${label} F2: packed secret-shaped payload:\n${payloadHits.map((h) => `${h.file}: ${h.match}`).join("\n")}`,
     );
+    const opsHits = listing.split(/\r?\n/).filter((l) => /(^|\/)ops\//.test(l));
+    const ghHits = listing.split(/\r?\n/).filter((l) => /(^|\/)\.github\//.test(l));
+    assert.equal(opsHits.length, 0, `${label}: packed ops/ must be empty, got:\n${opsHits.join("\n")}`);
+    assert.equal(ghHits.length, 0, `${label}: packed .github/ must be empty, got:\n${ghHits.join("\n")}`);
+    assert.match(listing, /(^|\/)gate\.mjs$/m, `${label}: packed tarball must include gate.mjs`);
+    assert.match(listing, /(^|\/)scan\.mjs$/m, `${label}: packed tarball must include scan.mjs`);
   }
   return { listing, testsHits, payloadHits, files };
 }
@@ -15818,13 +15824,17 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // sk_live_ fixtures in tests/run.mjs); remeasured via PRINT_PINS=1:
   //   490479735d4e4ae3 → 8a401a85a29f9188 (SARIF)
   //   6b48ca7405be78b1 → e20342b55a90650b (JSON excl. generatedAt)
+  // After 0.15.0-release-train-prep F1–F6 + verify.yml structural fixture
+  // (startLines shifted in tests/run.mjs); remeasured via PRINT_PINS=1:
+  //   8a401a85a29f9188 → 9853cd15e7ee0344 (SARIF)
+  //   e20342b55a90650b → 51c1cc5606dfc6e9 (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("8a401a85a29f9188"),
+    pins.sarifHash.startsWith("9853cd15e7ee0344"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("e20342b55a90650b"),
+    pins.jsonHash.startsWith("51c1cc5606dfc6e9"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17519,11 +17529,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("8a401a85a29f9188"),
+    pins.sarifHash.startsWith("9853cd15e7ee0344"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("e20342b55a90650b"),
+    pins.jsonHash.startsWith("51c1cc5606dfc6e9"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -18120,6 +18130,17 @@ scenario("gate H1: newline-split secret (mutation-proven)", async () => {
     assert.equal(r.stdout, "");
     assert.ok(/stripe-live|Stripe live/i.test(r.stderr), r.stderr);
     assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret));
+
+    const crlf = secret.slice(0, 12) + "\r\n" + secret.slice(12);
+    const crOnly = secret.slice(0, 12) + "\r" + secret.slice(12);
+    const rCrlf = runGate(["gate"], base, crlf);
+    assert.notEqual(rCrlf.code, 0, `real CLI must CATCH the CRLF-split secret\n${rCrlf.stderr}`);
+    assert.equal(rCrlf.stdout, "");
+    const rCr = runGate(["gate"], base, crOnly);
+    assert.notEqual(rCr.code, 0, `real CLI must CATCH the CR-split secret\n${rCr.stderr}`);
+    assert.equal(rCr.stdout, "");
+    const missedCrlf = mut.scanText(crlf, { evasions: true }).filter((h) => !h.allowed);
+    assert.equal(missedCrlf.length, 0, "neutered newline-fold must miss the CRLF-split secret");
   } finally {
     cleanup(base);
   }
@@ -18333,6 +18354,8 @@ scenario("gate H7: empty stdin + stdin that never closes is bounded", async () =
     const rec = latestGateProof(base);
     assert.equal(rec.action, "INCOMPLETE");
     assert.equal(rec.truncated, true);
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"), "H7 proof must carry reason");
+    assert.equal(rec.reason, "idle");
     assert.notEqual(rec.action, "PASS");
     assertProofHasNoSecretMaterial(rec);
   } finally {
@@ -18401,7 +18424,7 @@ scenario("gate scanText evasions stay off the ship-time path", async () => {
   assert.equal(clean.filter((h) => !h.allowed).length, 0, "hello world is clean even with evasions");
 });
 
-scenario("gate help and did-you-mean include the policy gate", () => {
+scenario("gate help and did-you-mean include the policy gate", async () => {
   const base = freshBase();
   try {
     const help = runGate(["help"], base, "");
@@ -18420,8 +18443,36 @@ scenario("gate help and did-you-mean include the policy gate", () => {
     );
     assert.ok(/INCOMPLETE/.test(helpBlob), `help must name INCOMPLETE:\n${helpBlob}`);
     assert.ok(
+      /one level|one-level|decodes one/i.test(helpBlob) && /twice-encoded|twice encoded/i.test(helpBlob),
+      `help must disclose one-level base64 decode:\n${helpBlob}`,
+    );
+    assert.ok(
+      /U\+FFFD|replacement character/i.test(helpBlob) && /--redact/.test(helpBlob) && /non-UTF-8/i.test(helpBlob),
+      `help must disclose --redact non-UTF-8 re-encoding:\n${helpBlob}`,
+    );
+    assert.ok(
       /Not in published getadvantage@0\.14\.1/.test(helpBlob),
       `help must stay conservative on availability:\n${helpBlob}`,
+    );
+    const { printGateUsage } = await import(
+      pathToFileURL(path.join(__dirname, "..", "gate.mjs")).href + `?usage=${Date.now()}`
+    );
+    const usageChunks = [];
+    const origErr = console.error;
+    console.error = (...a) => usageChunks.push(a.join(" "));
+    try {
+      printGateUsage();
+    } finally {
+      console.error = origErr;
+    }
+    const usageBlob = usageChunks.join("\n");
+    assert.ok(
+      /one level|one-level|decodes one/i.test(usageBlob) && /twice-encoded|twice encoded/i.test(usageBlob),
+      `usage must disclose one-level base64 decode:\n${usageBlob}`,
+    );
+    assert.ok(
+      /U\+FFFD|replacement character/i.test(usageBlob) && /--redact/.test(usageBlob) && /non-UTF-8/i.test(usageBlob),
+      `usage must disclose --redact non-UTF-8 re-encoding:\n${usageBlob}`,
     );
     const repo = scaffold(base);
     const typo = run(["gte"], repo);
@@ -18721,6 +18772,223 @@ scenario("gate: untracked secrets.ignore cannot weaken BLOCK", async () => {
   } finally {
     cleanup(base);
   }
+});
+
+scenario("gate reason F1: over-cap proof carries max-bytes", async () => {
+  const base = freshBase();
+  try {
+    const payload = Buffer.concat([
+      Buffer.alloc(GATE_MAX_STDIN_BYTES, 0x61),
+      Buffer.from("\nX\n"),
+    ]);
+    const r = await runGatePiped([INDEX, "gate"], base, { first: payload, timeoutMs: 20_000 });
+    assert.notEqual(r.code, 0, `over-cap must fail closed\n${r.stderr}`);
+    assert.equal(r.stdout, "", "over-cap must write 0 B stdout");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "INCOMPLETE");
+    assert.equal(rec.truncated, true);
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"), "reason must be present on the proof");
+    assert.equal(rec.reason, "max-bytes");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate reason F2: idle-truncated proof carries idle", async () => {
+  const base = freshBase();
+  try {
+    const r = await runGatePiped([INDEX, "gate"], base, {
+      first: "hello world",
+      neverEnd: true,
+      timeoutMs: GATE_STDIN_IDLE_MS + 10_000,
+    });
+    assert.equal(r.code, 1, `idle truncation must exit 1\n${r.stderr}`);
+    assert.equal(r.stdout, "", "idle truncation must write 0 B stdout");
+    assert.equal(r.stdoutBuf.length, 0, "idle truncation must write 0 B stdout (buffer)");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "INCOMPLETE");
+    assert.equal(rec.truncated, true);
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"), "reason must be present on the proof");
+    assert.equal(rec.reason, "idle");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate reason F3: clean-end proof carries null", () => {
+  const base = freshBase();
+  try {
+    const r = runGate(["gate"], base, "hello world");
+    assert.equal(r.code, 0, r.stderr);
+    const files = listGateProofs(base);
+    assert.ok(files.length >= 1);
+    files.sort();
+    const raw = readFileSync(files[files.length - 1], "utf8");
+    assert.match(raw, /"reason": null/, `success-path proof must serialize reason null, not omit it:\n${raw}`);
+    const rec = JSON.parse(raw);
+    assert.equal(rec.action, "PASS");
+    assert.equal(rec.truncated, false);
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"), "reason must be present on the success path");
+    assert.equal(rec.reason, null);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate reason F4: json truncation reason matches proof", async () => {
+  const base = freshBase();
+  try {
+    const payload = Buffer.concat([
+      Buffer.alloc(GATE_MAX_STDIN_BYTES, 0x61),
+      Buffer.from("\nX\n"),
+    ]);
+    const r = await runGatePiped([INDEX, "gate", "--json"], base, { first: payload, timeoutMs: 20_000 });
+    assert.notEqual(r.code, 0, r.stderr);
+    const doc = JSON.parse(r.stdout);
+    const rec = latestGateProof(base);
+    assert.ok(Object.prototype.hasOwnProperty.call(doc, "reason"), "json doc must carry reason");
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"), "proof must carry reason");
+    assert.equal(doc.reason, rec.reason, "json reason must match proof reason for the same invocation");
+    assert.equal(doc.reason, "max-bytes", "matching-undefined is not binding — both sides must be max-bytes");
+    assert.equal(doc.truncated, true);
+    assert.equal(rec.truncated, true);
+    assert.equal(doc.action, "INCOMPLETE");
+    assert.equal(rec.action, "INCOMPLETE");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate reason-lock F5: exact 1 MiB clean-end still PASS", () => {
+  const base = freshBase();
+  try {
+    const payload = "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
+    const r = runGate(["gate"], base, payload);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout.length, GATE_MAX_STDIN_BYTES, "exact-cap clean end must still pass the payload through");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "PASS", "R2 must not resurrect a false INCOMPLETE at the exact cap");
+    assert.equal(rec.truncated, false);
+    assert.ok(Object.prototype.hasOwnProperty.call(rec, "reason"));
+    assert.equal(rec.reason, null);
+    assert.equal(rec.bytes, GATE_MAX_STDIN_BYTES);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate reason-enum F6: closed enum", async () => {
+  const allowed = new Set(["max-bytes", "idle", "total", "error", null]);
+  const seen = [];
+  const note = (label, value) => {
+    assert.ok(allowed.has(value), `${label} produced a reason outside the closed enum`);
+    seen.push([label, value]);
+  };
+
+  const base = freshBase();
+  try {
+    const pass = runGate(["gate"], base, "hello world");
+    assert.equal(pass.code, 0, pass.stderr);
+    const passRec = latestGateProof(base);
+    assert.ok(Object.prototype.hasOwnProperty.call(passRec, "reason"));
+    note("cli-pass-proof", passRec.reason);
+
+    const jpass = runGate(["gate", "--json"], base, "hello world");
+    const jdoc = JSON.parse(jpass.stdout);
+    assert.ok(Object.prototype.hasOwnProperty.call(jdoc, "reason"));
+    note("cli-pass-json", jdoc.reason);
+
+    const block = runGate(["gate", "--json"], base, "reach me at  alice@example.com  today");
+    assert.notEqual(block.code, 0, block.stderr);
+    const bdoc = JSON.parse(block.stdout);
+    assert.ok(Object.prototype.hasOwnProperty.call(bdoc, "reason"));
+    note("cli-block-json", bdoc.reason);
+
+    const payload = Buffer.concat([
+      Buffer.alloc(GATE_MAX_STDIN_BYTES, 0x61),
+      Buffer.from("\nX\n"),
+    ]);
+    const over = await runGatePiped([INDEX, "gate", "--json"], base, { first: payload, timeoutMs: 20_000 });
+    const odoc = JSON.parse(over.stdout);
+    const orec = latestGateProof(base);
+    note("cli-over-json", odoc.reason);
+    note("cli-over-proof", orec.reason);
+
+    const sIdle = new PassThrough();
+    const pIdle = readStdinBounded({ stream: sIdle, maxBytes: 64, idleMs: 80, totalMs: 2000 });
+    sIdle.write("hi");
+    const gotIdle = await pIdle;
+    note("bounded-idle", gotIdle.reason);
+
+    const sTotal = new PassThrough();
+    const pTotal = readStdinBounded({ stream: sTotal, maxBytes: 64, idleMs: 5000, totalMs: 80 });
+    sTotal.write("hi");
+    const gotTotal = await pTotal;
+    note("bounded-total", gotTotal.reason);
+
+    const sErr = new PassThrough();
+    sErr.on("error", () => {});
+    const pErr = readStdinBounded({ stream: sErr, maxBytes: 64, idleMs: 2000, totalMs: 2000 });
+    sErr.write("hi");
+    sErr.emit("error", new Error("boom"));
+    const gotErr = await pErr;
+    note("bounded-error", gotErr.reason);
+
+    const sEnd = new PassThrough();
+    const pEnd = readStdinBounded({ stream: sEnd, maxBytes: 64, idleMs: 400, totalMs: 2000 });
+    sEnd.write("hi");
+    sEnd.end();
+    const gotEnd = await pEnd;
+    note("bounded-end", gotEnd.reason);
+
+    assert.ok(seen.some(([, v]) => v === null), "F6 must observe reason null");
+    assert.ok(seen.some(([, v]) => v === "max-bytes"), "F6 must observe max-bytes");
+    assert.ok(seen.some(([, v]) => v === "idle"), "F6 must observe idle");
+    assert.ok(seen.some(([, v]) => v === "total"), "F6 must observe total");
+    assert.ok(seen.some(([, v]) => v === "error"), "F6 must observe error");
+
+    const { closedTruncationReason: clamp } = await import(
+      pathToFileURL(path.join(__dirname, "..", "gate.mjs")).href + `?f6=${Date.now()}`
+    );
+    assert.equal(clamp("idle", false), null, "non-truncated clamps to null");
+    assert.equal(clamp("end", true), "error", "unknown truncated why maps to error");
+    assert.equal(clamp("ENOENT", true), "error", "free-form truncated why maps to error");
+    assert.equal(clamp("max-bytes", true), "max-bytes");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("verify.yml: Linux verification cannot publish", () => {
+  const ymlPath = path.join(__dirname, "..", ".github", "workflows", "verify.yml");
+  assert.ok(existsSync(ymlPath), "verify.yml must exist");
+  const yml = readFileSync(ymlPath, "utf8");
+  assert.ok(/runs-on:\s*ubuntu-latest/.test(yml), "must run on ubuntu-latest");
+  assert.ok(/node-version:\s*['"]?22['"]?/.test(yml), "must pin node 22");
+  assert.ok(/^\s+run:\s*npm test\s*$/m.test(yml), "must run npm test");
+  assert.ok(/^\s+run:\s*npm run evidence\s*$/m.test(yml), "must run npm run evidence");
+  assert.ok(/permissions:\s*\n\s+contents:\s*read\s*$/m.test(yml) || /contents:\s*read/.test(yml), "contents: read only");
+  assert.ok(/^on:\s*$/m.test(yml) || /^on:/m.test(yml), "must declare triggers");
+  assert.ok(/^\s+push:\s*$/m.test(yml), "push must have no branch filter");
+  assert.ok(/pull_request:/.test(yml), "must trigger on pull_request");
+  assert.ok(/workflow_dispatch:/.test(yml), "must allow workflow_dispatch");
+  assert.equal((yml.match(/\bpublish\b/gi) || []).length, 0, "verify.yml must not contain publish");
+  assert.equal((yml.match(/NPM_TOKEN/g) || []).length, 0, "verify.yml must not contain NPM_TOKEN");
+  assert.equal((yml.match(/NODE_AUTH_TOKEN/g) || []).length, 0, "verify.yml must not contain NODE_AUTH_TOKEN");
+  assert.equal((yml.match(/contents:\s*write/g) || []).length, 0, "verify.yml must not grant contents: write");
+  assert.equal((yml.match(/\bnpm publish\b/g) || []).length, 0, "verify.yml must not npm publish");
+  assert.ok(!/^\s+if:/m.test(yml), "verify.yml must have no if: short-circuit");
+  assert.ok(!/continue-on-error/i.test(yml), "verify.yml must not continue-on-error");
+  assert.ok(!/pull_request_target/.test(yml), "verify.yml must not use pull_request_target");
+  assert.ok(!/^\s+branches:/m.test(yml), "verify.yml must not filter branches (nested push.branches would skip this lane)");
+  assert.ok(!/^\s+tags:/m.test(yml), "verify.yml must not filter tags");
+  assert.ok(!/^\s+paths:/m.test(yml), "verify.yml must not filter paths");
+  assert.ok(!/^\s+paths-ignore:/m.test(yml), "verify.yml must not filter paths-ignore");
+  assert.ok(!/secrets\./.test(yml), "verify.yml must not reference secrets.*");
+  const testIdx = yml.search(/^\s+run:\s*npm test\s*$/m);
+  const evidIdx = yml.search(/^\s+run:\s*npm run evidence\s*$/m);
+  assert.ok(testIdx >= 0 && evidIdx > testIdx, "evidence step must follow test step");
 });
 
 scenario("gate ship-time: checkSecrets keeps evasions off (committed split key unflagged)", () => {

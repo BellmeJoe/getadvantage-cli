@@ -235,6 +235,7 @@ ${c.bold("Commands")}
            ${c.bold("Nothing is sent")} — no browser open, no network. Always exits 0.
   ${c.cyan("gate")}     Policy gate — outbound stdin filter (BLOCK default, ${c.bold("--redact")} to mask).
            Local proof under ${c.bold(".getadvantage/gate-proofs/")}. Not inbound. Not a proxy.
+           Not in published getadvantage@0.14.1. Not live as a request interceptor.
 
 ${c.bold("Flags")}
   --version / -v          Print the CLI version and exit.
