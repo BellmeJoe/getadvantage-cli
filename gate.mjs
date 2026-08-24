@@ -14,7 +14,7 @@
 // Node built-ins only.
 
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { fingerprint, secretAuthId, stripBom, MARKER_DIR, LEGACY_MARKER_DIR, c, binName } from "./util.mjs";
 import { scanText } from "./scan.mjs";
@@ -752,11 +752,26 @@ export async function runPolicyGate(opts = {}) {
   }
 
   if (evaluated.action === "REDACT") {
-    process.stdout.write(evaluated.redacted ?? "");
+    writeStdoutBytes(evaluated.redacted ?? "");
     return 0;
   }
 
   // PASS: byte-identical payload, no header, nothing else on stdout.
-  process.stdout.write(buf);
+  // writeSync: process.stdout.write + process.exit drops the tail of a 1 MiB
+  // payload on Linux (pipe never drains). Measured 146176 B of 1048576 B
+  // on ubuntu-latest run 32739421548.
+  writeStdoutBytes(buf);
   return 0;
+}
+
+/** Blocking stdout write so PASS/REDACT survive process.exit. */
+function writeStdoutBytes(data) {
+  if (data == null) return;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+  let offset = 0;
+  while (offset < buf.length) {
+    const n = writeSync(1, buf.subarray(offset));
+    if (!n) break;
+    offset += n;
+  }
 }
