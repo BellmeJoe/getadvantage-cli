@@ -206,6 +206,11 @@
 //                                     Fail-closed stdin bounds (idle / over-cap,
 //                                     mutation-proven) + exact-cap end is not
 //                                     truncation.
+//  62. Secret-anchor repair (0.15.x)  — `_` is a separator, not a word-char
+//                                     wall (TEST_FILTER=secret-anchor). F1–F6
+//                                     mutation-bound: PREFIX_ / _SUFFIX /
+//                                     --redact key_key / non-Stripe adjacency;
+//                                     hyphen control; alnum-adjacency GO.
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -15828,13 +15833,17 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // (startLines shifted in tests/run.mjs); remeasured via PRINT_PINS=1:
   //   8a401a85a29f9188 → 9853cd15e7ee0344 (SARIF)
   //   e20342b55a90650b → 51c1cc5606dfc6e9 (JSON excl. generatedAt)
+  // After 0.15.x-secret-anchor-repair inventory + F1–F6 (startLines shifted
+  // in tests/run.mjs; self-block count stays 5); remeasured via PRINT_PINS=1:
+  //   9853cd15e7ee0344 → 48969d801296b057 (SARIF)
+  //   51c1cc5606dfc6e9 → 7c0f7eab0bc09a78 (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("9853cd15e7ee0344"),
+    pins.sarifHash.startsWith("48969d801296b057"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("51c1cc5606dfc6e9"),
+    pins.jsonHash.startsWith("7c0f7eab0bc09a78"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17529,11 +17538,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("9853cd15e7ee0344"),
+    pins.sarifHash.startsWith("48969d801296b057"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("51c1cc5606dfc6e9"),
+    pins.jsonHash.startsWith("7c0f7eab0bc09a78"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -19424,6 +19433,185 @@ scenario("gate stdout F: writeStdoutBytes class matrix (EPIPE/EAGAIN/zero/EIO)",
   assert.match(src, /EAGAIN/, "gate.mjs must handle EAGAIN");
   const callSites = [...src.matchAll(/writeStdoutBytes\(/g)].length;
   assert.ok(callSites >= 3, `writeStdoutBytes must cover PASS + REDACT + definition, got ${callSites}`);
+});
+
+// ---------------------------------------------------------------------------
+// 62. Secret-anchor repair — `_` is a separator (TEST_FILTER=secret-anchor)
+//     F1–F4 fail on unrepaired `\b` anchors; F5–F6 must still pass.
+// ---------------------------------------------------------------------------
+
+function secretAnchorPkg(name) {
+  return JSON.stringify({ name, version: "1.0.0", private: true }, null, 2) + "\n";
+}
+
+scenario("secret-anchor F1: committed PREFIX_sk_live_<20+ alnum> is NO-GO and names file:line", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f1");
+    initRepo(repo);
+    const key = "sk_live_" + "F1prefixadjsecretxxxxxxxx";
+    const prefixed = "PREFIX_" + key;
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f1"));
+    write(repo, "keys.js", `// config\nexport const KEY = "${prefixed}";\n`);
+    commitAll(repo, "chore: underscore-prefixed stripe live key");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F1 must NO-GO, exit 1\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/keys\.js:2\b/.test(extra), `finding must name file:line\n${extra}`);
+    const findings = secret.findings || doc.findings || [];
+    const hit = findings.find((f) => f.patternId === "stripe-live" || f.ruleId === "secret/stripe-live");
+    assert.ok(hit, `expected stripe-live finding: ${JSON.stringify(findings)}`);
+    assert.equal(hit.file, "keys.js");
+    assert.equal(hit.startLine, 2);
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+    assert.ok(!r.stdout.includes(key) && !r.stderr.includes(key), "raw key absent from streams");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F2: committed sk_live_<20+ alnum>_SUFFIX is NO-GO (trailing adjacency)", () => {
+  const base = freshBase();
+  try {
+    // Specified stripe trailing shape. stripe-live has no trailing `\b`, so
+    // this already NO-GOs on unrepaired scan.mjs — still required.
+    const stripeRepo = path.join(base, "f2-stripe");
+    initRepo(stripeRepo);
+    const stripeKey = "sk_live_" + "F2trailingadjsecretxxxxx";
+    write(stripeRepo, "package.json", secretAnchorPkg("secret-anchor-f2-stripe"));
+    write(stripeRepo, "keys.js", `export const KEY = "${stripeKey}_SUFFIX";\n`);
+    commitAll(stripeRepo, "chore: trailing-underscore stripe live key");
+    const rs = run(["check", "--json"], stripeRepo);
+    assert.equal(rs.code, 1, `F2 stripe _SUFFIX must NO-GO\n${rs.stderr}\n${rs.stdout}`);
+    const sdoc = parseJson(rs);
+    assert.equal(sdoc.verdict, "NO-GO");
+    const ssec = sdoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(ssec && ssec.status === "fail", JSON.stringify(ssec));
+    assert.ok(!JSON.stringify(sdoc).includes(stripeKey), "full stripe key must never be echoed");
+
+    // Mutation-bound trailing case: npm-token has trailing `\b`, so
+    // `npm_<36>_SUFFIX` misses on unrepaired scan.mjs and hits after the repair.
+    const npmRepo = path.join(base, "f2-npm");
+    initRepo(npmRepo);
+    const npmTok = "npm_" + "F2npmTrailingAdjTokxxxxxxxxxxxxxxxxx";
+    assert.equal(npmTok.length, 4 + 36, `npm token must be 36 alnum after npm_, got ${npmTok.length}`);
+    write(npmRepo, "package.json", secretAnchorPkg("secret-anchor-f2-npm"));
+    write(npmRepo, ".npmrc", `_authToken=${npmTok}_SUFFIX\n`);
+    commitAll(npmRepo, "chore: trailing-underscore npm token");
+    const rn = run(["check", "--json"], npmRepo);
+    assert.equal(rn.code, 1, `F2 npm _SUFFIX must NO-GO (mutation-bound trailing \\b)\n${rn.stderr}\n${rn.stdout}`);
+    const ndoc = parseJson(rn);
+    assert.equal(ndoc.verdict, "NO-GO");
+    const nsec = ndoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(nsec && nsec.status === "fail", JSON.stringify(nsec));
+    const nextra = (nsec.extra || []).join("\n");
+    assert.ok(/npm access token/i.test(nextra), `must name npm-token detector\n${nextra}`);
+    assert.ok(!JSON.stringify(ndoc).includes(npmTok), "full npm token must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F3: --redact over <key>_<same key again> redacts both; raw key absent", () => {
+  const base = freshBase();
+  try {
+    const secret = "sk_live_" + "F3redactbothoccxxxxxxxx";
+    const payload = secret + "_" + secret;
+    const r = runGate(["gate", "--redact"], base, payload);
+    assert.equal(r.code, 0, `F3 --redact must exit 0\n${r.stderr}`);
+    assert.equal(r.stdout.includes(secret), false, "raw key must be absent from stdout (string)");
+    const outBuf = Buffer.from(r.stdout, "utf8");
+    const keyBuf = Buffer.from(secret, "utf8");
+    assert.equal(outBuf.includes(keyBuf), false, "raw key must be absent from stdout (byte-wise)");
+    assert.ok(!r.stderr.includes(secret), "raw key must be absent from stderr");
+    const masks = r.stdout.match(/\[REDACTED:stripe-live:[0-9a-f]{4,}\]/g) || [];
+    assert.equal(masks.length, 2, `both occurrences must be masked, got ${masks.length}\n${r.stdout}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F4: non-Stripe PREFIX_ adjacency (ghp_) is NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f4");
+    initRepo(repo);
+    const ghp = "ghp_" + "F4prefixAdjGitHubPatxxxxxxxxxxxxxxxx";
+    assert.equal(ghp.length, 4 + 36, `ghp token must be 36 alnum after ghp_, got ${ghp.length}`);
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f4"));
+    write(repo, "auth.js", `export const TOKEN = "PREFIX_${ghp}";\n`);
+    commitAll(repo, "chore: underscore-prefixed GitHub PAT");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F4 PREFIX_ghp_ must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/GitHub personal access token/i.test(extra), `must name ghp detector\n${extra}`);
+    assert.ok(!JSON.stringify(doc).includes(ghp), "full ghp token must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F5: PREFIX-sk_live_... (hyphen separator) still NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f5");
+    initRepo(repo);
+    const key = "sk_live_" + "F5hyphensepsecretxxxxxxxx";
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f5"));
+    write(repo, "keys.js", `export const KEY = "PREFIX-${key}";\n`);
+    commitAll(repo, "chore: hyphen-prefixed stripe live key");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F5 hyphen separator must still NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F6: letter/digit immediately before pattern still GO (base64-substring class closed)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f6");
+    initRepo(repo);
+    const exampleAkia = "AKIA" + "IOSFODNN7" + "EXAMPLE";
+    const realAkia = "AKIA" + "F6ALNUMADJKEY01";
+    const stripe = "sk_live_" + "F6alnumadjsecretxxxxxxxx";
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f6"));
+    write(
+      repo,
+      "blob.js",
+      [
+        `const awsExample = "x${exampleAkia}y";`,
+        `const awsReal = "x${realAkia}y";`,
+        `const stripeAdj = "z${stripe}";`,
+        "",
+      ].join("\n"),
+    );
+    commitAll(repo, "chore: alnum-adjacent secret-shaped substrings");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `F6 must stay GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "pass", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(!/allowlisted/i.test(secret.detail + "\n" + extra), `F6 must be a no-match, not an allowlist rescue\n${extra}`);
+  } finally {
+    cleanup(base);
+  }
 });
 
 // ---------------------------------------------------------------------------

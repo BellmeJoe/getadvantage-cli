@@ -20,25 +20,29 @@ import { emptyPolicy, secretAllowDecision } from "./policy.mjs";
 // chains ("sk-circle-fade-dot-before-anim") and prose practically never do.
 const hasDigit = (tok) => /[0-9]/.test(tok);
 
+// Anchors are alnum lookarounds, not `\b`. `_` is a JS word char, so `\b`
+// misses ordinary `PREFIX_sk_live_…` names. Delta vs `\b` is exactly `_`.
+// Letter/digit adjacency still blocks, so pattern-shaped substrings inside
+// base64 (`xAKIA…y`) do not match. PEM patterns have no `\b` and stay as-is.
 export const SECRET_PATTERNS = [
   // --- from app/lib/safety.ts ---
   // Anthropic BEFORE OpenAI: `sk-ant-…` also matches the broader sk- shape, so
   // the specific pattern must claim it first (and openai's validator skips it).
-  { id: "anthropic", label: "Anthropic secret key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g, validate: hasDigit },
+  { id: "anthropic", label: "Anthropic secret key", re: /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/g, validate: hasDigit },
   {
     id: "openai",
     label: "OpenAI secret key",
-    re: /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
+    re: /(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
     // Digit required (kills CSS-class false positives); sk-ant- is Anthropic's.
     validate: (tok) => hasDigit(tok) && !tok.startsWith("sk-ant-"),
   },
-  { id: "stripe-live", label: "Stripe live secret key", re: /\bsk_live_[A-Za-z0-9]{20,}/g },
-  { id: "stripe-restricted", label: "Stripe restricted key", re: /\brk_live_[A-Za-z0-9]{20,}/g },
-  { id: "aws", label: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/g },
-  { id: "github-pat", label: "GitHub personal access token", re: /\bghp_[A-Za-z0-9]{36}\b/g },
-  { id: "github-fine", label: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g },
-  { id: "google-oauth", label: "Google OAuth secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/g },
-  { id: "slack", label: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  { id: "stripe-live", label: "Stripe live secret key", re: /(?<![A-Za-z0-9])sk_live_[A-Za-z0-9]{20,}/g },
+  { id: "stripe-restricted", label: "Stripe restricted key", re: /(?<![A-Za-z0-9])rk_live_[A-Za-z0-9]{20,}/g },
+  { id: "aws", label: "AWS access key id", re: /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g },
+  { id: "github-pat", label: "GitHub personal access token", re: /(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g },
+  { id: "github-fine", label: "GitHub fine-grained token", re: /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{22,}(?![A-Za-z0-9])/g },
+  { id: "google-oauth", label: "Google OAuth secret", re: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])/g },
+  { id: "slack", label: "Slack token", re: /(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g },
   // Full PEM block (BEGIN…END), not the header alone. Header-only matches make
   // every key of the same type share one secretAuthId — a hash copied from one
   // fixture must never authorize a different private key (0.8.3 re-review P1).
@@ -69,25 +73,25 @@ export const SECRET_PATTERNS = [
       return !complete.test(fromHere);
     },
   },
-  { id: "sendgrid", label: "SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g },
+  { id: "sendgrid", label: "SendGrid key", re: /(?<![A-Za-z0-9])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])/g },
   // --- from CLAUDE.md hard-rule #2 (the pre-commit scan literals) ---
-  { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /\bwhsec_[A-Za-z0-9]{20,}/g },
-  { id: "vercel-token", label: "Vercel token (vcp_)", re: /\bvcp_[A-Za-z0-9]{20,}/g },
-  { id: "kv-rest", label: "KV/Redis REST credential", re: /\bKV_REST_API_(?:URL|TOKEN|READ_ONLY_TOKEN)\s*=\s*\S+/g },
+  { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /(?<![A-Za-z0-9])whsec_[A-Za-z0-9]{20,}/g },
+  { id: "vercel-token", label: "Vercel token (vcp_)", re: /(?<![A-Za-z0-9])vcp_[A-Za-z0-9]{20,}/g },
+  { id: "kv-rest", label: "KV/Redis REST credential", re: /(?<![A-Za-z0-9])KV_REST_API_(?:URL|TOKEN|READ_ONLY_TOKEN)\s*=\s*\S+/g },
   // getAdvantage's OWN platform key format: adv_live_ + lowercase base36. A
   // dedicated pattern because the generic Bearer heuristic below requires MIXED
   // case + a digit and would miss an all-lowercase token like this one.
-  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /\badv_live_[a-z0-9]{16,}\b/g },
+  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /(?<![A-Za-z0-9])adv_live_[a-z0-9]{16,}(?![A-Za-z0-9])/g },
   // --- coverage additions (v0.6.0) ---
   // npm access/automation token (the `.npmrc _authToken=npm_…` leak).
-  { id: "npm-token", label: "npm access token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  { id: "npm-token", label: "npm access token", re: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g },
   // Bare JWT (three base64url segments, no "Bearer" prefix needed). To keep
   // false positives near zero we only flag it if the FIRST segment decodes to
   // a JSON object with an `alg` or `typ` field — i.e. a real JWT header.
   {
     id: "jwt",
     label: "JSON Web Token (JWT)",
-    re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+    re: /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9])/g,
     validate: (tok) => {
       try {
         const header = JSON.parse(Buffer.from(tok.split(".")[0], "base64url").toString("utf8"));
@@ -106,7 +110,7 @@ export const SECRET_PATTERNS = [
   {
     id: "db-url-password",
     label: "Database URL with embedded password",
-    re: /\bpostgres(?:ql)?:\/\/[^\s:/@'"]+:([^@\s'"]{8,})@([^\s'"/]+)/g,
+    re: /(?<![A-Za-z0-9])postgres(?:ql)?:\/\/[^\s:/@'"]+:([^@\s'"]{8,})@([^\s'"/]+)/g,
     validate: (pw, m) => {
       if (/[<>{}$%]/.test(pw)) return false;
       if (/^(?:pass(?:word)?|passwd|secret|example|changeme|test|postgres|admin|root|1234(?:5678?9?)?|x{4,}|\*{4,})$/i.test(pw)) return false;
@@ -126,7 +130,7 @@ export const SECRET_PATTERNS = [
   {
     id: "bearer",
     label: "Bearer auth token literal",
-    re: /\bBearer\s+([A-Za-z0-9_\-.]{20,})/g,
+    re: /(?<![A-Za-z0-9])Bearer\s+([A-Za-z0-9_\-.]{20,})/g,
     validate: (tok) => /[a-z]/.test(tok) && /[A-Z]/.test(tok) && /[0-9]/.test(tok),
   },
 ];
