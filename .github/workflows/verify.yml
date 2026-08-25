@@ -22,5 +22,10 @@ jobs:
       - name: Test suite
         run: npm test
 
+      - name: Gate stdout pipe fixtures
+        run: npm test
+        env:
+          TEST_FILTER: "gate stdout F"
+
       - name: Evidence suite
         run: npm run evidence

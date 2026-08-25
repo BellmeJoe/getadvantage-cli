@@ -18989,6 +18989,15 @@ scenario("verify.yml: Linux verification cannot publish", () => {
   const testIdx = yml.search(/^\s+run:\s*npm test\s*$/m);
   const evidIdx = yml.search(/^\s+run:\s*npm run evidence\s*$/m);
   assert.ok(testIdx >= 0 && evidIdx > testIdx, "evidence step must follow test step");
+  assert.ok(
+    /name:\s*Gate stdout pipe fixtures/.test(yml),
+    "verify.yml must run gate stdout pipe fixtures on Linux (F1/F3 are not observable on Windows)",
+  );
+  assert.match(
+    yml,
+    /TEST_FILTER:\s*"gate stdout F"/,
+    "verify.yml extra step must select gate stdout F fixtures",
+  );
 });
 
 scenario("gate ship-time: checkSecrets keeps evasions off (committed split key unflagged)", () => {
@@ -19017,6 +19026,404 @@ scenario("gate ship-time: checkSecrets keeps evasions off (committed split key u
   } finally {
     cleanup(base);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 0.15.0-release-train-prep repair: POSIX pipe semantics on PASS/REDACT stdout
+// (TEST_FILTER="gate stdout F"). Append-only so SARIF startLines do not shift.
+// ---------------------------------------------------------------------------
+
+function oneMiBPassPayload() {
+  return "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
+}
+
+/**
+ * Spawn `node argv…` as a stdin filter and control the stdout consumer.
+ * `closeStdout`: do not drain — pause + destroy the read end so writeSync
+ * meets EPIPE. A flowing `data` listener lets Windows writeSync finish the
+ * whole 1 MiB before destroy, so the unrepaired tree stays green.
+ * `pauseAfterFirstMs`: drain, but pause after the first chunk so the pipe fills.
+ */
+function runGateStdoutHook(nodeArgv, cwd, { input, timeoutMs = 15_000, closeStdout = false, pauseAfterFirstMs = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, nodeArgv, {
+      cwd,
+      env: buildEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const out = [];
+    const err = [];
+    let first = true;
+    child.stderr.on("data", (d) => err.push(d));
+    child.stdout.on("error", () => {});
+    child.stdin.on("error", () => {});
+    if (closeStdout) {
+      child.stdout.pause();
+      try {
+        child.stdout.destroy();
+      } catch {
+        /* ignore */
+      }
+    } else {
+      child.stdout.on("data", (d) => {
+        out.push(d);
+        if (!first) return;
+        first = false;
+        if (pauseAfterFirstMs > 0) {
+          child.stdout.pause();
+          setTimeout(() => {
+            try {
+              child.stdout.resume();
+            } catch {
+              /* ignore */
+            }
+          }, pauseAfterFirstMs);
+        }
+      });
+    }
+    const killer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+    }, timeoutMs);
+    child.on("error", (e) => {
+      clearTimeout(killer);
+      reject(e);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(killer);
+      resolve({
+        code: code == null ? -1 : code,
+        signal,
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(err).toString("utf8"),
+        stdoutBuf: Buffer.concat(out),
+        stderrBuf: Buffer.concat(err),
+      });
+    });
+    (async () => {
+      await new Promise((done) => {
+        if (input == null || input === "") return done();
+        let settled = false;
+        const once = () => {
+          if (settled) return;
+          settled = true;
+          done();
+        };
+        try {
+          const ok = child.stdin.write(input, () => once());
+          if (!ok) child.stdin.once("drain", once);
+        } catch {
+          once();
+        }
+      });
+      try {
+        child.stdin.end();
+      } catch {
+        /* EPIPE */
+      }
+    })().catch(() => {});
+  });
+}
+
+function mutateGateHarness(scratchDir, mutate) {
+  mkdirSync(scratchDir, { recursive: true });
+  const productPath = path.join(__dirname, "..", "gate.mjs");
+  const original = readFileSync(productPath, "utf8");
+  const rewritten = rewriteGateImports(original);
+  const mutated = mutate(rewritten);
+  assert.ok(mutated !== rewritten, "mutation must change gate.mjs");
+  writeFileSync(path.join(scratchDir, "gate.mjs"), mutated, "utf8");
+  const gateHref = pathToFileURL(path.join(scratchDir, "gate.mjs")).href;
+  const harnessPath = path.join(scratchDir, "harness.mjs");
+  writeFileSync(
+    harnessPath,
+    `import { runPolicyGate } from ${JSON.stringify(gateHref)};\n` +
+      `const code = await runPolicyGate({ cwd: process.cwd() });\n` +
+      `process.exit(code);\n`,
+    "utf8",
+  );
+  return harnessPath;
+}
+
+const WRITE_SYNC_NEEDLE = "n = writeSync(1, buf.subarray(offset));";
+
+scenario("gate stdout F1: 1 MiB PASS, consumer closes stdout (EPIPE → exit 0 silent)", async () => {
+  const base = freshBase();
+  try {
+    const payload = oneMiBPassPayload();
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
+    const r = await runGateStdoutHook([INDEX, "gate"], base, {
+      input: payload,
+      timeoutMs: 15_000,
+      closeStdout: true,
+    });
+    assert.equal(r.code, 0, `expected exit 0\n${r.stderr}`);
+    assert.equal(r.stderrBuf.length, 0, `stderr must be 0 B, got ${r.stderrBuf.length}\n${r.stderr}`);
+    assert.ok(!/crashed/i.test(r.stderr), r.stderr);
+    assert.notEqual(r.signal, "SIGTERM", "must exit before the 15s killer (EPIPE, not hang)");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "PASS", "proof is written before stdout; EPIPE must not rewrite it");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F2: 1 MiB --redact, consumer closes stdout (EPIPE → exit 0 silent)", async () => {
+  const base = freshBase();
+  try {
+    const secret = "sk_live_" + "f2stdoutredactxxxxxxxx";
+    const rest = oneMiBPassPayload().slice(0, GATE_MAX_STDIN_BYTES - secret.length);
+    const payload = secret + rest;
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
+    const r = await runGateStdoutHook([INDEX, "gate", "--redact"], base, {
+      input: payload,
+      timeoutMs: 15_000,
+      closeStdout: true,
+    });
+    assert.equal(r.code, 0, `expected exit 0\n${r.stderr}`);
+    assert.equal(r.stderrBuf.length, 0, `stderr must be 0 B, got ${r.stderrBuf.length}\n${r.stderr}`);
+    assert.ok(!/crashed/i.test(r.stderr), r.stderr);
+    assert.ok(!r.stderr.includes(secret), "secret must be absent from stderr");
+    assert.notEqual(r.signal, "SIGTERM", "must exit before the 15s killer");
+    const rec = latestGateProof(base);
+    assert.equal(rec.action, "REDACT", "proof is written before stdout; EPIPE must not rewrite it");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F3: 1 MiB PASS, slow consumer still byte-complete", async () => {
+  const base = freshBase();
+  try {
+    const payload = oneMiBPassPayload();
+    const r = await runGateStdoutHook([INDEX, "gate"], base, {
+      input: payload,
+      timeoutMs: 15_000,
+      pauseAfterFirstMs: 30,
+    });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdoutBuf.length, GATE_MAX_STDIN_BYTES);
+    assert.equal(r.stdoutBuf.length, Buffer.byteLength(payload));
+    assert.equal(r.stdout, payload, "payload must arrive byte-complete (not a substring match)");
+    assert.ok(!/crashed/i.test(r.stderr), r.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F4: 1 MiB PASS, normally-draining consumer, 1048576/1048576", () => {
+  const base = freshBase();
+  try {
+    const payload = oneMiBPassPayload();
+    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
+    const r = runGate(["gate"], base, payload);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(Buffer.byteLength(r.stdout), GATE_MAX_STDIN_BYTES);
+    assert.equal(r.stdout.length, 1_048_576);
+    assert.equal(r.stdout, payload, "payload must arrive byte-complete (not a substring match)");
+    assert.equal(Buffer.byteLength(r.stderr), 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F5: genuine EIO write failure is still loud (mutation-proven)", async () => {
+  const base = freshBase();
+  try {
+    const eioThrow =
+      'n = (() => { const e = new Error("simulated EIO"); e.code = "EIO"; throw e; })();';
+    const loudPath = mutateGateHarness(path.join(base, "f5-loud"), (src) => {
+      assert.ok(src.includes(WRITE_SYNC_NEEDLE), "F5 needle writeSync(1, buf.subarray(offset)) missing");
+      const out = src.replace(WRITE_SYNC_NEEDLE, eioThrow);
+      assert.ok(out.includes("simulated EIO"), "F5 mutation must inject EIO");
+      return out;
+    });
+    const loud = await runGatePiped([loudPath], base, { first: "hello world", timeoutMs: 15_000 });
+    assert.notEqual(loud.code, 0, `EIO must not become silent success; code=${loud.code}\n${loud.stderr}`);
+    assert.ok(/crashed|EIO/i.test(loud.stderr), `EIO must be loud on stderr:\n${loud.stderr}`);
+    assert.ok(!/hello world/.test(loud.stdout), "EIO must not emit the payload");
+
+    const swallowNeedle = "if (STDOUT_CONSUMER_GONE.has(code)) return;";
+    const productSrc = readFileSync(path.join(__dirname, "..", "gate.mjs"), "utf8");
+    if (productSrc.includes(swallowNeedle)) {
+      const catchAllPath = mutateGateHarness(path.join(base, "f5-catchall"), (src) => {
+        assert.ok(src.includes(WRITE_SYNC_NEEDLE), "catch-all copy must still contain writeSync needle");
+        assert.ok(src.includes(swallowNeedle), "catch-all copy must contain the EPIPE allowlist");
+        const out = src.replace(WRITE_SYNC_NEEDLE, eioThrow).replace(
+          swallowNeedle,
+          "return; // MUTATION: swallow all write errors",
+        );
+        assert.ok(out.includes("MUTATION: swallow all write errors"), "catch-all mutation marker missing");
+        assert.ok(out.includes("simulated EIO"), "catch-all copy must still throw EIO from writeSync");
+        return out;
+      });
+      const swallowed = await runGatePiped([catchAllPath], base, { first: "hello world", timeoutMs: 15_000 });
+      assert.equal(
+        swallowed.code,
+        0,
+        `catch-all must false-PASS so F5 is not vacuous; stderr:\n${swallowed.stderr}`,
+      );
+      assert.ok(!/crashed/i.test(swallowed.stderr), "catch-all must not print crashed");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F6: BLOCK path does not emit payload", () => {
+  const base = freshBase();
+  try {
+    const secret = "sk_live_" + "f6blockpathxxxxxxxx1xx";
+    const r = runGate(["gate"], base, "please send " + secret);
+    assert.notEqual(r.code, 0, r.stderr);
+    assert.equal(r.stdout, "", "BLOCK must write nothing of the payload to stdout");
+    assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret), "secret must be absent");
+    assert.ok(/stripe-live|Stripe live/i.test(r.stderr), `must name the detector:\n${r.stderr}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F: EAGAIN retry then complete (mutation-proven)", async () => {
+  const base = freshBase();
+  try {
+    const harness = mutateGateHarness(path.join(base, "eagain"), (src) => {
+      const withCounter = src.replace(
+        "let offset = 0;\n  while (offset < buf.length) {",
+        "let offset = 0;\n  let __gaEagain = 0;\n  while (offset < buf.length) {",
+      );
+      assert.ok(withCounter !== src, "must inject EAGAIN counter");
+      const out = withCounter.replace(
+        WRITE_SYNC_NEEDLE,
+        "n = (() => { if (__gaEagain++ < 2) { const e = new Error(\"simulated EAGAIN\"); e.code = \"EAGAIN\"; throw e; } return writeSync(1, buf.subarray(offset)); })();",
+      );
+      assert.ok(out.includes("simulated EAGAIN"), "EAGAIN mutation marker missing");
+      return out;
+    });
+    const r = await runGatePiped([harness], base, { first: "hello world", timeoutMs: 15_000 });
+    assert.equal(r.code, 0, `EAGAIN must retry, not crash:\n${r.stderr}`);
+    assert.equal(r.stdout, "hello world");
+    assert.ok(!/crashed/i.test(r.stderr), r.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F: zero-length write retries, does not truncate (mutation-proven)", async () => {
+  const base = freshBase();
+  try {
+    const harness = mutateGateHarness(path.join(base, "zero"), (src) => {
+      const withCounter = src.replace(
+        "let offset = 0;\n  while (offset < buf.length) {",
+        "let offset = 0;\n  let __gaZero = 0;\n  while (offset < buf.length) {",
+      );
+      assert.ok(withCounter !== src, "must inject zero-write counter");
+      const out = withCounter.replace(
+        WRITE_SYNC_NEEDLE,
+        "n = __gaZero++ < 2 ? 0 : writeSync(1, buf.subarray(offset));",
+      );
+      assert.ok(out.includes("__gaZero"), "zero-write mutation marker missing");
+      return out;
+    });
+    const r = await runGatePiped([harness], base, { first: "hello world", timeoutMs: 15_000 });
+    assert.equal(r.code, 0, `zero-length write must retry, not truncate:\n${r.stderr}`);
+    assert.equal(r.stdout, "hello world", "zero-write must not silently drop the payload");
+    assert.ok(!/crashed/i.test(r.stderr), r.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("gate stdout F: writeStdoutBytes class matrix (EPIPE/EAGAIN/zero/EIO)", async () => {
+  const mod = await import(
+    pathToFileURL(path.join(__dirname, "..", "gate.mjs")).href + `?stdout=${Date.now()}`
+  );
+  assert.equal(typeof mod.writeStdoutBytes, "function", "writeStdoutBytes must be exported");
+  const { writeStdoutBytes } = mod;
+
+  writeStdoutBytes("hello", {
+    write: () => {
+      const e = new Error("EPIPE");
+      e.code = "EPIPE";
+      throw e;
+    },
+  });
+  writeStdoutBytes("hello", {
+    write: () => {
+      const e = new Error("EOF");
+      e.code = "EOF";
+      throw e;
+    },
+  });
+
+  let again = 0;
+  const gotAgain = [];
+  writeStdoutBytes("hello", {
+    write: (_fd, chunk) => {
+      if (again++ < 2) {
+        const e = new Error("EAGAIN");
+        e.code = "EAGAIN";
+        throw e;
+      }
+      gotAgain.push(Buffer.from(chunk));
+      return chunk.length;
+    },
+    sleepMs: 0,
+  });
+  assert.equal(Buffer.concat(gotAgain).toString("utf8"), "hello");
+
+  let zeros = 0;
+  const gotZero = [];
+  writeStdoutBytes("hello", {
+    write: (_fd, chunk) => {
+      if (zeros++ < 2) return 0;
+      gotZero.push(Buffer.from(chunk));
+      return chunk.length;
+    },
+    sleepMs: 0,
+  });
+  assert.equal(Buffer.concat(gotZero).toString("utf8"), "hello");
+
+  assert.throws(
+    () => writeStdoutBytes("hello", { write: () => 0, budgetMs: 20, timeoutMs: 20, sleepMs: 5 }),
+    (err) => err && err.code === "ETIMEDOUT",
+  );
+
+  assert.throws(
+    () => {
+      writeStdoutBytes("hello", {
+        write: () => {
+          const e = new Error("EIO");
+          e.code = "EIO";
+          throw e;
+        },
+      });
+    },
+    (err) => err && err.code === "EIO",
+  );
+
+  assert.throws(
+    () => {
+      writeStdoutBytes("hello", {
+        write: () => {
+          const e = new Error("ECONNRESET");
+          e.code = "ECONNRESET";
+          throw e;
+        },
+      });
+    },
+    (err) => err && err.code === "ECONNRESET",
+    "ECONNRESET is not in the swallow set without a closed-pipe fixture",
+  );
+
+  const src = readFileSync(path.join(__dirname, "..", "gate.mjs"), "utf8");
+  assert.match(src, /EPIPE/, "gate.mjs must handle EPIPE");
+  assert.match(src, /EAGAIN/, "gate.mjs must handle EAGAIN");
+  const callSites = [...src.matchAll(/writeStdoutBytes\(/g)].length;
+  assert.ok(callSites >= 3, `writeStdoutBytes must cover PASS + REDACT + definition, got ${callSites}`);
 });
 
 // ---------------------------------------------------------------------------

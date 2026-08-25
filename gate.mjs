@@ -29,6 +29,13 @@ export const GATE_STDIN_TIMEOUT_MS = 120_000;
 export const GATE_STDIN_IDLE_MS = 30_000;
 export const GATE_PROOF_DIR = "gate-proofs";
 
+// Stdout hang guards for writeStdoutBytes. Stall resets when a write
+// progresses (n > 0). Wall bounds a 1-byte-per-idle-window dribble.
+// Explicit and finite — never spin unbounded on a non-blocking pipe.
+export const STDOUT_WRITE_RETRY_BUDGET_MS = 30_000;
+export const STDOUT_WRITE_TIMEOUT_MS = 120_000;
+export const STDOUT_WRITE_RETRY_SLEEP_MS = 5;
+
 const AUTH_PREFIX_LEN = 8;
 
 // ---------------------------------------------------------------------------
@@ -764,14 +771,74 @@ export async function runPolicyGate(opts = {}) {
   return 0;
 }
 
-/** Blocking stdout write so PASS/REDACT survive process.exit. */
-function writeStdoutBytes(data) {
+const STDOUT_CONSUMER_GONE = new Set(["EPIPE", "EOF"]);
+const STDOUT_RETRY = new Set(["EAGAIN", "EWOULDBLOCK", "EINTR"]);
+
+function sleepSync(ms) {
+  if (!(ms > 0)) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Blocking stdout write so PASS/REDACT survive process.exit.
+ *
+ * Closed pipe (EPIPE, and Windows libuv EOF): Unix-filter convention —
+ * return silently so the caller still exits 0. Nothing on stderr.
+ * EAGAIN / EWOULDBLOCK / EINTR / a zero-length write: bounded retry
+ * (stall budget resets on progress; wall clock bounds the whole write).
+ * Exhaustion and any other write error (EIO, EBADF, ENOSPC, …) throw.
+ *
+ * `opts.write` is a test seam for the retry matrix. Production call
+ * sites pass one argument and hit writeSync(1, …).
+ */
+export function writeStdoutBytes(data, opts = {}) {
   if (data == null) return;
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+  if (buf.length === 0) return;
+  const stallMs = Number.isFinite(opts.budgetMs) ? opts.budgetMs : STDOUT_WRITE_RETRY_BUDGET_MS;
+  const wallMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : STDOUT_WRITE_TIMEOUT_MS;
+  const sleepMs = Number.isFinite(opts.sleepMs) ? opts.sleepMs : STDOUT_WRITE_RETRY_SLEEP_MS;
+  const sleep = typeof opts.sleep === "function" ? opts.sleep : sleepSync;
+  const started = Date.now();
+  let stallStarted = started;
   let offset = 0;
   while (offset < buf.length) {
-    const n = writeSync(1, buf.subarray(offset));
-    if (!n) break;
-    offset += n;
+    let n;
+    try {
+      if (typeof opts.write === "function") {
+        n = opts.write(1, buf.subarray(offset));
+      } else {
+        n = writeSync(1, buf.subarray(offset));
+      }
+    } catch (err) {
+      const code = err && err.code;
+      if (STDOUT_CONSUMER_GONE.has(code)) return;
+      if (STDOUT_RETRY.has(code)) {
+        if (Date.now() - started >= wallMs || Date.now() - stallStarted >= stallMs) {
+          const exhausted = new Error(
+            `stdout write ${code} until retry budget exhausted; wrote ${offset}/${buf.length} bytes`,
+          );
+          exhausted.code = "ETIMEDOUT";
+          throw exhausted;
+        }
+        sleep(sleepMs);
+        continue;
+      }
+      throw err;
+    }
+    if (n > 0) {
+      offset += n;
+      stallStarted = Date.now();
+      continue;
+    }
+    // n === 0 (or non-positive): do not silently truncate.
+    if (Date.now() - started >= wallMs || Date.now() - stallStarted >= stallMs) {
+      const exhausted = new Error(
+        `stdout write returned 0 until retry budget exhausted; wrote ${offset}/${buf.length} bytes`,
+      );
+      exhausted.code = "ETIMEDOUT";
+      throw exhausted;
+    }
+    sleep(sleepMs);
   }
 }
