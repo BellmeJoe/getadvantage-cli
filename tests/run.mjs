@@ -199,29 +199,15 @@
 //                                     in packed contents (publish.yml regex);
 //                                     F3 cold --version + clean check GO;
 //                                     mutation: re-add tests/ fails F1/F2
-//  61. Policy gate (`getadvantage gate`) — outbound stdin filter MVP
-//                                     (TEST_FILTER=gate). A1–A7 acceptance,
-//                                     H1–H9 hostile fixtures mutation-proven,
-//                                     PII + denylist, hit-count + ship-time pins.
-//                                     Fail-closed stdin bounds (idle / over-cap,
-//                                     mutation-proven) + exact-cap end is not
-//                                     truncation.
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
-import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { checkSupabaseRls } from "../checks.mjs";
-import {
-  GATE_MAX_STDIN_BYTES,
-  GATE_STDIN_IDLE_MS,
-  GATE_STDIN_TIMEOUT_MS,
-  readStdinBounded,
-} from "../gate.mjs";
 
 /** Same as util.mjs secretAuthId — local so scenarios never import production modules. */
 function hashOf(match) {
@@ -260,161 +246,6 @@ function buildEnv(extra) {
     env[k] = v;
   }
   return Object.assign(env, extra || {});
-}
-
-/** Spawn `getadvantage gate` with stdin `input` (never shell echo — PowerShell
- *  echo is not POSIX). Does not change the `run()` harness used by `check`. */
-function runGate(args, cwd, input) {
-  const r = spawnSync(process.execPath, [INDEX, ...args], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 15_000,
-    env: buildEnv(),
-    input,
-  });
-  if (r.error) throw r.error;
-  return { code: r.status ?? -1, stdout: r.stdout || "", stderr: r.stderr || "" };
-}
-
-function listGateProofs(cwd) {
-  const dir = path.join(cwd, ".getadvantage", "gate-proofs");
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => path.join(dir, f));
-}
-
-function latestGateProof(cwd) {
-  const files = listGateProofs(cwd);
-  assert.ok(files.length >= 1, `expected a gate proof under ${cwd}`);
-  files.sort();
-  return JSON.parse(readFileSync(files[files.length - 1], "utf8"));
-}
-
-function assertProofHasNoSecretMaterial(rec, secret) {
-  const blob = JSON.stringify(rec);
-  assert.ok(!("text" in rec), "proof must not carry text");
-  assert.ok(!("term" in rec), "proof must not carry term");
-  assert.ok(!("redacted" in rec), "proof must not carry redacted");
-  if (secret) {
-    assert.ok(!blob.includes(secret), `proof must not contain raw secret`);
-  }
-  for (const h of rec.hits || []) {
-    assert.ok(!("raw" in h), "proof hits must never carry raw");
-    assert.ok(!("text" in h), "proof hits must never carry text");
-    assert.ok(!("term" in h), "proof hits must never carry term");
-    assert.ok(!("redacted" in h), "proof hits must never carry redacted");
-  }
-}
-
-/**
- * Spawn `node argv…` with a piped stdin. Ignores EPIPE (child may destroy
- * stdin on overflow / fail-closed). `second` is written after `pauseMs`.
- * Never uses spawnSync — over-cap input can SIGPIPE the parent write.
- */
-function runGatePiped(nodeArgv, cwd, { first, second = null, pauseMs = 0, timeoutMs, neverEnd = false } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, nodeArgv, {
-      cwd,
-      env: buildEnv(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const out = [];
-    const err = [];
-    child.stdout.on("data", (d) => out.push(d));
-    child.stderr.on("data", (d) => err.push(d));
-    child.stdin.on("error", () => {});
-    const killer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* ignore */
-      }
-    }, timeoutMs);
-    child.on("error", (e) => {
-      clearTimeout(killer);
-      reject(e);
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(killer);
-      resolve({
-        code: code == null ? -1 : code,
-        signal,
-        stdout: Buffer.concat(out).toString("utf8"),
-        stderr: Buffer.concat(err).toString("utf8"),
-        stdoutBuf: Buffer.concat(out),
-      });
-    });
-    const writeChunk = (data) =>
-      new Promise((done) => {
-        if (data == null || data === "") return done();
-        let settled = false;
-        const once = () => {
-          if (settled) return;
-          settled = true;
-          done();
-        };
-        try {
-          const ok = child.stdin.write(data, () => once());
-          if (!ok) child.stdin.once("drain", once);
-        } catch {
-          once();
-        }
-      });
-    (async () => {
-      await writeChunk(first);
-      if (neverEnd) return;
-      if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
-      await writeChunk(second);
-      try {
-        child.stdin.end();
-      } catch {
-        /* EPIPE */
-      }
-    })().catch(() => {});
-  });
-}
-
-function writeTruncationMutatedHarness(scratchDir) {
-  mkdirSync(scratchDir, { recursive: true });
-  const productPath = path.join(__dirname, "..", "gate.mjs");
-  const original = readFileSync(productPath, "utf8");
-  const rewritten = rewriteGateImports(original);
-  const needle = "const truncated = why !== \"end\";";
-  const neutered = rewritten.replace(
-    needle,
-    "const truncated = false; // MUTATION: ignore truncation",
-  );
-  assert.ok(neutered !== rewritten, "mutation must force truncated = false");
-  assert.ok(neutered.includes("MUTATION"), "mutation marker missing");
-  writeFileSync(path.join(scratchDir, "gate.mjs"), neutered, "utf8");
-  const gateHref = pathToFileURL(path.join(scratchDir, "gate.mjs")).href;
-  const harnessPath = path.join(scratchDir, "harness.mjs");
-  writeFileSync(
-    harnessPath,
-    `import { runPolicyGate } from ${JSON.stringify(gateHref)};\n` +
-      `const code = await runPolicyGate({ cwd: process.cwd() });\n` +
-      `process.exit(code);\n`,
-    "utf8",
-  );
-  return harnessPath;
-}
-
-function rewriteScanImports(src) {
-  const utilHref = pathToFileURL(path.join(__dirname, "..", "util.mjs")).href;
-  const policyHref = pathToFileURL(path.join(__dirname, "..", "policy.mjs")).href;
-  return src
-    .replaceAll('from "./util.mjs"', `from ${JSON.stringify(utilHref)}`)
-    .replaceAll('from "./policy.mjs"', `from ${JSON.stringify(policyHref)}`);
-}
-
-function rewriteGateImports(src) {
-  const utilHref = pathToFileURL(path.join(__dirname, "..", "util.mjs")).href;
-  const scanHref = pathToFileURL(path.join(__dirname, "..", "scan.mjs")).href;
-  return src
-    .replaceAll('from "./util.mjs"', `from ${JSON.stringify(utilHref)}`)
-    .replaceAll('from "./scan.mjs"', `from ${JSON.stringify(scanHref)}`);
 }
 
 /** Spawn the real CLI in a repo; capture code + both streams (never throws). */
@@ -7371,7 +7202,7 @@ scenario("packed package: includes action.yml + action/ files; cold workflow + a
     });
     assert.equal(ver.status, 0, `F3 --version:\n${ver.stderr}\n${ver.stdout}`);
     assert.equal((ver.stdout || "").trim(), pkg.version, "F3 --version must print packed package.json version");
-    assert.equal(pkg.version, "0.14.1");
+    assert.equal(pkg.version, "0.14.2");
 
     const f3clean = path.join(base, "f3-clean");
     initRepo(f3clean);
@@ -15714,6 +15545,10 @@ scenario("feedback: first screen ≤12 lines, exit 0 after NO-GO, stderr 0", () 
  * via PRINT_PINS=1 / measureRegressionPins:
  *   SARIF prefix 222e78abc645a707 · JSON excl. generatedAt prefix 774fe2e0a845b88e
  *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
+ * After 0.14.2 package.json bump (same cause — SARIF embeds tool.driver.version);
+ * remeasured via PRINT_PINS=1 / measureRegressionPins:
+ *   SARIF prefix fa92a440ab2fa250 · JSON excl. generatedAt prefix 774fe2e0a845b88e
+ *   shape 56 / verdict 53 / 5 file:line / 0 B stderr / exit 1 (unchanged)
  */
 function measureRegressionPins(productRoot = path.join(__dirname, "..")) {
   const base = freshBase();
@@ -15806,25 +15641,17 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // 0 B stderr) are unchanged. Content hashes moved because this lane
   // appended §60 packed-tarball-hygiene scenarios, shifting hostile-fixture
   // startLines in tests/run.mjs. Remeasured via PRINT_PINS=1 / measureRegressionPins:
-  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec → c1a719fa61cd57de → 222e78abc645a707 (SARIF)
+  //   e78018570a23be1c → ea2c9fa4ac953b6e → 65cd3729e2a746ec → c1a719fa61cd57de → 222e78abc645a707 → fa92a440ab2fa250 (SARIF)
   //   3c22b593be52c28d → 8f3298b40a681903 → 9d99c38fe87d2b8e → 774fe2e0a845b88e (JSON excl. generatedAt)
   // Pin moves with package.json version (SARIF embeds tool.driver.version).
-  // Re-measured on the 0.14.1 release commit: 222e78abc645a707… (was c1a719fa61cd57de at 0.14.0).
-  // After §61 policy-gate helpers/scenarios (startLines shifted); remeasured
-  // via PRINT_PINS=1 / measureRegressionPins:
-  //   222e78abc645a707 → 490479735d4e4ae3 (SARIF)
-  //   774fe2e0a845b88e → 6b48ca7405be78b1 (JSON excl. generatedAt)
-  // After 0.15.x fail-closed truncation scenarios (startLines + two new
-  // sk_live_ fixtures in tests/run.mjs); remeasured via PRINT_PINS=1:
-  //   490479735d4e4ae3 → 8a401a85a29f9188 (SARIF)
-  //   6b48ca7405be78b1 → e20342b55a90650b (JSON excl. generatedAt)
+  // Re-measured on the 0.14.2 release commit: fa92a440ab2fa250… (was 222e78abc645a707 at 0.14.1).
   assert.ok(
-    pins.sarifHash.startsWith("8a401a85a29f9188"),
+    pins.sarifHash.startsWith("fa92a440ab2fa250"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("e20342b55a90650b"),
+    pins.jsonHash.startsWith("774fe2e0a845b88e"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17519,11 +17346,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("8a401a85a29f9188"),
+    pins.sarifHash.startsWith("fa92a440ab2fa250"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("e20342b55a90650b"),
+    pins.jsonHash.startsWith("774fe2e0a845b88e"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -17947,805 +17774,183 @@ scenario("arrival: S3 reflected fetch error redacts Bearer token", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 61. Policy gate — request-time outbound stdin filter (TEST_FILTER=gate)
+// 61. Secret-anchor repair — `_` is a separator (TEST_FILTER=secret-anchor)
+//     F1, F2, F4 fail on unrepaired `\b` anchors in checks.mjs; F5–F6 must
+//     still pass (hyphen and alnum-adjacency are unchanged vs `\b`).
+//     F3 is redesigned onto feedback.mjs `redactSecrets` because `gate.mjs`
+//     and `index.mjs --redact` are absent at f098c5e / 0.14.1.
 // ---------------------------------------------------------------------------
 
-scenario("gate A1: hello world pass-through byte-identical", () => {
+function secretAnchorPkg(name) {
+  return JSON.stringify({ name, version: "1.0.0", private: true }, null, 2) + "\n";
+}
+
+scenario("secret-anchor F1: committed PREFIX_sk_live_<20+ alnum> is NO-GO and names file:line", () => {
   const base = freshBase();
   try {
-    const input = "hello world";
-    const r = runGate(["gate"], base, input);
-    assert.equal(r.code, 0, `expected exit 0\n${r.stderr}`);
-    assert.equal(r.stdout, input, "stdout must be byte-identical to stdin");
-    assert.ok(!/getAdvantage — check|┌──/.test(r.stdout), "no header on pass-through");
-    assert.ok(!/fatal:|ENOENT/i.test(r.stdout + r.stderr), r.stderr);
-    const proofs = listGateProofs(base);
-    assert.ok(proofs.length >= 1, "empty-of-hits still writes a proof record");
-    const rec = latestGateProof(base);
-    assert.equal(rec.action, "PASS");
-    assert.equal(rec.truncated, false, "clean end must not be marked truncated");
-    assertProofHasNoSecretMaterial(rec);
-  } finally {
-    cleanup(base);
-  }
-});
+    const repo = path.join(base, "f1");
+    initRepo(repo);
+    const key = "sk_live_" + "F1prefixadjsecretxxxxxxxx";
+    const prefixed = "PREFIX_" + key;
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f1"));
+    write(repo, "keys.js", `// config\nexport const KEY = "${prefixed}";\n`);
+    commitAll(repo, "chore: underscore-prefixed stripe live key");
 
-scenario("gate A2: stripe-live BLOCK, payload withheld", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "a1b2c3d4e5f6g7h8i9j0klmn";
-    const r = runGate(["gate"], base, secret);
-    assert.notEqual(r.code, 0, `expected non-zero\n${r.stderr}`);
-    assert.equal(r.stdout, "", "BLOCK must write nothing of the payload to stdout");
-    assert.ok(!r.stdout.includes(secret), "secret must be absent from stdout");
-    assert.ok(!r.stderr.includes(secret), "secret must be absent from stderr");
-    assert.ok(/stripe-live|Stripe live/i.test(r.stderr), `must name the detector:\n${r.stderr}`);
-    assert.ok(/remedy|remove|redact/i.test(r.stderr), `must name a remedy:\n${r.stderr}`);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate A3: --redact masks secret, map unpublished", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "r3d4c5t6m7a8s9k0l1m2n3op";
-    const payload = `before ${secret} after`;
-    const r = runGate(["gate", "--redact"], base, payload);
-    assert.equal(r.code, 0, `expected exit 0\n${r.stderr}`);
-    assert.ok(!r.stdout.includes(secret), "secret must be absent from stdout");
-    assert.ok(!r.stderr.includes(secret), "secret must be absent from stderr");
-    assert.ok(/\[REDACTED:stripe-live:[0-9a-f]{4,}\]/.test(r.stdout), `expected mask:\n${r.stdout}`);
-    assert.ok(r.stdout.startsWith("before ") && r.stdout.endsWith(" after"), r.stdout);
-    assert.ok(
-      !/redaction map|mask→|mask->|authId.*sk_live_/i.test(r.stdout + r.stderr),
-      "redaction map must never be printed",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate A4: --json machine doc on stdout", () => {
-  const base = freshBase();
-  try {
-    const r = runGate(["gate", "--json"], base, "hello world");
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(!/[\u001b\u009b]/.test(r.stdout), "no ANSI on stdout");
-    assert.ok(!r.stdout.includes("hello world"), "payload must not appear on --json stdout");
-    const doc = JSON.parse(r.stdout);
-    assert.equal(doc.command, "gate");
-    assert.equal(doc.verdict, "PASS");
-    assert.equal(doc.exitCode, 0);
-    assert.equal(doc.truncated, false);
-    assert.equal(doc.bytes, Buffer.byteLength("hello world"));
-    assert.match(doc.sha256, /^[0-9a-f]{64}$/);
-    assert.ok(Array.isArray(doc.hits));
-    for (const h of doc.hits) {
-      assert.ok(!("raw" in h), "json hits must never carry raw");
-    }
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate A5: two runs produce two proof records; no raw secret", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "p1r2o3o4f5r6e7c8o9r0d1xx";
-    const r1 = runGate(["gate"], base, secret);
-    const r2 = runGate(["gate"], base, secret);
-    assert.notEqual(r1.code, 0);
-    assert.notEqual(r2.code, 0);
-    const proofs = listGateProofs(base);
-    assert.ok(proofs.length >= 2, `expected two proof files, got ${proofs.length}`);
-    for (const abs of proofs) {
-      const rec = JSON.parse(readFileSync(abs, "utf8"));
-      const blob = JSON.stringify(rec);
-      assert.ok(!blob.includes(secret), `proof must not contain raw secret: ${abs}`);
-      assert.equal(rec.command, "gate");
-      assert.equal(rec.action, "BLOCK");
-      assert.match(rec.sha256, /^[0-9a-f]{64}$/);
-      for (const h of rec.hits || []) {
-        assert.ok(!("raw" in h), "proof hits must never carry raw");
-      }
-    }
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate A6: non-git folder, no fatal/ENOENT noise", () => {
-  const base = freshBase();
-  try {
-    assert.ok(!existsSync(path.join(base, ".git")), "fixture must be non-git");
-    const r = runGate(["gate"], base, "hello world");
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(r.stdout, "hello world");
-    assert.ok(!/fatal:|ENOENT/i.test(r.stdout + r.stderr), r.stderr);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate A7: 1MB payload completes under 2s", () => {
-  const base = freshBase();
-  try {
-    const payload = "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
-    const t0 = Date.now();
-    const r = runGate(["gate"], base, payload);
-    const elapsed = Date.now() - t0;
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(r.stdout.length, payload.length);
-    assert.ok(elapsed < 2000, `1MB payload took ${elapsed}ms`);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate unknown flag: named flag, exit 1", () => {
-  const base = freshBase();
-  try {
-    const r = runGate(["gate", "--bogus-flag"], base, "hello world");
-    assert.equal(r.code, 1);
-    assert.ok(/Unknown flag: --bogus-flag/.test(r.stderr), r.stderr);
-    assert.ok(!r.stdout.includes("hello world"), "must not pass payload through on unknown flag");
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H1: newline-split secret (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "n1e2w3l4i5n6e7s8p9l0itxx";
-    const split = secret.slice(0, 12) + "\n" + secret.slice(12);
-
-    const productPath = path.join(__dirname, "..", "scan.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h1");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteScanImports(original).replace(
-      "export const GATE_EVASION_NEWLINE_FOLD = true;",
-      "export const GATE_EVASION_NEWLINE_FOLD = false;",
-    );
-    assert.ok(neutered !== rewriteScanImports(original), "mutation must flip newline-fold");
-    writeFileSync(path.join(scratchDir, "scan.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "scan.mjs")).href + `?h1=${Date.now()}`);
-    const missed = mut.scanText(split, { evasions: true }).filter((h) => !h.allowed);
-    assert.equal(missed.length, 0, "neutered newline-fold must miss the split secret");
-
-    const r = runGate(["gate"], base, split);
-    assert.notEqual(r.code, 0, `real CLI must CATCH the split secret\n${r.stderr}`);
-    assert.equal(r.stdout, "");
-    assert.ok(/stripe-live|Stripe live/i.test(r.stderr), r.stderr);
-    assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret));
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H2: unicode-smuggled secret (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const body = "u1n2i3c4o5d6e7s8m9u0g1le";
-    const secret = "sk_live_" + body;
-    const smuggled = "sk_live_\u200B" + body.replace("o", "\u043e") + "\u200F";
-
-    const productPath = path.join(__dirname, "..", "scan.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h2");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteScanImports(original).replace(
-      "export const GATE_EVASION_UNICODE = true;",
-      "export const GATE_EVASION_UNICODE = false;",
-    );
-    assert.ok(neutered !== rewriteScanImports(original), "mutation must flip unicode evasion");
-    writeFileSync(path.join(scratchDir, "scan.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "scan.mjs")).href + `?h2=${Date.now()}`);
-    const missed = mut.scanText(smuggled, { evasions: true }).filter((h) => !h.allowed);
-    assert.equal(missed.length, 0, "neutered unicode view must miss the smuggled secret");
-
-    const r = runGate(["gate"], base, smuggled);
-    assert.notEqual(r.code, 0, `real CLI must CATCH the unicode-smuggled secret\n${r.stderr}`);
-    assert.equal(r.stdout, "");
-    assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret));
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H3: base64-blob secret (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "b64b64b64b64b64b64xx01";
-    const b64 = Buffer.from(secret, "utf8").toString("base64");
-    const payload = `please use ${b64} thanks`;
-
-    const productPath = path.join(__dirname, "..", "scan.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h3");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteScanImports(original).replace(
-      "export const GATE_EVASION_BASE64 = true;",
-      "export const GATE_EVASION_BASE64 = false;",
-    );
-    assert.ok(neutered !== rewriteScanImports(original), "mutation must flip base64 evasion");
-    writeFileSync(path.join(scratchDir, "scan.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "scan.mjs")).href + `?h3=${Date.now()}`);
-    const missed = mut.scanText(payload, { evasions: true }).filter((h) => !h.allowed);
-    assert.equal(missed.length, 0, "neutered base64 view must miss the blob secret");
-
-    const r = runGate(["gate"], base, payload);
-    assert.notEqual(r.code, 0, `real CLI must CATCH the base64-blob secret\n${r.stderr}`);
-    assert.equal(r.stdout, "");
-    assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret));
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H4: PEM full + truncated; incomplete not hash-authorizable (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const pemHdr = "-----BEGIN " + "RSA PRIVATE KEY-----";
-    const pemFtr = "-----END " + "RSA PRIVATE KEY-----";
-    const full =
-      pemHdr +
-      "\n" +
-      "MIIEowIBAAKCAQEA7777777777777777777777777777777777777777777777777\n" +
-      "AAAAFULLPEMTESTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n" +
-      pemFtr;
-    const trunc = pemHdr + "\nMIIEowIBAAKCAQEA6666666666666666666666666666\n";
-    assert.ok(!trunc.includes("END "), "truncated fixture must lack END footer");
-
-    const productPath = path.join(__dirname, "..", "scan.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h4");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteScanImports(original).replace(
-      "return !complete.test(fromHere);",
-      "return false; // MUTATION: never fire incomplete PEM",
-    );
-    assert.ok(neutered.includes("MUTATION"), "mutation must neuter incomplete PEM");
-    writeFileSync(path.join(scratchDir, "scan.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "scan.mjs")).href + `?h4=${Date.now()}`);
-    const missed = mut.scanText(trunc, { evasions: false }).filter((h) => !h.allowed);
-    assert.equal(missed.length, 0, "neutered incomplete detector must miss truncated PEM");
-
-    const rFull = runGate(["gate"], base, full);
-    assert.notEqual(rFull.code, 0, `real CLI must CATCH full PEM\n${rFull.stderr}`);
-    assert.equal(rFull.stdout, "");
-    const rTrunc = runGate(["gate"], base, trunc);
-    assert.notEqual(rTrunc.code, 0, `real CLI must CATCH truncated PEM\n${rTrunc.stderr}`);
-    assert.equal(rTrunc.stdout, "");
-    assert.ok(/private-key/i.test(rTrunc.stderr), rTrunc.stderr);
-
-    const { scanText } = await import(
-      pathToFileURL(path.join(__dirname, "..", "scan.mjs")).href + `?h4p=${Date.now()}`
-    );
-    const policy = {
-      version: 1,
-      trusted: true,
-      ignore: {
-        values: new Set(),
-        hashes: new Set([hashOf(pemHdr)]),
-        paths: [],
-        patternIds: new Set(),
-      },
-      source: "test",
-      warnings: [],
-    };
-    const hits = scanText(trunc, { policy, evasions: false });
-    const incomplete = hits.filter((h) => h.patternId === "private-key-incomplete");
-    assert.ok(incomplete.length > 0, "truncated PEM must fire private-key-incomplete");
-    assert.ok(
-      incomplete.every((h) => !h.allowed),
-      "private-key-incomplete must not authorize by hash",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H5: denylist-only payload (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const term = "PROJECT-CODENAME";
-    mkdirSync(path.join(base, ".getadvantage"), { recursive: true });
-    writeFileSync(
-      path.join(base, ".getadvantage", "config.json"),
-      JSON.stringify({ version: 1, gate: { denylist: [term] } }) + "\n",
-      "utf8",
-    );
-
-    const productPath = path.join(__dirname, "..", "gate.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h5");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteGateImports(original).replace(
-      "export function matchDenylist(text, terms) {",
-      "export function matchDenylist(text, terms) { if (true) return [];",
-    );
-    assert.ok(neutered.includes("if (true) return []"), "mutation must neuter denylist");
-    writeFileSync(path.join(scratchDir, "gate.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "gate.mjs")).href + `?h5=${Date.now()}`);
-    const missed = mut.evaluatePayload(term, { cwd: base });
-    assert.equal(missed.action, "PASS", "neutered denylist must miss the project term");
-
-    const r = runGate(["gate"], base, term);
-    assert.notEqual(r.code, 0, `real CLI must CATCH the denylist term\n${r.stderr}`);
-    assert.equal(r.stdout, "");
-    assert.ok(/denylist/i.test(r.stderr), r.stderr);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H6: --redact same secret twice, map stable", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "twicetwicetwicetwice99";
-    const payload = `${secret} and then ${secret}`;
-    const r = runGate(["gate", "--redact"], base, payload);
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(!r.stdout.includes(secret), "secret must be absent from stdout");
-    const masks = [...r.stdout.matchAll(/\[REDACTED:[^\]]+\]/g)].map((m) => m[0]);
-    assert.equal(masks.length, 2, `expected two masks, got ${r.stdout}`);
-    assert.equal(masks[0], masks[1], "same secret → same mask (stable map)");
-    assert.ok(
-      !/redaction map|mask→|mask->/i.test(r.stdout + r.stderr),
-      "redaction map must never be printed",
-    );
-    const proofs = listGateProofs(base);
-    assert.ok(proofs.length >= 1);
-    const rec = JSON.parse(readFileSync(proofs[0], "utf8"));
-    assert.equal(rec.action, "REDACT");
-    assert.match(rec.redactionMapHash, /^[0-9a-f]{64}$/);
-    assert.ok(!JSON.stringify(rec).includes(secret));
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H7: empty stdin + stdin that never closes is bounded", async () => {
-  const base = freshBase();
-  try {
-    const empty = runGate(["gate"], base, "");
-    assert.equal(empty.code, 0, empty.stderr);
-    assert.equal(empty.stdout, "", "empty stdin → empty stdout");
-    assert.ok(listGateProofs(base).length >= 1, "empty stdin still writes a proof");
-    const emptyProof = latestGateProof(base);
-    assert.equal(emptyProof.action, "PASS");
-    assert.equal(emptyProof.truncated, false);
-
-    const hang = await runGatePiped([INDEX, "gate"], base, {
-      first: "hello",
-      neverEnd: true,
-      timeoutMs: GATE_STDIN_IDLE_MS + 10_000,
-    });
-    assert.notEqual(hang.signal, "SIGTERM", "child must exit without stdin end() (hang guard)");
-    assert.notEqual(hang.code, 0, `hang must fail closed, stderr:\n${hang.stderr}`);
-    assert.equal(hang.stdout, "", "truncated hang must not emit the partial payload");
-    assert.ok(/INCOMPLETE/i.test(hang.stderr), hang.stderr);
-    assert.ok(/idle/i.test(hang.stderr), `must name the idle bound:\n${hang.stderr}`);
-    assert.ok(!/fatal:|ENOENT/i.test(hang.stderr), hang.stderr);
-    const rec = latestGateProof(base);
-    assert.equal(rec.action, "INCOMPLETE");
-    assert.equal(rec.truncated, true);
-    assert.notEqual(rec.action, "PASS");
-    assertProofHasNoSecretMaterial(rec);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H8: --json BLOCK stdout is pure JSON (0 human bytes)", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "j1s2o3n4b5l6o7c8k9x0xxxx";
-    const r = runGate(["gate", "--json"], base, secret);
-    assert.notEqual(r.code, 0, r.stderr);
-    assert.ok(!/[\u001b\u009b]/.test(r.stdout), "no ANSI on stdout");
-    assert.ok(!r.stdout.includes("✗"), "no ✗ on stdout");
-    assert.ok(!/Policy gate BLOCK|Remedy:|remove the secret/i.test(r.stdout), `detector prose leaked:\n${r.stdout}`);
-    assert.ok(!r.stdout.includes(secret), "secret must be absent from stdout");
-    const doc = JSON.parse(r.stdout);
-    assert.equal(doc.command, "gate");
-    assert.equal(doc.verdict, "BLOCK");
-    assert.equal(doc.exitCode, 1);
-    assert.ok(Array.isArray(doc.hits) && doc.hits.length > 0);
-    for (const h of doc.hits) {
-      assert.ok(!("raw" in h), "json hits must never carry raw");
-    }
-    assert.ok(/stripe-live|Stripe live|Remedy:/i.test(r.stderr), "human explanation on stderr");
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate PII: email/phone/iban/ssn block; denylist config is additive", () => {
-  const base = freshBase();
-  try {
-    const cases = [
-      ["email", "reach me at  alice@example.com  today"],
-      ["phone", "call 415-555-2671 please"],
-      ["iban", "acct DE89370400440532013000 xx"],
-      ["ssn", "ssn 856-45-6789 xx"],
-    ];
-    for (const [label, payload] of cases) {
-      const r = runGate(["gate"], base, payload);
-      assert.notEqual(r.code, 0, `${label} must BLOCK\n${r.stderr}`);
-      assert.equal(r.stdout, "", `${label} payload must be withheld`);
-    }
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate scanText evasions stay off the ship-time path", async () => {
-  const { scanText } = await import(
-    pathToFileURL(path.join(__dirname, "..", "scan.mjs")).href + `?ship=${Date.now()}`
-  );
-  const secret = "sk_live_" + "shp0123456789abcdef0123";
-  const split = secret.slice(0, 8) + "\n" + secret.slice(8);
-  const off = scanText(split, { evasions: false }).filter(
-    (h) => h.patternId === "stripe-live" && !h.allowed,
-  );
-  const on = scanText(split, { evasions: true }).filter(
-    (h) => h.patternId === "stripe-live" && !h.allowed,
-  );
-  assert.equal(off.length, 0, "default scanText must NOT fold newlines (ship-time invariant)");
-  assert.ok(on.length >= 1, "opts.evasions=true must catch the split secret");
-  const clean = scanText("hello world", { evasions: true });
-  assert.equal(clean.filter((h) => !h.allowed).length, 0, "hello world is clean even with evasions");
-});
-
-scenario("gate help and did-you-mean include the policy gate", () => {
-  const base = freshBase();
-  try {
-    const help = runGate(["help"], base, "");
-    assert.ok(/gate/.test(help.stdout), "printHelp lists gate");
-    const ghelp = runGate(["gate", "--help"], base, "");
-    assert.equal(ghelp.code, 0, ghelp.stderr);
-    const helpBlob = ghelp.stdout + ghelp.stderr;
-    assert.ok(/policy gate|outbound/i.test(helpBlob), helpBlob);
-    assert.ok(
-      helpBlob.includes(String(GATE_MAX_STDIN_BYTES)) && /1 MiB/.test(helpBlob),
-      `help must disclose the byte cap:\n${helpBlob}`,
-    );
-    assert.ok(
-      helpBlob.includes(String(GATE_STDIN_IDLE_MS)) && helpBlob.includes(String(GATE_STDIN_TIMEOUT_MS)),
-      `help must disclose idle and total timeouts:\n${helpBlob}`,
-    );
-    assert.ok(/INCOMPLETE/.test(helpBlob), `help must name INCOMPLETE:\n${helpBlob}`);
-    assert.ok(
-      /Not in published getadvantage@0\.14\.1/.test(helpBlob),
-      `help must stay conservative on availability:\n${helpBlob}`,
-    );
-    const repo = scaffold(base);
-    const typo = run(["gte"], repo);
-    assert.equal(typo.code, 1);
-    assert.ok(/Did you mean/.test(typo.stderr) && /gate/.test(typo.stderr), typo.stderr);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: clean end at exactly GATE_MAX_STDIN_BYTES is not truncation", async () => {
-  const base = freshBase();
-  try {
-    const exact = Buffer.alloc(64, 0x61);
-    const streamExact = new PassThrough();
-    const pExact = readStdinBounded({
-      stream: streamExact,
-      maxBytes: 64,
-      idleMs: 400,
-      totalMs: 2000,
-    });
-    streamExact.write(exact);
-    streamExact.end();
-    const gotExact = await pExact;
-    assert.equal(gotExact.truncated, false, "exact-cap + clean end is not truncation");
-    assert.equal(gotExact.reason, null);
-    assert.equal(gotExact.buf.length, 64);
-
-    const streamOver = new PassThrough();
-    const pOver = readStdinBounded({
-      stream: streamOver,
-      maxBytes: 64,
-      idleMs: 400,
-      totalMs: 2000,
-    });
-    streamOver.write(Buffer.alloc(65, 0x61));
-    streamOver.end();
-    const gotOver = await pOver;
-    assert.equal(gotOver.truncated, true, "cap + 1 must truncate");
-    assert.equal(gotOver.reason, "max-bytes");
-    assert.equal(gotOver.buf.length, 64);
-
-    const streamIdle = new PassThrough();
-    const pIdle = readStdinBounded({
-      stream: streamIdle,
-      maxBytes: 64,
-      idleMs: 200,
-      totalMs: 2000,
-    });
-    streamIdle.write("hi");
-    const gotIdle = await pIdle;
-    assert.equal(gotIdle.truncated, true, "idle with stream open must truncate");
-    assert.equal(gotIdle.reason, "idle");
-
-    const payload = "hello world ".repeat(Math.ceil(GATE_MAX_STDIN_BYTES / 12)).slice(0, GATE_MAX_STDIN_BYTES);
-    assert.equal(payload.length, GATE_MAX_STDIN_BYTES);
-    const r = runGate(["gate"], base, payload);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(r.stdout.length, GATE_MAX_STDIN_BYTES);
-    const rec = latestGateProof(base);
-    assert.equal(rec.action, "PASS");
-    assert.equal(rec.truncated, false);
-    assert.equal(rec.bytes, GATE_MAX_STDIN_BYTES);
-    assertProofHasNoSecretMaterial(rec);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: slow producer past idle with secret in chunk 2 fail-closed (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const intro = "Please summarise the following log.\n";
-    const secret = "sk_live_" + "slowprodsecretxxxxxxxx";
-    const realDir = path.join(base, "real");
-    const mutDir = path.join(base, "mut");
-    mkdirSync(realDir, { recursive: true });
-    mkdirSync(mutDir, { recursive: true });
-
-    const real = await runGatePiped([INDEX, "gate"], realDir, {
-      first: intro,
-      second: `AWS key ${secret}\n`,
-      pauseMs: GATE_STDIN_IDLE_MS + 500,
-      timeoutMs: GATE_STDIN_IDLE_MS + 15_000,
-    });
-    assert.notEqual(real.code, 0, `real CLI must not PASS a truncated read\n${real.stderr}`);
-    assert.equal(real.stdout, "", "must not print the partial payload");
-    assert.ok(!real.stdout.includes(secret) && !real.stderr.includes(secret), "secret must be absent");
-    assert.ok(/INCOMPLETE/i.test(real.stderr), real.stderr);
-    assert.ok(/idle/i.test(real.stderr), `must name the idle bound:\n${real.stderr}`);
-    const realProof = latestGateProof(realDir);
-    assert.equal(realProof.action, "INCOMPLETE");
-    assert.equal(realProof.truncated, true);
-    assert.notEqual(realProof.action, "PASS");
-    assertProofHasNoSecretMaterial(realProof, secret);
-
-    const harness = writeTruncationMutatedHarness(path.join(base, "scratch"));
-    const mut = await runGatePiped([harness], mutDir, {
-      first: intro,
-      second: `AWS key ${secret}\n`,
-      pauseMs: GATE_STDIN_IDLE_MS + 500,
-      timeoutMs: GATE_STDIN_IDLE_MS + 15_000,
-    });
-    assert.equal(mut.code, 0, `neutered truncated flag must false-PASS; stderr:\n${mut.stderr}`);
-    assert.ok(mut.stdout.includes(intro.trim()), `neutered flag must emit the partial payload:\n${JSON.stringify(mut.stdout)}`);
-    assert.ok(!mut.stdout.includes(secret), "unread secret still must not appear (read ended before chunk 2)");
-    const mutProof = latestGateProof(mutDir);
-    assert.equal(mutProof.action, "PASS", "neutered flag must write a PASS proof (mutation proof)");
-    assert.equal(mutProof.truncated, false);
-    assertProofHasNoSecretMaterial(mutProof, secret);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: over-cap payload with secret past the cap fail-closed (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "pastcapsecretxxxxxxxx1";
-    const payload = Buffer.concat([
-      Buffer.alloc(GATE_MAX_STDIN_BYTES, 0x61),
-      Buffer.from(`\n${secret}\n`, "utf8"),
-    ]);
-    assert.equal(payload.length, GATE_MAX_STDIN_BYTES + secret.length + 2);
-    const realDir = path.join(base, "real");
-    const mutDir = path.join(base, "mut");
-    mkdirSync(realDir, { recursive: true });
-    mkdirSync(mutDir, { recursive: true });
-    mkdirSync(path.join(realDir, ".getadvantage"), { recursive: true });
-    writeFileSync(
-      path.join(realDir, ".getadvantage", "config.json"),
-      JSON.stringify({ version: 1, gate: { disable: true } }) + "\n",
-      "utf8",
-    );
-
-    const real = await runGatePiped([INDEX, "gate"], realDir, {
-      first: payload,
-      timeoutMs: 20_000,
-    });
-    assert.notEqual(real.code, 0, `real CLI must not PASS an over-cap read\n${real.stderr}`);
-    assert.equal(real.stdout, "", "must not print the truncated prefix");
-    assert.ok(!real.stdout.includes(secret) && !real.stderr.includes(secret), "secret past cap must be absent");
-    assert.ok(/INCOMPLETE/i.test(real.stderr), real.stderr);
-    assert.ok(/1 MiB|1048576/i.test(real.stderr), `must name the byte cap:\n${real.stderr}`);
-    const realProof = latestGateProof(realDir);
-    assert.equal(realProof.action, "INCOMPLETE");
-    assert.equal(realProof.truncated, true);
-    assert.equal(realProof.bytes, GATE_MAX_STDIN_BYTES);
-    assert.notEqual(realProof.action, "PASS");
-    assertProofHasNoSecretMaterial(realProof, secret);
-
-    const red = await runGatePiped([INDEX, "gate", "--redact"], realDir, {
-      first: payload,
-      timeoutMs: 20_000,
-    });
-    assert.notEqual(red.code, 0, `truncated --redact must not exit 0\n${red.stderr}`);
-    assert.equal(red.stdout, "", "truncated --redact must not emit a redacted prefix");
-
-    const j = await runGatePiped([INDEX, "gate", "--json"], realDir, {
-      first: payload,
-      timeoutMs: 20_000,
-    });
-    assert.notEqual(j.code, 0, j.stderr);
-    assert.ok(!j.stdout.includes(secret), "json stdout must not carry the secret");
-    const doc = JSON.parse(j.stdout);
-    assert.equal(doc.action, "INCOMPLETE");
-    assert.equal(doc.verdict, "INCOMPLETE");
-    assert.equal(doc.truncated, true);
-    assert.equal(doc.exitCode, 1);
-    assert.ok(!("text" in doc) && !("term" in doc) && !("redacted" in doc));
-
-    const harness = writeTruncationMutatedHarness(path.join(base, "scratch-cap"));
-    const mut = await runGatePiped([harness], mutDir, {
-      first: payload,
-      timeoutMs: 20_000,
-    });
-    assert.equal(mut.code, 0, `neutered truncated flag must false-PASS; stderr:\n${mut.stderr}`);
-    assert.equal(
-      mut.stdoutBuf.length,
-      GATE_MAX_STDIN_BYTES,
-      `neutered flag must emit the truncated prefix (${mut.stdoutBuf.length} bytes)`,
-    );
-    assert.ok(!mut.stdout.includes(secret), "secret past the cap must stay unread");
-    const mutProof = latestGateProof(mutDir);
-    assert.equal(mutProof.action, "PASS", "neutered flag must write a PASS proof (mutation proof)");
-    assert.equal(mutProof.truncated, false);
-    assert.equal(mutProof.bytes, GATE_MAX_STDIN_BYTES);
-    assertProofHasNoSecretMaterial(mutProof, secret);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: one secret is one hit across evasion views", () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "ABCDEFGHIJKLMNOPQRSTUVWX1234";
-    const payload = secret + "\n";
-    const r = runGate(["gate", "--json"], base, payload);
-    assert.notEqual(r.code, 0, `expected BLOCK\n${r.stderr}`);
-    assert.ok(!r.stdout.includes(secret), "secret must be absent from stdout");
-    assert.ok(!r.stderr.includes(secret), "secret must be absent from stderr");
-    assert.ok(
-      !/\d+ hits total/.test(r.stderr),
-      `one secret must not inflate the human count:\n${r.stderr}`,
-    );
-    const doc = JSON.parse(r.stdout);
-    assert.equal(doc.verdict, "BLOCK");
-    assert.equal(doc.hits.length, 1, `expected 1 hit, got ${JSON.stringify(doc.hits)}`);
-    assert.equal(doc.hits[0].patternId, "stripe-live");
-    const views = doc.hits[0].views || [];
-    assert.ok(views.includes("raw"), `views should include raw: ${JSON.stringify(views)}`);
-    const distinctAuth = new Set(doc.hits.map((h) => h.authId));
-    assert.equal(distinctAuth.size, 1);
-    const proofs = listGateProofs(base);
-    assert.ok(proofs.length >= 1);
-    const rec = JSON.parse(readFileSync(proofs[0], "utf8"));
-    assert.equal(rec.hits.length, 1, `proof must store 1 hit, got ${JSON.stringify(rec.hits)}`);
-    assert.ok(!JSON.stringify(rec).includes(secret), "proof must not contain raw secret");
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: two distinct secrets are two hits", () => {
-  const base = freshBase();
-  try {
-    const a = "sk_live_" + "aaa111aaa111aaa111aaa1xx";
-    const b = "sk_live_" + "bbb222bbb222bbb222bbb2xx";
-    const r = runGate(["gate", "--json"], base, `${a} ${b}`);
-    assert.notEqual(r.code, 0, r.stderr);
-    const doc = JSON.parse(r.stdout);
-    assert.equal(doc.hits.length, 2, `expected 2 hits, got ${JSON.stringify(doc.hits)}`);
-    assert.ok(/2 hits total/.test(r.stderr), r.stderr);
-    const auths = new Set(doc.hits.map((h) => h.authId));
-    assert.equal(auths.size, 2, "two secrets → two authIds");
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate H9: combined unicode+newline evasion (mutation-proven)", async () => {
-  const base = freshBase();
-  try {
-    const body = "c1o2m3b4i5n6e7d8e9v0a1xx";
-    const secret = "sk_live_" + body;
-    // ZWSP after prefix + Cyrillic o + newline in the token — neither
-    // single view catches this; only unicode-then-fold does.
-    const smuggled = "sk_live_\u200B" + "c1" + "\u043e" + "2m3\n" + body.slice(6);
-
-    const productPath = path.join(__dirname, "..", "scan.mjs");
-    const original = readFileSync(productPath, "utf8");
-    const scratchDir = path.join(base, "mut-h9");
-    mkdirSync(scratchDir, { recursive: true });
-    const neutered = rewriteScanImports(original).replace(
-      "export const GATE_EVASION_UNICODE_NEWLINE = true;",
-      "export const GATE_EVASION_UNICODE_NEWLINE = false;",
-    );
-    assert.ok(neutered !== rewriteScanImports(original), "mutation must flip combined evasion");
-    writeFileSync(path.join(scratchDir, "scan.mjs"), neutered, "utf8");
-    const mut = await import(pathToFileURL(path.join(scratchDir, "scan.mjs")).href + `?h9=${Date.now()}`);
-    const missed = mut.scanText(smuggled, { evasions: true }).filter((h) => !h.allowed);
-    assert.equal(missed.length, 0, "neutered combined view must miss the dual-evasion secret");
-    const unicodeOnly = mut.scanText(smuggled, { evasions: true });
-    assert.equal(unicodeOnly.length, 0);
-
-    const r = runGate(["gate"], base, smuggled);
-    assert.notEqual(r.code, 0, `real CLI must CATCH the combined unicode+newline secret\n${r.stderr}`);
-    assert.equal(r.stdout, "");
-    assert.ok(!r.stdout.includes(secret) && !r.stderr.includes(secret));
-    assert.ok(/stripe-live|Stripe live/i.test(r.stderr), r.stderr);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate: untracked secrets.ignore cannot weaken BLOCK", async () => {
-  const base = freshBase();
-  try {
-    const secret = "sk_live_" + "ign0re0cann0tweaken0123xx";
-    const { secretAuthId } = await import(
-      pathToFileURL(path.join(__dirname, "..", "util.mjs")).href + `?ign=${Date.now()}`
-    );
-    mkdirSync(path.join(base, ".getadvantage"), { recursive: true });
-    writeFileSync(
-      path.join(base, ".getadvantage", "config.json"),
-      JSON.stringify({
-        version: 1,
-        secrets: { ignore: { hashes: [secretAuthId(secret)] } },
-      }) + "\n",
-      "utf8",
-    );
-    const r = runGate(["gate"], base, secret);
-    assert.notEqual(r.code, 0, `untracked ignore must not authorize the gate\n${r.stderr}`);
-    assert.equal(r.stdout, "", "BLOCK must still withhold the payload");
-    assert.ok(/stripe-live|Stripe live/i.test(r.stderr), r.stderr);
-  } finally {
-    cleanup(base);
-  }
-});
-
-scenario("gate ship-time: checkSecrets keeps evasions off (committed split key unflagged)", () => {
-  const base = freshBase();
-  try {
-    const src = readFileSync(path.join(__dirname, "..", "checks.mjs"), "utf8");
-    assert.match(
-      src,
-      /scanText\(text, \{ file: rel, policy, evasions: false \}\)/,
-      "checkSecrets must pass evasions: false — turning this on changes check verdicts",
-    );
-    const repo = scaffold(base);
-    const secret = "sk_live_" + "shpship0123456789abcdefxx";
-    const split = secret.slice(0, 8) + "\n" + secret.slice(8) + "\n";
-    write(repo, "notes.txt", split);
-    commitAll(repo, "chore: newline-split key in tracked file");
-    const r = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F1 must NO-GO, exit 1\n${r.stderr}\n${r.stdout}`);
     const doc = parseJson(r);
-    const secretCheck = (doc.checks || []).find((c) => /secret/i.test(c.label || ""));
-    assert.ok(secretCheck, `secret-scan check present:\n${JSON.stringify(doc.checks)}`);
-    assert.equal(
-      secretCheck.status,
-      "pass",
-      `split key must not trip ship-time check:\n${JSON.stringify(secretCheck)}`,
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/keys\.js:2\b/.test(extra), `finding must name file:line\n${extra}`);
+    const findings = secret.findings || doc.findings || [];
+    const hit = findings.find((f) => f.patternId === "stripe-live" || f.ruleId === "secret/stripe-live");
+    assert.ok(hit, `expected stripe-live finding: ${JSON.stringify(findings)}`);
+    assert.equal(hit.file, "keys.js");
+    assert.equal(hit.startLine, 2);
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+    assert.ok(!r.stdout.includes(key) && !r.stderr.includes(key), "raw key absent from streams");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F2: committed sk_live_<20+ alnum>_SUFFIX is NO-GO (trailing adjacency)", () => {
+  const base = freshBase();
+  try {
+    // Specified stripe trailing shape. stripe-live has no trailing `\b`, so
+    // this already NO-GOs on unrepaired checks.mjs — still required.
+    const stripeRepo = path.join(base, "f2-stripe");
+    initRepo(stripeRepo);
+    const stripeKey = "sk_live_" + "F2trailingadjsecretxxxxx";
+    write(stripeRepo, "package.json", secretAnchorPkg("secret-anchor-f2-stripe"));
+    write(stripeRepo, "keys.js", `export const KEY = "${stripeKey}_SUFFIX";\n`);
+    commitAll(stripeRepo, "chore: trailing-underscore stripe live key");
+    const rs = run(["check", "--json"], stripeRepo);
+    assert.equal(rs.code, 1, `F2 stripe _SUFFIX must NO-GO\n${rs.stderr}\n${rs.stdout}`);
+    const sdoc = parseJson(rs);
+    assert.equal(sdoc.verdict, "NO-GO");
+    const ssec = sdoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(ssec && ssec.status === "fail", JSON.stringify(ssec));
+    assert.ok(!JSON.stringify(sdoc).includes(stripeKey), "full stripe key must never be echoed");
+
+    // Mutation-bound trailing case: npm-token has trailing `\b`, so
+    // `npm_<36>_SUFFIX` misses on unrepaired checks.mjs and hits after the repair.
+    const npmRepo = path.join(base, "f2-npm");
+    initRepo(npmRepo);
+    const npmTok = "npm_" + "F2npmTrailingAdjTokxxxxxxxxxxxxxxxxx";
+    assert.equal(npmTok.length, 4 + 36, `npm token must be 36 alnum after npm_, got ${npmTok.length}`);
+    write(npmRepo, "package.json", secretAnchorPkg("secret-anchor-f2-npm"));
+    write(npmRepo, ".npmrc", `_authToken=${npmTok}_SUFFIX\n`);
+    commitAll(npmRepo, "chore: trailing-underscore npm token");
+    const rn = run(["check", "--json"], npmRepo);
+    assert.equal(rn.code, 1, `F2 npm _SUFFIX must NO-GO (mutation-bound trailing \\b)\n${rn.stderr}\n${rn.stdout}`);
+    const ndoc = parseJson(rn);
+    assert.equal(ndoc.verdict, "NO-GO");
+    const nsec = ndoc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(nsec && nsec.status === "fail", JSON.stringify(nsec));
+    const nextra = (nsec.extra || []).join("\n");
+    assert.ok(/npm access token/i.test(nextra), `must name npm-token detector\n${nextra}`);
+    assert.ok(!JSON.stringify(ndoc).includes(npmTok), "full npm token must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F3: redactSecrets over <key>_<same key again> redacts both; raw key absent", async () => {
+  // Redesign: c05f357 F3 called runGate(["gate", "--redact"], …). gate.mjs is
+  // absent at f098c5e and index.mjs has zero `--redact` occurrences. The
+  // redaction surface that exists is feedback.mjs → redactSecrets, which
+  // clones SECRET_PATTERNS from checks.mjs (this change's second consumer).
+  const { redactSecrets } = await import(
+    pathToFileURL(path.join(__dirname, "..", "feedback.mjs")).href + `?f3=${Date.now()}`
+  );
+  const secret = "sk_live_" + "F3redactbothoccxxxxxxxx";
+  const payload = secret + "_" + secret;
+  const out = redactSecrets(payload);
+  assert.equal(out.includes(secret), false, `raw key must be absent from output (string)\n${out}`);
+  const outBuf = Buffer.from(out, "utf8");
+  const keyBuf = Buffer.from(secret, "utf8");
+  assert.equal(outBuf.includes(keyBuf), false, "raw key must be absent from output (byte-wise)");
+  const masks = out.match(/\[REDACTED\]/g) || [];
+  assert.equal(masks.length, 2, `both occurrences must be masked, got ${masks.length}\n${out}`);
+  assert.equal(out, "[REDACTED]_[REDACTED]", `expected both sides redacted around the joining _\n${out}`);
+});
+
+scenario("secret-anchor F4: non-Stripe PREFIX_ adjacency (ghp_) is NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f4");
+    initRepo(repo);
+    const ghp = "ghp_" + "F4prefixAdjGitHubPatxxxxxxxxxxxxxxxx";
+    assert.equal(ghp.length, 4 + 36, `ghp token must be 36 alnum after ghp_, got ${ghp.length}`);
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f4"));
+    write(repo, "auth.js", `export const TOKEN = "PREFIX_${ghp}";\n`);
+    commitAll(repo, "chore: underscore-prefixed GitHub PAT");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F4 PREFIX_ghp_ must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(/GitHub personal access token/i.test(extra), `must name ghp detector\n${extra}`);
+    assert.ok(!JSON.stringify(doc).includes(ghp), "full ghp token must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F5: PREFIX-sk_live_... (hyphen separator) still NO-GO", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f5");
+    initRepo(repo);
+    const key = "sk_live_" + "F5hyphensepsecretxxxxxxxx";
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f5"));
+    write(repo, "keys.js", `export const KEY = "PREFIX-${key}";\n`);
+    commitAll(repo, "chore: hyphen-prefixed stripe live key");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `F5 hyphen separator must still NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("secret-anchor F6: letter/digit immediately before pattern still GO (base64-substring class closed)", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "f6");
+    initRepo(repo);
+    const exampleAkia = "AKIA" + "IOSFODNN7" + "EXAMPLE";
+    const realAkia = "AKIA" + "F6ALNUMADJKEY01";
+    const stripe = "sk_live_" + "F6alnumadjsecretxxxxxxxx";
+    write(repo, "package.json", secretAnchorPkg("secret-anchor-f6"));
+    write(
+      repo,
+      "blob.js",
+      [
+        `const awsExample = "x${exampleAkia}y";`,
+        `const awsReal = "x${realAkia}y";`,
+        `const stripeAdj = "z${stripe}";`,
+        "",
+      ].join("\n"),
     );
+    commitAll(repo, "chore: alnum-adjacent secret-shaped substrings");
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `F6 must stay GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "pass", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    assert.ok(!/allowlisted/i.test(secret.detail + "\n" + extra), `F6 must be a no-match, not an allowlist rescue\n${extra}`);
   } finally {
     cleanup(base);
   }

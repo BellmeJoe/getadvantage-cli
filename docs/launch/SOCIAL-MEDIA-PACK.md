@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.14.1** (LIVE)
+# Social / advertising pack — getadvantage **0.14.2** (LIVE)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,31 +6,47 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **LIVE:** **getadvantage@0.14.1** published **2026-08-23** (patch).
-> `dist-tags.latest` **0.14.1**, registry `gitHead` `f098c5e`, tags `v0.14.1`
-> (peels to `f098c5e`) and floating `v1` (peels to `f098c5e`), GitHub Release
-> `getadvantage 0.14.1`, CI run [`32623562202`](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/32623562202)
-> (all steps success, suite **318/318**, evidence **8/8**). Released under a
-> train-scoped independent `REVIEW_GO (release-eligible)` at product fingerprints
-> `872762e` + `8910380` + `a31f30f` + `3d5f592` with 0 open P1/P2. Prefer leading
-> with the eight core GO/NO-GO claims below; Intent remains the trust-layer
-> follow-on — always *scope verified; semantic correctness not proven*.
+> **LIVE:** **getadvantage@0.14.2** published **2026-08-26 13:27 +03:00**
+> (patch — a security-detection correctness fix). `dist-tags.latest` **0.14.2**,
+> registry `gitHead` `a16f2d9`, tags `v0.14.2` and floating `v1` both peel to
+> `a16f2d9`, GitHub Release `v0.14.2`, CI run `32958202735` (success, suite
+> **324/324**, evidence **8/8**), published `dist.shasum`
+> `99556dcce23816b10769efd5db79e3870800bb1e`. Released under a release-scoped
+> independent `REVIEW_GO` at `d5e36de` with 0 open P1/P2; the release execution
+> itself was then independently re-verified at `a16f2d9`. Prefer leading with the
+> eight core GO/NO-GO claims below; Intent remains the trust-layer follow-on —
+> always *scope verified; semantic correctness not proven*.
 >
-> **What 0.14.1 ships (patch):** three distinct first-contact messages for a
-> **bare repo**, **unreadable `.git`**, and **non-git folder** (human guidance on
-> **stdout**, 0 B stderr; under `--json` the same text is routed to stderr and
-> stdout stays empty — no machine document). Packed tarball drops `tests/` so
-> the adversarial-secret corpus no longer ships to consumer `node_modules`.
-> **No new command, check, flag, or capability. No verdict or exit change on the
-> gate.** The request-time policy gate is **not** live. **Not an adoption
-> event** — named evaluators / installs / first gates / week-two reuse /
-> retained external teams remain **0**.
+> **What 0.14.2 ships (patch — no new command, no new check):** before 0.14.2 a
+> committed credential glued to an ordinary variable name (`PREFIX_sk_live_…`,
+> `PREFIX_ghp_…`, AWS key ids, npm tokens) returned **a false clean**:
+> `no leaked-secret patterns matched`, verdict **GO**, exit **0**. 27 anchors inside
+> the secret pattern catalogue moved from `` to explicit non-alphanumeric
+> lookarounds; the delta versus `` is exactly the underscore. Those cases now
+> return **NO-GO with `file:line`**.
+> **Truth limits — do not overstate this.** It does **not** make detection complete:
+> a key immediately preceded or followed by a letter or digit is still a **deliberate
+> miss** (matching there would flag base64 substrings). “No new false positives” holds
+> **only for the two corpora actually measured** (this repo, the site repo) — it is not
+> a general claim. No new checks, no verdict or exit semantics change beyond catching
+> what was previously missed. **Not an adoption event** — named evaluators / installs /
+> first gates / week-two reuse / retained external teams remain **0**.
 >
-> **Still live from 0.14.0 (historical intro):** `getadvantage feedback` prints a
-> copy-pasteable GitHub issue URL pre-filled with redacted environment and gate
-> metadata. **Nothing is sent** — no browser open, no network request, always
-> exits 0, not a gate, not telemetry. Secret **auth identity is line-ending
-> independent**. Ops retained-team detector is ops-only (not packed).
+> **Still live from 0.14.1 (historical intro):** first-contact classification +
+> packed-tarball hygiene.
+>
+> **Still live from 0.14.0 (historical intro — new user-facing command):** `getadvantage feedback`
+> prints a copy-pasteable GitHub issue URL pre-filled with redacted environment
+> and gate metadata. **Nothing is sent** — no browser open, no network request,
+> always exits 0, not a gate, not telemetry. Also carries: ops retained-team
+> detector (ops-only, not packed), Marketplace listing readiness docs, README /
+> version-claim currency, redaction catalogue unification + narrowing repair.
+> **No new checks. No verdict or exit change on the gate.** Also carried a
+> correctness fix (`cc9d39a`): secret **auth identity is now line-ending
+> independent**, so a `secrets.ignore` allowlist entry authored on Windows now
+> actually suppresses the same multi-line secret when the gate runs on Linux CI,
+> and the reverse. Before this, the same secret could carry two different auth
+> ids across platforms.
 >
 > **Still live from 0.13.1 (historical intro):** collapsed secret-row `file:line`
 > restore + dry-run paste-ready JSON repair + body/transport key banner.
@@ -69,9 +85,10 @@
 > GitHub Action + PR summary (`uses: BellmeJoe/getadvantage-cli@v1` — floating
 > major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases));
 > secret scan of committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback target for live **0.14.1**: **getadvantage@0.14.0** /
-> tag `v0.14.0` / `cc9d39a` (with **0.13.1** / `v0.13.1` / `e5b06f3` intact
-> behind it).
+> Rollback target for live **0.14.2**: **getadvantage@0.14.1** /
+> tag `v0.14.1` / `f098c5e` (with **0.14.0** / `v0.14.0` / `cc9d39a` and
+> **0.13.1** / `v0.13.1` / `e5b06f3` intact behind it). Prefer the
+> `npm dist-tag` path over unpublish.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -84,12 +101,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (published live)** | **`getadvantage@0.14.1`** (live 2026-08-23; registry `gitHead` `f098c5e`) |
-| **Checkout** | Live **0.14.1** patch: first-contact classification (bare / unreadable `.git` / non-git) + packed-tarball hygiene (`tests/` no longer ships) + prior 0.14.0 `feedback` + 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **npm (published live)** | **`getadvantage@0.14.2`** (live 2026-08-26; registry `gitHead` `a16f2d9`) |
+| **Checkout** | Live **0.14.2** patch: committed credentials glued to a variable name (`PREFIX_sk_live_…`) are caught instead of returning a false GO (detection still not complete — alphanumeric-adjacent keys remain a deliberate miss) + prior 0.14.0 `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
 | **Install** | `npx getadvantage` (tracks `latest`) or pin an exact tag from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (no signup) |
-| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [Release v0.14.1](https://github.com/BellmeJoe/getadvantage-cli/releases/tag/v0.14.1) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
+| **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · full suite **318/318** · release fingerprint **`f098c5e`** · published `dist.shasum` `ecaf0b752d7357b4441c4f59b2380788621dad6e` · tag `v0.14.1` peels to `f098c5e` · floating `v1` peels to `f098c5e` · CI run [`32623562202`](https://github.com/BellmeJoe/getadvantage-cli/actions/runs/32623562202) · post-release cold `npx -y getadvantage@0.14.1 --version` → `0.14.1`; cold `check` in an empty non-git folder → exit 1, 233 B stdout first-contact guidance, 0 B stderr · 0 RLS advertised · policy gate **not** live · rollback: `0.14.0` / `v0.14.0` / `cc9d39a` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · full suite **324/324** · release fingerprint **`a16f2d9`** · published `dist.shasum` `99556dcce23816b10769efd5db79e3870800bb1e` · tag `v0.14.2` + floating `v1` both peel to `a16f2d9` · CI run `32958202735` · post-release cold `npx getadvantage@0.14.2 check` on a fresh temp repo → **GO, exit 0, 5s** (re-measured this cycle, 2026-08-26 16:58 Amman) · 0 RLS advertised · rollback: `0.14.1` / `v0.14.1` / `f098c5e` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
@@ -117,11 +134,11 @@ windows.
 | Feature | User-facing line | Command / surface | Proof |
 |---------|------------------|-------------------|--------|
 | **Pre-deploy GO/NO-GO** | Safe to ship? Yes or no. Exit 0 / 1. | `npx getadvantage check` · alias `ship` (+build) | Evidence: clean-go, catches-the-leak, … |
-| **Secret scan** | Catches committed keys — including inside **sourcemaps/dist** and committed **`.next/static`** browser assets (**LIVE**). Public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not treated as proof a private value is safe. Never prints the full secret. Not a security seal. On secret NO-GO only, names a smallest safe next edit + paste-ready `secrets.ignore` snippet (emission-only). | part of `check` | Evidence: catches-the-leak, build-output-leak · shipped tests: `.next/static` + Vite dist hostiles · cold published path |
+| **Secret scan** | Catches committed keys matching its published pattern catalogue — including inside **sourcemaps/dist** and committed **`.next/static`** browser assets (**LIVE**). Public prefixes (`NEXT_PUBLIC_*` / `VITE_*`) are not treated as proof a private value is safe. From **0.14.2**, a key glued to an ordinary variable name (`PREFIX_sk_live_...`) is caught; before 0.14.2 it was not. Detection is pattern-based and **not complete**: a key immediately preceded or followed by a letter or digit is still a deliberate miss (it would flag base64 substrings). **Redacts every secret it matches**; a value it does not match is not redacted, so this is not a guarantee that no secret is ever printed. Not a security seal. On secret NO-GO only, names a smallest safe next edit + paste-ready `secrets.ignore` snippet (emission-only). | part of `check` | Evidence: catches-the-leak, build-output-leak · shipped tests: `.next/static` + Vite dist hostiles · cold published path |
 | **Tracked `.env`** | A committed `.env` is a leak by itself. | part of `check` | Evidence: tracked-env |
 | **Dirty-tree guard** | Stops “I deployed my uncommitted mess” (vercel --prod ships the working tree). | part of `check` | Evidence: dirty-tree |
 | **Honest skips** | No TypeScript? No fake typecheck fail. Not checkable ≠ silent GO on manifests. | part of `check` | Honesty principle + tests |
-| **First-run rescue** | Outside a working tree: distinct messages for non-git (`demo` / `git init`), bare repo (run in a clone — do not `git init`), and unreadable `.git` (fix permissions — do not `git init`). Human text on stdout, 0 B stderr. | any command outside a worktree | Evidence: outside-git-rescue · hostile-cwd H1/H4/H9/H10 · cold published empty-folder path |
+| **First-run rescue** | Outside a git repo: points to `demo` / `git init`, not a brick wall. | any command outside repo | Evidence: outside-git-rescue |
 
 ### B. Orientation — advertise as “also”
 
