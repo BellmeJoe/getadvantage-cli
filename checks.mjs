@@ -9,13 +9,15 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
-import { result, fingerprint, git, gitRaw, gitSafe, gitFilesZ, pl, scrubCredentialEnv } from "./util.mjs";
+import { result, git, gitRaw, gitSafe, gitFilesZ, pl, scrubCredentialEnv } from "./util.mjs";
 import { detectProject } from "./detect.mjs";
 import {
   loadPolicy,
-  secretAllowDecision,
   isNonUniqueAuthPatternId,
 } from "./policy.mjs";
+import { scanText } from "./scan.mjs";
+
+export { SECRET_PATTERNS, scanText } from "./scan.mjs";
 
 // ===========================================================================
 // a. DIRTY-TREE GUARD
@@ -164,126 +166,10 @@ export function checkDirtyTree(cwd) {
 // A match BLOCKS (✗); we print the file + a masked FINGERPRINT, never the
 // full secret. Binary/lockfiles/node_modules/.git are skipped.
 
-// All patterns carry the /g flag: we matchAll and report the hit COUNT per
-// file, not just the first occurrence.
-// Shared validator: real API keys contain at least one digit; CSS class-name
-// chains ("sk-circle-fade-dot-before-anim") and prose practically never do.
-const hasDigit = (tok) => /[0-9]/.test(tok);
-
-// Anchors are alnum lookarounds, not `\b`. `_` is a JS word char, so `\b`
-// misses ordinary `PREFIX_sk_live_…` names. Delta vs `\b` is exactly `_`.
-// Letter/digit adjacency still blocks, so pattern-shaped substrings inside
-// base64 (`xAKIA…y`) do not match. PEM patterns have no `\b` and stay as-is.
-export const SECRET_PATTERNS = [
-  // --- from app/lib/safety.ts ---
-  // Anthropic BEFORE OpenAI: `sk-ant-…` also matches the broader sk- shape, so
-  // the specific pattern must claim it first (and openai's validator skips it).
-  { id: "anthropic", label: "Anthropic secret key", re: /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/g, validate: hasDigit },
-  {
-    id: "openai",
-    label: "OpenAI secret key",
-    re: /(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g,
-    // Digit required (kills CSS-class false positives); sk-ant- is Anthropic's.
-    validate: (tok) => hasDigit(tok) && !tok.startsWith("sk-ant-"),
-  },
-  { id: "stripe-live", label: "Stripe live secret key", re: /(?<![A-Za-z0-9])sk_live_[A-Za-z0-9]{20,}/g },
-  { id: "stripe-restricted", label: "Stripe restricted key", re: /(?<![A-Za-z0-9])rk_live_[A-Za-z0-9]{20,}/g },
-  { id: "aws", label: "AWS access key id", re: /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g },
-  { id: "github-pat", label: "GitHub personal access token", re: /(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g },
-  { id: "github-fine", label: "GitHub fine-grained token", re: /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{22,}(?![A-Za-z0-9])/g },
-  { id: "google-oauth", label: "Google OAuth secret", re: /(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9])/g },
-  { id: "slack", label: "Slack token", re: /(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g },
-  // Full PEM block (BEGIN…END), not the header alone. Header-only matches make
-  // every key of the same type share one secretAuthId — a hash copied from one
-  // fixture must never authorize a different private key (0.8.3 re-review P1).
-  {
-    id: "private-key",
-    label: "Private key block",
-    re: /-----BEGIN ((?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY)-----[\s\S]*?-----END \1-----/g,
-  },
-  // Incomplete / truncated PEM: BEGIN present without a matching END for that
-  // key type. Full-block regex misses material when the footer is stripped —
-  // removing the footer must not turn NO-GO into GO (0.8.3 final re-review P1).
-  // Match string is the constant header → non-unique; value/hash allowlisting
-  // is refused in secretAllowDecision for this patternId.
-  {
-    id: "private-key-incomplete",
-    label: "Incomplete private key block",
-    re: /-----BEGIN ((?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY)-----/g,
-    validate: (_tok, m) => {
-      const keyType = m?.[1];
-      if (!keyType || m.index == null) return false;
-      // Escape type for RegExp (spaces/letters only in practice, but stay strict).
-      const esc = String(keyType).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const fromHere = m.input.slice(m.index);
-      const complete = new RegExp(
-        `^-----BEGIN ${esc}-----[\\s\\S]*?-----END ${esc}-----`,
-      );
-      // Fire only when this BEGIN is not the start of a complete PEM block.
-      return !complete.test(fromHere);
-    },
-  },
-  { id: "sendgrid", label: "SendGrid key", re: /(?<![A-Za-z0-9])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])/g },
-  // --- from CLAUDE.md hard-rule #2 (the pre-commit scan literals) ---
-  { id: "stripe-webhook", label: "Stripe webhook secret (whsec_)", re: /(?<![A-Za-z0-9])whsec_[A-Za-z0-9]{20,}/g },
-  { id: "vercel-token", label: "Vercel token (vcp_)", re: /(?<![A-Za-z0-9])vcp_[A-Za-z0-9]{20,}/g },
-  { id: "kv-rest", label: "KV/Redis REST credential", re: /(?<![A-Za-z0-9])KV_REST_API_(?:URL|TOKEN|READ_ONLY_TOKEN)\s*=\s*\S+/g },
-  // getAdvantage's OWN platform key format: adv_live_ + lowercase base36. A
-  // dedicated pattern because the generic Bearer heuristic below requires MIXED
-  // case + a digit and would miss an all-lowercase token like this one.
-  { id: "getadvantage-key", label: "getAdvantage platform key (adv_live_)", re: /(?<![A-Za-z0-9])adv_live_[a-z0-9]{16,}(?![A-Za-z0-9])/g },
-  // --- coverage additions (v0.6.0) ---
-  // npm access/automation token (the `.npmrc _authToken=npm_…` leak).
-  { id: "npm-token", label: "npm access token", re: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g },
-  // Bare JWT (three base64url segments, no "Bearer" prefix needed). To keep
-  // false positives near zero we only flag it if the FIRST segment decodes to
-  // a JSON object with an `alg` or `typ` field — i.e. a real JWT header.
-  {
-    id: "jwt",
-    label: "JSON Web Token (JWT)",
-    re: /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9])/g,
-    validate: (tok) => {
-      try {
-        const header = JSON.parse(Buffer.from(tok.split(".")[0], "base64url").toString("utf8"));
-        return typeof header === "object" && header !== null && ("alg" in header || "typ" in header);
-      } catch {
-        return false;
-      }
-    },
-  },
-  // Database URL with an embedded password (postgres://user:PASS@host).
-  // The validator runs on the captured password + host and skips (a) obvious
-  // placeholder / interpolated passwords ("mypassword", "changeme3", …) and
-  // (b) ANY URL whose host is a local dev target (localhost, 127.0.0.1,
-  // 0.0.0.0, ::1, host.docker.internal) — a dev URL is not a production leak.
-  // So docs + examples never trip a NO-GO, while a real credential still does.
-  {
-    id: "db-url-password",
-    label: "Database URL with embedded password",
-    re: /(?<![A-Za-z0-9])postgres(?:ql)?:\/\/[^\s:/@'"]+:([^@\s'"]{8,})@([^\s'"/]+)/g,
-    validate: (pw, m) => {
-      if (/[<>{}$%]/.test(pw)) return false;
-      if (/^(?:pass(?:word)?|passwd|secret|example|changeme|test|postgres|admin|root|1234(?:5678?9?)?|x{4,}|\*{4,})$/i.test(pw)) return false;
-      // Placeholder passwords: my/your/… + pass(word)/passwd/pwd/secret/changeme (+digits).
-      if (/^(?:my|your|db|dummy|sample|local|test|example|demo)?(?:pass(?:word)?|passwd|pwd|secret|changeme)\d*$/i.test(pw)) return false;
-      // Local/dev hosts are never a production leak.
-      const host = String(m?.[2] ?? "").replace(/:\d+$/, "").toLowerCase();
-      if (["localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"].includes(host)) return false;
-      return true;
-    },
-  },
-  // "Bearer <token>" literal. The CLAUDE.md pre-commit scan lists "Bearer " as a
-  // tell. We capture the token and only flag it if it LOOKS like a real
-  // credential (mixed case + a digit, ≥20 chars) — so legitimate test fixtures
-  // and placeholders like `Bearer test_cron_secret...` or `Bearer ${token}`
-  // don't trip a false NO-GO. The `validate` predicate runs on the captured group.
-  {
-    id: "bearer",
-    label: "Bearer auth token literal",
-    re: /(?<![A-Za-z0-9])Bearer\s+([A-Za-z0-9_\-.]{20,})/g,
-    validate: (tok) => /[a-z]/.test(tok) && /[A-Z]/.test(tok) && /[0-9]/.test(tok),
-  },
-];
+// Corpus lives in scan.mjs (`SECRET_PATTERNS` + `scanText`) so ship-time
+// `checkSecrets` and the request-time policy gate share one detector list.
+// Re-exported above. Extra evasion views are opt-in on scanText and are
+// never enabled here — that would change `check` verdicts.
 
 // Files we never scan (binary-ish, generated, vendored).
 //
@@ -472,65 +358,54 @@ export function checkSecrets(cwd) {
       partialFiles.push(rel);
     }
 
-    for (const p of SECRET_PATTERNS) {
-      for (const m of text.matchAll(p.re)) {
-        // If the pattern has a capture group + validator (e.g. Bearer, JWT,
-        // DB URL), apply the validator to the captured token so test
-        // fixtures/placeholders don't trip. The full match array is passed
-        // too, for validators that need more context (e.g. the DB-URL host).
-        const token = m[1] ?? m[0];
-        if (p.validate && !p.validate(token, m)) continue;
-        const raw = m[0];
-        const decision = secretAllowDecision(raw, {
-          file: rel,
-          patternId: p.id,
-          policy,
-        });
-        if (decision.allowed) {
-          const ak = `${rel}::${p.label}::${decision.reason}`;
-          const prevA = allowed.get(ak);
-          if (prevA) prevA.count++;
-          else {
-            allowed.set(ak, {
-              file: rel,
-              label: p.label,
-              fp: decision.fp,
-              authId: decision.authId,
-              count: 1,
-              reason: decision.reason,
-            });
-          }
-          continue;
-        }
-        const k = `${rel}::${p.label}`;
-        const prev = hits.get(k);
-        if (prev) prev.count++;
+    // Shared primitive — evasions stay OFF so ship-time verdicts are unchanged.
+    const textHits = scanText(text, { file: rel, policy, evasions: false });
+    for (const h of textHits) {
+      if (h.allowed) {
+        const ak = `${rel}::${h.label}::${h.reason}`;
+        const prevA = allowed.get(ak);
+        if (prevA) prevA.count++;
         else {
-          // Region from match index when defensible (1-based line/column).
-          // Partial head+tail scans can mis-number middle lines — still emit
-          // file + fingerprint; only attach region for full-file scans.
-          let startLine;
-          let startColumn;
-          let endColumn;
-          if (!isPartial && typeof m.index === "number" && m.index >= 0) {
-            const rc = offsetToLineCol(text, m.index);
-            startLine = rc.line;
-            startColumn = rc.col;
-            const end = offsetToLineCol(text, m.index + raw.length);
-            if (end.line === rc.line) endColumn = end.col;
-          }
-          hits.set(k, {
+          allowed.set(ak, {
             file: rel,
-            label: p.label,
-            patternId: p.id,
-            fp: decision.fp,
-            authId: decision.authId,
+            label: h.label,
+            fp: h.fp,
+            authId: h.authId,
             count: 1,
-            startLine,
-            startColumn,
-            endColumn,
+            reason: h.reason,
           });
         }
+        continue;
+      }
+      const k = `${rel}::${h.label}`;
+      const prev = hits.get(k);
+      if (prev) prev.count++;
+      else {
+        // Region from match index when defensible (1-based line/column).
+        // Partial head+tail scans can mis-number middle lines — still emit
+        // file + fingerprint; only attach region for full-file scans.
+        let startLine;
+        let startColumn;
+        let endColumn;
+        const matchIndex = typeof h.index === "number" ? h.index : h.originalIndex;
+        if (!isPartial && typeof matchIndex === "number" && matchIndex >= 0) {
+          const rc = offsetToLineCol(text, matchIndex);
+          startLine = rc.line;
+          startColumn = rc.col;
+          const end = offsetToLineCol(text, matchIndex + h.length);
+          if (end.line === rc.line) endColumn = end.col;
+        }
+        hits.set(k, {
+          file: rel,
+          label: h.label,
+          patternId: h.patternId,
+          fp: h.fp,
+          authId: h.authId,
+          count: 1,
+          startLine,
+          startColumn,
+          endColumn,
+        });
       }
     }
   }

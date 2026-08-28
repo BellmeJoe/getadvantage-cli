@@ -68,6 +68,7 @@ import { runGithubAction } from "./action.mjs";
 import { buildSarif, writeSarifFile } from "./sarif.mjs";
 import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
 import { buildFeedbackUrl } from "./feedback.mjs";
+import { runPolicyGate, printGateHelp } from "./gate.mjs";
 import os from "node:os";
 
 function parseArgs(argv) {
@@ -232,6 +233,9 @@ ${c.bold("Commands")}
   ${c.cyan("feedback")} Print a copy-pasteable GitHub issue URL pre-filled with redacted
            environment + gate metadata (CLI/Node/OS platform, stack, check counts).
            ${c.bold("Nothing is sent")} — no browser open, no network. Always exits 0.
+  ${c.cyan("gate")}     Policy gate — outbound stdin filter (BLOCK default, ${c.bold("--redact")} to mask).
+           Local proof under ${c.bold(".getadvantage/gate-proofs/")}. Not inbound. Not a proxy.
+           Not in published getadvantage@0.14.2. Not live as a request interceptor.
 
 ${c.bold("Flags")}
   --version / -v          Print the CLI version and exit.
@@ -243,7 +247,7 @@ ${c.bold("Flags")}
                           same gate but omit Dirty-tree (staging is expected at commit/edit time) and
                           print a visible disclosure line. Not the default; not read from repo config.
                           Plain ${c.cyan("check")} / ${c.cyan("check --ci")} still enforce Dirty-tree for pre-deploy.
-  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")}) Print ONE machine-readable JSON document to stdout
+  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")} + ${c.cyan("gate")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
   --sarif <path>          (${c.cyan("check")}) Write a dependency-free SARIF 2.1.0 file for GitHub code scanning.
@@ -286,6 +290,10 @@ ${c.bold("Flags")}
   --json                  One machine-readable JSON document on stdout:
                           { command:"architecture", summary, candidates, generatedAt }.
 
+  ${c.dim("gate only:")}
+  --redact                Mask secret/PII/denylist matches and write the rest to stdout (exit 0).
+                          Default is BLOCK (non-zero exit, nothing of the payload on stdout).
+
   ${c.dim("deploy only:")}
   --expect-prefix <p>     Required deployment-host prefix (default: derived from your linked .vercel project; guard skipped if none).
   --scope <scope>         Vercel team scope, passed through to vercel.
@@ -318,6 +326,8 @@ ${c.bold("Examples")}
   ${bin} intent init --goal "Add password reset" --allow "src/auth/**" --deny ".github/**"
   ${bin} intent check           prove all changes after baseline stayed inside the freeze contract
   ${bin} deploy --expect-prefix myproject-
+  ${bin} gate                   filter stdin (BLOCK on secret / PII / denylist)
+  echo hello | ${bin} gate --redact
 `);
 }
 
@@ -574,6 +584,10 @@ async function main() {
       printFanHelp();
       process.exit(0);
     }
+    if (topic === "gate") {
+      printGateHelp();
+      process.exit(0);
+    }
     // `intent --help` / `intent help` already covered when cmd is intent below.
     printHelp();
     process.exit(0);
@@ -632,6 +646,30 @@ async function main() {
   // degrades cleanly (usable link, zero raw git fatal: noise).
   if (cmd === "feedback") {
     process.exit(await runFeedbackCommand());
+  }
+
+  // `gate` is a stdin filter (outbound policy gate). Same class as mcp /
+  // feedback / demo — must run in a non-git folder. Dispatch BEFORE
+  // classifyGitCwd() / repoRoot().
+  if (cmd === "gate") {
+    const GATE_CMD_FLAGS = new Set(["json", "redact", "help", "version"]);
+    const unknown = Object.keys(flags).filter((k) => !GATE_CMD_FLAGS.has(k));
+    if (unknown.length > 0) {
+      console.error(c.red(`✗ Unknown flag${unknown.length > 1 ? "s" : ""}: ${unknown.map((f) => `--${f}`).join(", ")}`));
+      console.error(c.gray(`  Run \`${binName()} help\` to see the flags \`gate\` accepts.`));
+      process.exit(1);
+    }
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
+    const code = await runPolicyGate({
+      flags,
+      cwd: process.cwd(),
+      emitJson: restore
+        ? (doc) => {
+            emitJson(restore, doc);
+          }
+        : null,
+    });
+    process.exit(code);
   }
 
   // Classify first so bare / non-git / unreadable get factually correct guidance.
@@ -987,7 +1025,7 @@ async function main() {
   const known = [
     "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
     "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
-    "github-action", "intent", "deploy", "feedback", "help", "version",
+    "github-action", "intent", "deploy", "feedback", "gate", "help", "version",
   ];
   void positional; // parseArgs exposes full positional list for future multi-arg cmds
   const suggestion = didYouMean(cmd, known);
