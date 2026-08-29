@@ -47,6 +47,16 @@ expectation adopted in the week plan, not an ambition.
 12-month target; further latency work is not fundable without profiling evidence
 that real CI time improves.
 
+> **Re-measured 2026-08-29 at `0.14.2`** (weekly review; fresh `git init`,
+> isolated `npm_config_cache`): **4.42s** to a GO verdict, exit 0. The **full
+> activation path** — cold `npx` → `init --claude-code` → first gate → receipt on
+> disk — is **7.97s** (check 4.42s + init 3.55s), receipt verified present.
+> Slower than the 08-22 reading only because `0.14.2` published three days
+> earlier, so the tarball fetch dominates; `grok-build` independently measured
+> **4.97s** cold on the same published version the same morning. Target is *hold*
+> < 60s; held with ~7.5x margin on the whole adoption path. **No latency work is
+> fundable.**
+
 > **Re-measured 2026-08-22 at `0.14.0`** (weekly review; fresh `git init`,
 > isolated `npm_config_cache`): **2.85s** to a GO verdict, exit 0. The **full
 > activation path** — cold `npx` → `init --claude-code` → first gate → receipt on
@@ -101,7 +111,12 @@ header is publicly searchable.
 > report a `0`, and **exits 1**. **P3 closed in lane
 > `0.14.x-stderr-and-control-transparency` (REVIEW_PENDING):** success reports
 > now print `# positive-control-total-count: N` so the report evidences its own
-> control.
+> control. **Re-run 2026-08-29 weekly review: `retained-external-teams: 0`,
+> `status: ok — zero code-search hits`, `# positive-control-total-count: 131`** —
+> observed absence; the `UNKNOWN` path was re-verified the same session (no
+> `GITHUB_TOKEN` → prints `UNKNOWN`, refuses to report a `0`, **exits 1**). *The
+> control fell from 2,048 to 131 between two consecutive reads. Recorded, not
+> explained: the control asserts **reachability**, not magnitude.*
 
 ## Portfolio order
 
@@ -184,6 +199,24 @@ lane ships or is killed. Only one implementation lane may be open.
    only). Rollback after publish: **0.13.1** / `v0.13.1` / `e5b06f3` (with
    **0.13.0** / `v0.13.0` / `bdc8b04` and **0.12.2** / `v0.12.2` / `1e451ac`
    intact). Live npm remains **0.13.1** until the train publishes.
+
+7c. **Separator-adjacency false-positive class in the shipped secret scan** — *added
+   2026-08-29 weekly review, score **2.75** at effort 1 (reach 2 · activation 3 ·
+   retention 3 · trust 4 · sharing 1).* The `0.14.2` anchor hotfix closed a live
+   false-clean defect (`0.14.1` found **1 of 5** underscore-glued credentials, `0.14.2`
+   finds **5 of 5**), and the `2026-08-26` audit **narrowed** the accompanying "zero new
+   false positives" claim: constructed fixtures show the widening extends a
+   **pre-existing** separator-adjacency false-positive class along the underscore axis —
+   a CSS class `btn_sk-fade-…`, an `.env.example` KV/Redis template. A security gate that
+   NO-GOs on a template file on an evaluator's **first** run fails activation at the
+   moment that matters most. **Evidence class, stated honestly: constructed, not
+   observed** — zero new false positives were measured on the two real corpora available
+   (this repo, the site repo), so the mechanism is proven and the real-world rate is
+   unquantified. That is why it scores 2.75 and not higher, and it is still the only
+   product candidate in weeks with measured rather than speculative evidence.
+   **DO NOT OPEN BEFORE 2026-09-04:** it touches `checks.mjs` `SECRET_PATTERNS`, and the
+   deferred `0.15.0` train asserts `scan.SECRET_PATTERNS === checks.SECRET_PATTERNS` as a
+   single corpus. **First eligible product lane after the train lands.**
 
 ### P2 — make proof portable and shareable
 
@@ -288,6 +321,42 @@ lane ships or is killed. Only one implementation lane may be open.
     there) plus a Glama score badge in the PR body. Agent-executable, needs no
     founder click, unactioned. Score stays **2.45**; the evidence under it improved. With 16a residual at 0.48, **16b is now
     the higher-ranked free-shelf half** — still blocked on the send gate.
+    **Re-scored 2026-08-29 to `1.23` at effort 2, down from 2.45. One correction, and it
+    is a downgrade:** the 08-22 note called the Glama step *"agent-executable, needs no
+    founder click."* That is wrong — the accelerator record of **2026-08-28** states the
+    Glama score badge required by `#12582` **needs a founder-only account**. Components
+    unchanged (reach 4 · activation 3 · retention 1 · trust 1 · sharing 3); **effort
+    raised 1 → 2** because the remaining half is not fleet-executable at all. Both shelf
+    PRs re-verified live 2026-08-29: `punkpeye/awesome-mcp-servers#12582` **open, 1
+    comment (the listing bot), last updated 2026-08-21T08:08:45Z**;
+    `devsecops/awesome-devsecops#175` **open, 0 comments, unchanged since creation** —
+    eight days of no movement on either, consistent with the corrected blocker. Carried
+    rather than killed: the PRs are already open and cost nothing per cycle. *Demand
+    evidence: still **zero** ledger entries ask for an MCP listing.*
+
+> **PORTFOLIO ORDER NOTE, 2026-08-29 weekly review — SUPERSEDES the 08-22 note
+> below.** The top of the portfolio moves again, and one layer further out of this
+> file: the highest item is now **harness-level send pre-authorization, 3.70 at
+> effort 1** (reach 5 · activation 5 · retention 3 · trust 2 · sharing 2). It is an
+> operating-system unblock, not a product bet or a targeting instrument, and **no
+> agent can close it — the effort is the founder's.** It ranks first because
+> **every unattended cycle in the fleet has declined every send-class action since
+> 2026-08-15**: 0 outbound actions from 10 unattended cycles on 08-28 against 4
+> applications from one attended sitting, Move 1 at **0/20 for the week and 3
+> lifetime, all 2026-07-27**, and the only candidate that ever passed the ICP
+> (`Resolvr-io/apogee#104`) lost to this gate rather than to targeting.
+> **Consequence for the 08-22 note below:** its verdict on the query battery still
+> stands on its evidence, but the battery inversion it ranked first **was never
+> run** — grep over every growth/accelerator/orchestrator record 08-23 → 08-29
+> finds no code-search-over-repository-state pass and no agent-usage cross-filter,
+> so its 08-31 falsification read is void. It keeps its **3.65** unchanged, because
+> nothing was learned, and drops to second on dependency: a better candidate list
+> is inert against a gate that permits no touch. **Consequence for this file,
+> unchanged:** when a lane closes, do not promote another product code lane. The
+> queue's top three product items are founder-sequenced by
+> `DEC-FOUNDER-CORE-ACCESS-2026-08-27` and none is eligible before **2026-09-04**;
+> an empty product board in `REFILLING` is not a fault. Full reasoning:
+> `agent-ops/reviews/2026-08-29-getadvantage-northstar-weekly.md`.
 
 > **PORTFOLIO ORDER NOTE, 2026-08-22 weekly review.** The highest-scoring item in
 > the portfolio is no longer in this file. **Move 1 query-battery inversion scores
