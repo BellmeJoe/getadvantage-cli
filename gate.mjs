@@ -560,7 +560,7 @@ export function printGateUsage() {
   console.error("  PASS writes the raw stdin bytes; --redact re-encodes UTF-8, so non-UTF-8 input");
   console.error("  may contain U+FFFD replacement characters.");
   console.error("  Local proof under .getadvantage/gate-proofs/. Not inbound. Not a proxy.");
-  console.error("  Not in published getadvantage@0.15.0. Not live as a request interceptor.");
+  console.error("  Not a request interceptor. Invoked explicitly on piped stdin.");
 }
 
 function printBlockHuman(evalResult) {
@@ -661,7 +661,7 @@ export function printGateHelp() {
   console.log("");
   console.log("Not inbound. Not a proxy or daemon. Local proof only");
   console.log("(`.getadvantage/gate-proofs/`). Never writes the raw secret.");
-  console.log("Not in published getadvantage@0.15.0. Not live as a request interceptor.");
+  console.log("Not a request interceptor. Invoked explicitly on piped stdin.");
 }
 
 // ---------------------------------------------------------------------------

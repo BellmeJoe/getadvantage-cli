@@ -18466,14 +18466,63 @@ scenario("gate help and did-you-mean include the policy gate", async () => {
       /U\+FFFD|replacement character/i.test(helpBlob) && /--redact/.test(helpBlob) && /non-UTF-8/i.test(helpBlob),
       `help must disclose --redact non-UTF-8 re-encoding:\n${helpBlob}`,
     );
-    const helpPkgVersion = JSON.parse(
-      readFileSync(path.join(__dirname, "..", "package.json"), "utf8"),
-    ).version;
+    // Intent: the user must not conclude gate is a live interceptor, proxy,
+    // inbound path, or daemon. Mechanism: require the version-independent
+    // denial + explicit-invocation line; reject publish-status pinning and
+    // leftover interceptor claims. A version-string match would re-pin the
+    // "not in published @this-version" self-contradiction on every release.
+    const conservativeAvailability = (blob) =>
+      /not a request interceptor/i.test(blob) && /invoked explicitly/i.test(blob);
+    const availabilityOverclaim = (blob) => {
+      const stripped = blob.replace(/not a request interceptor/gi, "");
+      return (
+        /not in published getadvantage@/i.test(blob) ||
+        /\blive as a request interceptor\b/i.test(blob) ||
+        /request interceptor/i.test(stripped) ||
+        /\b(?:automatically|silently) intercept/i.test(stripped) ||
+        /\bintercept(?:s|ing)\b/i.test(stripped)
+      );
+    };
     assert.ok(
-      new RegExp(
-        `Not in published getadvantage@${helpPkgVersion.replace(/\./g, "\\.")}`,
-      ).test(helpBlob),
+      conservativeAvailability(helpBlob),
       `help must stay conservative on availability:\n${helpBlob}`,
+    );
+    assert.ok(
+      !availabilityOverclaim(helpBlob),
+      `help must not over-claim availability or interception:\n${helpBlob}`,
+    );
+    const overclaimBlob =
+      "Live as a request interceptor. Automatically intercepts inbound requests.";
+    assert.equal(
+      conservativeAvailability(overclaimBlob),
+      false,
+      "over-claim fixture must fail the conservative-denial assertion",
+    );
+    assert.equal(
+      availabilityOverclaim(overclaimBlob),
+      true,
+      "over-claim fixture must be rejected as an over-claim",
+    );
+    const oldDefectBlob =
+      "Not in published getadvantage@0.15.0. Not live as a request interceptor.";
+    assert.equal(conservativeAvailability(oldDefectBlob), false);
+    assert.equal(availabilityOverclaim(oldDefectBlob), true);
+    const stealthOverclaimBlob =
+      "Not a request interceptor. Invoked explicitly on piped stdin. Intercepts inbound HTTPS.";
+    assert.equal(conservativeAvailability(stealthOverclaimBlob), true);
+    assert.equal(availabilityOverclaim(stealthOverclaimBlob), true);
+    const versionPinBlob =
+      "Not in published getadvantage@0.16.0. Not a request interceptor. Invoked explicitly on piped stdin.";
+    assert.equal(conservativeAvailability(versionPinBlob), true);
+    assert.equal(availabilityOverclaim(versionPinBlob), true);
+    const topHelp = help.stdout + help.stderr;
+    assert.ok(
+      conservativeAvailability(topHelp),
+      `top-level help must stay conservative on availability:\n${topHelp}`,
+    );
+    assert.ok(
+      !availabilityOverclaim(topHelp),
+      `top-level help must not over-claim availability or interception:\n${topHelp}`,
     );
     const { printGateUsage } = await import(
       pathToFileURL(path.join(__dirname, "..", "gate.mjs")).href + `?usage=${Date.now()}`
@@ -18494,6 +18543,14 @@ scenario("gate help and did-you-mean include the policy gate", async () => {
     assert.ok(
       /U\+FFFD|replacement character/i.test(usageBlob) && /--redact/.test(usageBlob) && /non-UTF-8/i.test(usageBlob),
       `usage must disclose --redact non-UTF-8 re-encoding:\n${usageBlob}`,
+    );
+    assert.ok(
+      conservativeAvailability(usageBlob),
+      `usage must stay conservative on availability:\n${usageBlob}`,
+    );
+    assert.ok(
+      !availabilityOverclaim(usageBlob),
+      `usage must not over-claim availability or interception:\n${usageBlob}`,
     );
     const repo = scaffold(base);
     const typo = run(["gte"], repo);
