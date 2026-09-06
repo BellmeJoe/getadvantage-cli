@@ -9,8 +9,8 @@
 // gate-layer extras (they must not land in SECRET_PATTERNS — that would
 // change `check` verdicts). Extra evasion views are opt-in on scanText.
 //
-// v1 is outbound only: not inbound, not a proxy, not a daemon, not live
-// as a request interceptor. Local proof only. Zero network. Zero model calls.
+// v1 is outbound only: not inbound, not a proxy, not a daemon, not a
+// request interceptor. Local proof only. Zero network. Zero model calls.
 // Node built-ins only.
 
 import { createHash, randomBytes } from "node:crypto";

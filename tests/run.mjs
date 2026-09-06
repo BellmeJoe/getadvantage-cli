@@ -19832,6 +19832,264 @@ scenario("train-union: single corpus + 21-case (id, chars, auth) + evasion", asy
   }
 });
 
+// ---------------------------------------------------------------------------
+// 0.15.1-availability-claim-coverage (audit F1): proxy / daemon / inbound
+// axes on the LIVE help surface. Append-only so tests/run.mjs startLines
+// above this block (and therefore SARIF/JSON pins) do not shift.
+// TEST_FILTER=gate matches the scenario name.
+// ---------------------------------------------------------------------------
+
+const GATE_AVAILABILITY_DENIAL_USAGE = "Not inbound. Not a proxy.";
+const GATE_AVAILABILITY_DENIAL_HELP = "Not inbound. Not a proxy or daemon.";
+
+function conservativeAvailabilityF1(blob) {
+  return /not a request interceptor/i.test(blob) && /invoked explicitly/i.test(blob);
+}
+
+/** Frozen pre-lane detector (interceptor / version-pin only). AC1 fail-before. */
+function availabilityOverclaimPreLane(blob) {
+  const stripped = String(blob).replace(/not a request interceptor/gi, "");
+  return (
+    /not in published getadvantage@/i.test(blob) ||
+    /\blive as a request interceptor\b/i.test(blob) ||
+    /request interceptor/i.test(stripped) ||
+    /\b(?:automatically|silently) intercept/i.test(stripped) ||
+    /\bintercept(?:s|ing)\b/i.test(stripped)
+  );
+}
+
+/**
+ * C2: strip the product's own period-terminated denial sentences, then ban
+ * leftover proxy/daemon/inbound. HELP must be stripped before USAGE — a
+ * regex without the period after "proxy" is a prefix of HELP and would
+ * leave " or daemon" (the litotes trap C1 hits on the real gate --help blob).
+ */
+function stripAvailabilityDenials(blob) {
+  return String(blob)
+    .replace(/not a request interceptor/gi, "")
+    .replace(GATE_AVAILABILITY_DENIAL_HELP, "")
+    .replace(GATE_AVAILABILITY_DENIAL_USAGE, "");
+}
+
+function availabilityOverclaim(blob) {
+  if (availabilityOverclaimPreLane(blob)) return true;
+  const stripped = stripAvailabilityDenials(blob);
+  return (
+    /\bin-?bound\b/i.test(stripped) ||
+    /\bprox(?:y|ies|ying|ied)\b/i.test(stripped) ||
+    /\bdaemons?\b/i.test(stripped)
+  );
+}
+
+scenario("gate availability claim coverage: per-axis over-claim rejected; denial sentences load-bearing", async () => {
+  const base = freshBase();
+  try {
+    assert.equal(
+      GATE_AVAILABILITY_DENIAL_HELP.includes(GATE_AVAILABILITY_DENIAL_USAGE),
+      false,
+      "USAGE is period-terminated after proxy; it must not be a prefix of HELP",
+    );
+
+    const gateSrc = readFileSync(path.join(__dirname, "..", "gate.mjs"), "utf8");
+    assert.match(
+      gateSrc,
+      /console\.error\([^)]*Not inbound\. Not a proxy\./,
+      "printGateUsage must print the USAGE denial (deleting gate.mjs:562 turns this red)",
+    );
+    assert.match(
+      gateSrc,
+      /console\.log\([^)]*Not inbound\. Not a proxy or daemon\./,
+      "printGateHelp must print the HELP denial (deleting gate.mjs:662 turns this red)",
+    );
+
+    const help = runGate(["help"], base, "");
+    const ghelp = runGate(["gate", "--help"], base, "");
+    assert.equal(ghelp.code, 0, ghelp.stderr);
+    const helpBlob = ghelp.stdout + ghelp.stderr;
+    const topHelp = help.stdout + help.stderr;
+
+    const { printGateUsage } = await import(
+      pathToFileURL(path.join(__dirname, "..", "gate.mjs")).href + `?f1usage=${Date.now()}`
+    );
+    const usageChunks = [];
+    const origErr = console.error;
+    console.error = (...a) => usageChunks.push(a.join(" "));
+    try {
+      printGateUsage();
+    } finally {
+      console.error = origErr;
+    }
+    const usageBlob = usageChunks.join("\n");
+
+    assert.ok(
+      helpBlob.includes(GATE_AVAILABILITY_DENIAL_HELP),
+      `gate --help must print the HELP denial:\n${helpBlob}`,
+    );
+    assert.ok(
+      usageBlob.includes(GATE_AVAILABILITY_DENIAL_USAGE),
+      `usage must print the USAGE denial:\n${usageBlob}`,
+    );
+    assert.ok(
+      topHelp.includes(GATE_AVAILABILITY_DENIAL_USAGE),
+      `top-level --help must print the USAGE denial:\n${topHelp}`,
+    );
+    assert.equal(
+      /daemon/i.test(topHelp),
+      false,
+      "top-level --help does not say daemon; requiring it would fail the shipped blob",
+    );
+    assert.equal(
+      /daemon/i.test(usageBlob),
+      false,
+      "printGateUsage does not say daemon; requiring it would fail the shipped blob",
+    );
+
+    const naiveBan = (blob) => /\bproxy\b|\bdaemon\b|\binbound\b/i.test(blob);
+    assert.equal(naiveBan(helpBlob), true, "C1 naive ban flags the product's own gate --help denials");
+    assert.equal(naiveBan(topHelp), true, "C1 naive ban flags the product's own --help denials");
+    assert.equal(naiveBan(usageBlob), true, "C1 naive ban flags the product's own usage denials");
+
+    for (const [label, blob] of [
+      ["gate --help", helpBlob],
+      ["--help", topHelp],
+      ["usage", usageBlob],
+    ]) {
+      assert.equal(conservativeAvailabilityF1(blob), true, `${label} must keep interceptor + explicit-invocation denials`);
+      assert.equal(availabilityOverclaimPreLane(blob), false, `${label} must pass the pre-lane interceptor-only detector`);
+      assert.equal(
+        availabilityOverclaim(blob),
+        false,
+        `C2 must not false-positive on the shipped ${label} blob:\n${blob}`,
+      );
+    }
+
+    const helpWithoutInbound = helpBlob.replace(/Not inbound\. /g, "");
+    const helpWithoutProxyDaemon = helpBlob.replace(/Not a proxy or daemon\. /g, "");
+    assert.equal(
+      helpBlob.includes(GATE_AVAILABILITY_DENIAL_HELP),
+      true,
+    );
+    assert.equal(
+      helpWithoutInbound.includes(GATE_AVAILABILITY_DENIAL_HELP),
+      false,
+      "dropping Not inbound. from gate --help must drop the HELP denial",
+    );
+    assert.equal(
+      helpWithoutProxyDaemon.includes(GATE_AVAILABILITY_DENIAL_HELP),
+      false,
+      "dropping Not a proxy or daemon. from gate --help must drop the HELP denial",
+    );
+
+    const fixtures = [
+      {
+        id: "proxy-audit",
+        blob: "Always-on inbound proxy.",
+        cons: false,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "proxy-only",
+        blob: "Always-on reverse proxy.",
+        cons: false,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "daemon-only",
+        blob: "Runs as a background daemon.",
+        cons: false,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "inbound-only",
+        blob: "Accepts inbound HTTPS.",
+        cons: false,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "stealth-proxy",
+        blob: "Not a request interceptor. Invoked explicitly on piped stdin. Always-on inbound proxy.",
+        cons: true,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "stealth-daemon",
+        blob: "Not a request interceptor. Invoked explicitly on piped stdin. Runs as a daemon.",
+        cons: true,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "stealth-inbound",
+        blob: "Not a request interceptor. Invoked explicitly on piped stdin. Inbound HTTPS filter.",
+        cons: true,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "stacked-denial-then-claim",
+        blob: "Not a request interceptor. Invoked explicitly on piped stdin. Not inbound. Not a proxy or daemon. This is a proxy.",
+        cons: true,
+        preLane: false,
+        next: true,
+      },
+      {
+        id: "denial-usage",
+        blob: "Not inbound. Not a proxy.\nNot a request interceptor. Invoked explicitly on piped stdin.",
+        cons: true,
+        preLane: false,
+        next: false,
+      },
+      {
+        id: "denial-help",
+        blob: "Not inbound. Not a proxy or daemon. Local proof only\nNot a request interceptor. Invoked explicitly on piped stdin.",
+        cons: true,
+        preLane: false,
+        next: false,
+      },
+      {
+        id: "overclaim-intercept",
+        blob: "Live as a request interceptor. Automatically intercepts inbound requests.",
+        cons: false,
+        preLane: true,
+        next: true,
+      },
+      {
+        id: "old-defect-version-pin",
+        blob: "Not in published getadvantage@0.15.0. Not live as a request interceptor.",
+        cons: false,
+        preLane: true,
+        next: true,
+      },
+      {
+        id: "stealth-intercept",
+        blob: "Not a request interceptor. Invoked explicitly on piped stdin. Intercepts inbound HTTPS.",
+        cons: true,
+        preLane: true,
+        next: true,
+      },
+      {
+        id: "version-pin-conservative",
+        blob: "Not in published getadvantage@0.16.0. Not a request interceptor. Invoked explicitly on piped stdin.",
+        cons: true,
+        preLane: true,
+        next: true,
+      },
+    ];
+    for (const row of fixtures) {
+      assert.equal(conservativeAvailabilityF1(row.blob), row.cons, `${row.id} conservativeAvailability`);
+      assert.equal(availabilityOverclaimPreLane(row.blob), row.preLane, `${row.id} pre-lane must ${row.preLane ? "reject" : "accept"}`);
+      assert.equal(availabilityOverclaim(row.blob), row.next, `${row.id} C2 must ${row.next ? "reject" : "accept"}`);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
 const filter = process.env.TEST_FILTER || "";
 const printPins =
   process.env.PRINT_PINS === "1" || filter === "print-pins";
