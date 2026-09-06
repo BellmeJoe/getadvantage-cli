@@ -211,6 +211,10 @@
 //                                     mutation-bound: PREFIX_ / _SUFFIX /
 //                                     --redact key_key / non-Stripe adjacency;
 //                                     hyphen control; alnum-adjacency GO.
+//  63. Train-union 21-case            — single corpus + (pattern id, char count,
+//                                     auth hash) vs live 0.14.2 on both axes +
+//                                     evasion (TEST_FILTER=train-union). Fails
+//                                     on disarmed main (no scan.mjs).
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
@@ -15838,15 +15842,15 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   //   e20342b55a90650b → 51c1cc5606dfc6e9 (JSON excl. generatedAt)
   // After 0.15.x-secret-anchor-repair inventory + F1–F6 (startLines shifted
   // in tests/run.mjs; self-block count stays 5); remeasured via PRINT_PINS=1:
-  //   9853cd15e7ee0344 → 169be9310787587b (SARIF)
-  //   51c1cc5606dfc6e9 → 3ee0a13f7456b944 (JSON excl. generatedAt)
+  //   9853cd15e7ee0344 → a9c8768ac5d227ca (SARIF)
+  //   51c1cc5606dfc6e9 → 38bdf04230670672 (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("169be9310787587b"),
+    pins.sarifHash.startsWith("a9c8768ac5d227ca"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("3ee0a13f7456b944"),
+    pins.jsonHash.startsWith("38bdf04230670672"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17541,11 +17545,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("169be9310787587b"),
+    pins.sarifHash.startsWith("a9c8768ac5d227ca"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("3ee0a13f7456b944"),
+    pins.jsonHash.startsWith("38bdf04230670672"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -19643,6 +19647,132 @@ scenario("secret-anchor F3-main: redactSecrets over <key>_<same key again> redac
   const masks = out.match(/\[REDACTED\]/g) || [];
   assert.equal(masks.length, 2, `both occurrences must be masked, got ${masks.length}\n${out}`);
   assert.equal(out, "[REDACTED]_[REDACTED]", `expected both sides redacted around the joining _\n${out}`);
+});
+
+scenario("train-union: single corpus + 21-case (id, chars, auth) + evasion", async () => {
+  // Fails on today's disarmed main: scan.mjs is absent. On the train it
+  // pins both halves — 0.14.2 anchors compared on (pattern id, char count,
+  // auth hash), and the evasion path that live 0.14.2 does not have.
+  // Same module instance — cache-busting would clone the catalogue and
+  // falsely fail check 8. checks.mjs re-exports scan.mjs's array.
+  const scan = await import("../scan.mjs");
+  const checks = await import("../checks.mjs");
+  assert.ok(scan.SECRET_PATTERNS === checks.SECRET_PATTERNS, "single corpus: scan === checks SECRET_PATTERNS");
+  assert.equal(typeof scan.foldNewlines, "function");
+  assert.equal(typeof scan.stripCfAndHomoglyphs, "function");
+  assert.equal(typeof scan.findBase64Blobs, "function");
+
+  const A = (n) => "A".repeat(n);
+  const a = (n) => "a".repeat(n);
+  const jwt = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url")
+    + "." + A(12) + "." + A(12);
+  const tokens = {
+    anthropic: "sk-ant-" + "api03-" + A(20) + "1",
+    openai: "sk-proj-" + A(20) + "1",
+    "stripe-live": "sk" + "_live_" + A(20) + "1",
+    "stripe-restricted": "rk" + "_live_" + A(20) + "1",
+    aws: "AKIA" + A(15) + "1",
+    "github-pat": "ghp_" + A(35) + "1",
+    "github-fine": "github" + "_pat_" + A(21) + "1",
+    "google-oauth": "GOCSPX-" + A(20) + "1",
+    slack: "xox" + "b-" + A(10) + "1",
+    sendgrid: "SG." + A(16) + "." + A(16),
+    "stripe-webhook": "whsec_" + A(20) + "1",
+    "vercel-token": "vcp_" + A(20) + "1",
+    "getadvantage-key": "adv" + "_live_" + a(16) + "1",
+    "npm-token": "npm_" + A(35) + "1",
+    jwt,
+    bearer: "Bearer " + "Ab1" + A(20),
+  };
+  const prefixIds = [
+    "anthropic", "openai", "stripe-live", "stripe-restricted", "aws",
+    "github-pat", "github-fine", "google-oauth", "slack", "sendgrid",
+    "stripe-webhook", "vercel-token", "getadvantage-key", "npm-token",
+    "jwt", "bearer",
+  ];
+  const suffixIds = ["aws", "github-pat", "slack", "getadvantage-key", "npm-token"];
+  // Slack suffix uses the hyphenated 26-char shape: `\b` truncates to 16 chars
+  // under a different auth hash; lookarounds must keep the full token.
+  const slackSuffixToken = "xox" + "b-" + "1234567890" + "-" + "Abcdefghij";
+
+  function triples(axis, text) {
+    const hits = scan.scanText(text, { file: `${axis}.js`, evasions: false }).filter((h) => !h.allowed);
+    return hits.map((h) => {
+      const chars = Number((/\((\d+) chars\)/.exec(h.fp) || [])[1] || h.length);
+      return { id: h.patternId, chars, auth: h.authId, rawLen: h.raw.length };
+    });
+  }
+  function expectTriple(id, token) {
+    return { id, chars: token.length, auth: hashOf(token) };
+  }
+  function assertAxis(axis, got, expected) {
+    assert.equal(got.length, expected.length, `${axis}: finding count ${got.length} !== ${expected.length}: ${JSON.stringify(got)}`);
+    const byId = new Map(got.map((t) => [t.id, t]));
+    for (const exp of expected) {
+      const g = byId.get(exp.id);
+      assert.ok(g, `${axis}: missing pattern id ${exp.id}; got ${got.map((t) => t.id).join(",")}`);
+      assert.equal(g.chars, exp.chars, `${axis} ${exp.id}: char count ${g.chars} !== ${exp.chars} (truncated match?)`);
+      assert.equal(g.auth, exp.auth, `${axis} ${exp.id}: auth ${g.auth} !== ${exp.auth}`);
+      if (g.rawLen != null) {
+        assert.equal(g.rawLen, exp.chars, `${axis} ${exp.id}: raw length ${g.rawLen} !== ${exp.chars}`);
+      }
+    }
+  }
+
+  const prefixText = prefixIds.map((id) => `const ${id.replace(/-/g, "_")} = "PREFIX_${tokens[id]}";`).join("\n");
+  const prefixExpected = prefixIds.map((id) => expectTriple(id, tokens[id]));
+  assertAxis("underscore-prefix", triples("prefix", prefixText), prefixExpected);
+
+  const suffixToken = (id) => (id === "slack" ? slackSuffixToken : tokens[id]);
+  const suffixText = suffixIds.map((id) => `const ${id.replace(/-/g, "_")} = "${suffixToken(id)}_SUFFIX";`).join("\n");
+  const suffixExpected = suffixIds.map((id) => expectTriple(id, suffixToken(id)));
+  const suffixGot = triples("suffix", suffixText);
+  assert.equal(suffixGot.find((t) => t.id === "slack")?.chars, 26, "slack suffix must be the full 26-char token, not a 16-char truncation");
+  assertAxis("underscore-suffix", suffixGot, suffixExpected);
+
+  const secret = "sk" + "_live_" + "b64b64b64b64b64b64xx01";
+  const b64 = Buffer.from(secret, "utf8").toString("base64");
+  const blob = `please use ${b64} thanks`;
+  const off = scan.scanText(blob, { evasions: false }).filter((h) => !h.allowed);
+  const on = scan.scanText(blob, { evasions: true }).filter((h) => !h.allowed);
+  assert.equal(off.length, 0, "evasions:false must miss a base64-embedded credential");
+  assert.ok(on.some((h) => h.patternId === "stripe-live"), "evasions:true must catch a base64-embedded stripe-live key");
+
+  // Ship-path proof: two fixture repos, one axis each, under the 30-finding
+  // cap. Compare CLI --json on (pattern id, char count, auth hash).
+  const base = freshBase();
+  try {
+    function runAxis(name, body, expected) {
+      const repo = path.join(base, name);
+      initRepo(repo);
+      write(repo, "package.json", secretAnchorPkg(`train-union-${name}`));
+      write(repo, "keys.js", body);
+      commitAll(repo, `chore: train-union ${name}`);
+      const r = run(["check", "--json"], repo);
+      assert.equal(r.code, 1, `${name} must NO-GO\n${r.stderr}\n${r.stdout}`);
+      const doc = parseJson(r);
+      const secretCheck = (doc.checks || []).find((c) => c.label === "Secret scan");
+      assert.ok(secretCheck && secretCheck.status === "fail", JSON.stringify(secretCheck));
+      const findings = secretCheck.findings || [];
+      const extra = (secretCheck.extra || []).join("\n");
+      const more = /and \d+ more blocking secret/.test(extra);
+      const capped = findings.length !== expected.length || more || findings.length > 30;
+      assert.equal(capped, false, `${name}: capped must be false (findings=${findings.length} expected=${expected.length} more=${more})`);
+      const got = findings.map((f) => ({
+        id: f.patternId,
+        chars: Number((/\((\d+) chars\)/.exec(f.fp || f.message || "") || [])[1]),
+        auth: f.authId,
+      }));
+      assertAxis(`cli-${name}`, got, expected);
+      for (const tok of expected.map((e, i) => (name === "prefix" ? tokens[prefixIds[i]] : suffixToken(suffixIds[i])))) {
+        assert.ok(!JSON.stringify(doc).includes(tok), `${name}: raw token must never be echoed`);
+      }
+    }
+    runAxis("prefix", prefixText, prefixExpected);
+    runAxis("suffix", suffixText, suffixExpected);
+  } finally {
+    cleanup(base);
+  }
 });
 
 const filter = process.env.TEST_FILTER || "";
