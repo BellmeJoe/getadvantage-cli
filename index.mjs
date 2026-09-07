@@ -69,6 +69,7 @@ import { buildSarif, writeSarifFile } from "./sarif.mjs";
 import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
 import { buildFeedbackUrl } from "./feedback.mjs";
 import { runPolicyGate, printGateHelp } from "./gate.mjs";
+import { runApprove, printApproveHelp } from "./approve.mjs";
 import os from "node:os";
 
 function parseArgs(argv) {
@@ -97,6 +98,16 @@ function parseArgs(argv) {
         "notes",
         "acceptance-notes",
         "max-files",
+        "action-file",
+        "action",
+        "resource",
+        "data-class",
+        "actor",
+        "model",
+        "summary",
+        "resolve",
+        "by",
+        "tool",
       ]);
       if (multiFlags.has(key)) {
         const val = argv[++i];
@@ -247,7 +258,7 @@ ${c.bold("Flags")}
                           same gate but omit Dirty-tree (staging is expected at commit/edit time) and
                           print a visible disclosure line. Not the default; not read from repo config.
                           Plain ${c.cyan("check")} / ${c.cyan("check --ci")} still enforce Dirty-tree for pre-deploy.
-  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")} + ${c.cyan("gate")}) Print ONE machine-readable JSON document to stdout
+  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")} + ${c.cyan("gate")} + ${c.cyan("approve")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
   --sarif <path>          (${c.cyan("check")}) Write a dependency-free SARIF 2.1.0 file for GitHub code scanning.
@@ -588,6 +599,10 @@ async function main() {
       printGateHelp();
       process.exit(0);
     }
+    if (topic === "approve") {
+      printApproveHelp();
+      process.exit(0);
+    }
     // `intent --help` / `intent help` already covered when cmd is intent below.
     printHelp();
     process.exit(0);
@@ -669,6 +684,36 @@ async function main() {
           }
         : null,
     });
+    process.exit(code);
+  }
+
+  // `approve` evaluates a committed policy, so it must run in a git worktree —
+  // but a non-git folder has to fail with an approve-specific message, not the
+  // generic check dead-end. Dispatch BEFORE classifyGitCwd() like gate.
+  if (cmd === "approve") {
+    const APPROVE_FLAGS = new Set([
+      "action", "resource", "data-class", "actor", "model", "summary", "tool",
+      "action-file", "json", "resolve", "allow", "deny", "by", "help", "version",
+    ]);
+    const unknown = Object.keys(flags).filter((k) => !APPROVE_FLAGS.has(k));
+    if (unknown.length > 0) {
+      console.error(c.red(`✗ Unknown flag${unknown.length > 1 ? "s" : ""}: ${unknown.map((f) => `--${f}`).join(", ")}`));
+      console.error(c.gray(`  Run \`${binName()} help approve\` to see the flags \`approve\` accepts.`));
+      process.exit(1);
+    }
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
+    let jsonDoc = null;
+    const code = runApprove({
+      cwd: process.cwd(),
+      flags,
+      emitJson: restore
+        ? (doc) => {
+            jsonDoc = doc;
+          }
+        : null,
+    });
+    if (restore && jsonDoc) emitJson(restore, jsonDoc);
+    else if (restore) restore();
     process.exit(code);
   }
 
@@ -1025,7 +1070,7 @@ async function main() {
   const known = [
     "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
     "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
-    "github-action", "intent", "deploy", "feedback", "gate", "help", "version",
+    "github-action", "intent", "deploy", "feedback", "gate", "approve", "help", "version",
   ];
   void positional; // parseArgs exposes full positional list for future multi-arg cmds
   const suggestion = didYouMean(cmd, known);

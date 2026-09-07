@@ -99,11 +99,16 @@ export function sanitizeRecordId(raw) {
   return s.slice(0, ID_MAX);
 }
 
+function isAnyGlob(v) {
+  const s = nonempty(v);
+  return s === "*" || s === "**" || s === "**/**" || s === "**/";
+}
+
 function specificity(rule) {
   let n = 0;
   for (const key of MATCH_KEYS) {
     const v = own(rule, key);
-    if (nonempty(v)) n += 1;
+    if (nonempty(v) && !isAnyGlob(v)) n += 1;
   }
   return n;
 }
@@ -530,9 +535,10 @@ function usageError(msg) {
 }
 
 function printNonGit() {
-  console.error(c.red("✗ This folder isn't a git repository, so there is no reviewable policy."));
-  console.error("The action was not allowed.");
+  console.error(c.red("✗ This folder isn't a git repository, so there is no committed policy to read."));
+  console.error("Nothing ran.");
   console.error(c.gray("  → git init && git add -A, then commit .getadvantage/policy.json"));
+  console.error(c.gray("  → then re-run getadvantage approve"));
 }
 
 function whoText(decision) {
@@ -554,29 +560,33 @@ function printDecisionScreen({ decision, id, warnings, now }) {
   console.log("getAdvantage — approval decision");
   console.log("");
   const label =
-    decision.outcome === "allow" ? "allowed" : decision.outcome === "block" ? "blocked" : "escalated";
+    decision.outcome === "allow"
+      ? "allowed"
+      : decision.outcome === "block"
+        ? "blocked"
+        : "waiting on a person";
   console.log(`Outcome: ${label}`);
   console.log(`Who: ${whoText(decision)}`);
   console.log(`Why: ${decision.reason}`);
   if (decision.disclosedAllow) {
     console.log("");
-    console.log("This is a blanket allow — the committed default permits unmatched actions. Every allow is disclosed.");
+    console.log("This was a real yes. The committed default permits unmatched actions. Every allow is disclosed.");
   }
   console.log("");
   if (decision.outcome === "allow") {
-    console.log("The action was allowed by the committed policy.");
+    console.log("This command allowed only the action you passed in.");
   } else if (decision.outcome === "block") {
-    console.log("The action was not allowed.");
+    console.log("Nothing ran. The committed policy blocked this action.");
   } else {
-    console.log("The action was not allowed. A person has to say yes or no.");
+    console.log("Nothing ran. A person has to say yes or no.");
     console.log("");
-    console.log("Next:");
-    const byHint = decision.escalateTo ? decision.escalateTo : "<name>";
+    console.log("Next (put a real person's name on --by):");
+    const byHint = decision.escalateTo ? `"${decision.escalateTo}"` : "<name>";
     console.log(`  ${bin} approve --resolve ${id} --allow --by ${byHint}`);
     console.log(`  ${bin} approve --resolve ${id} --deny --by ${byHint}`);
   }
   console.log("");
-  console.log(`Proof: ${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`);
+  console.log(`Record: ${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`);
   console.log(`When:  ${now}`);
   if (warnings.length) {
     console.log("");
@@ -591,7 +601,7 @@ function printResolveScreen({ id, by, resolution, now }) {
   console.log(`Recorded: ${by} ${verb} this action.`);
   console.log("The original record was not changed. A new line was appended.");
   console.log("");
-  console.log(`Proof: ${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`);
+  console.log(`Record: ${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`);
   console.log(`When:  ${now}`);
 }
 
@@ -671,6 +681,10 @@ export function runApprove(opts = {}) {
       return 1;
     }
     const repoCwd = gitCwd.root;
+
+    if ((flags.allow || flags.deny) && (flags.resolve == null || flags.resolve === false)) {
+      return usageError("--allow and --deny are only for --resolve, not for asking a decision.");
+    }
 
     if (flags.resolve != null && flags.resolve !== false) {
       const idRaw = flags.resolve === true ? "" : String(flags.resolve);

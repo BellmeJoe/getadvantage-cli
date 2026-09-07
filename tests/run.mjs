@@ -19909,8 +19909,8 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    385,
-    `suite arithmetic: base 379 + 6 L1-approval-agent A1 scenarios, got ${scenarios.length}`,
+    396,
+    `suite arithmetic: base 379 + 17 L1-approval-agent scenarios, got ${scenarios.length}`,
   );
 });
 
@@ -20340,6 +20340,34 @@ scenario("approve: decide() is pure; no-match escalates; unknown dataClass never
   // Untrusted policy cannot allow even if it claims default:allow.
   const untrusted = decide(desc, { trusted: false, default: "allow", rules: [] });
   assert.equal(untrusted.outcome, "escalate");
+
+  // Any-globs (`*`, `**`) do not inflate specificity above a real constraint.
+  const globInflate = decide(
+    { action: "file.delete", resource: "secrets/x", actor: "bot", dataClass: "internal" },
+    {
+      trusted: true,
+      default: "escalate",
+      rules: [
+        {
+          id: "star-allow",
+          action: "**",
+          resource: "**",
+          dataClass: "internal",
+          decision: "allow",
+          reason: "any",
+        },
+        {
+          id: "specific-block",
+          action: "file.delete",
+          dataClass: "internal",
+          decision: "block",
+          reason: "deletes",
+        },
+      ],
+    },
+  );
+  assert.equal(globInflate.outcome, "block");
+  assert.equal(globInflate.ruleId, "specific-block");
 });
 
 scenario("approve: H8 allow-without-id refused; H9 tracked blanket allow disclosed", async () => {
@@ -20586,6 +20614,357 @@ scenario("approve: proof record omits AWS-shaped payload; resolve appends and do
     assert.ok(after.raw.startsWith(originalText), "original record bytes must be unchanged as a prefix");
     assert.equal(after.lines[0], originalText.trimEnd());
     assert.ok(!after.raw.includes(aws), "resolution file still has no secret");
+  } finally {
+    cleanup(base);
+  }
+});
+
+function writeApprovalsPolicy(repo, approvals) {
+  write(
+    repo,
+    path.join(".getadvantage", "policy.json"),
+    JSON.stringify({ version: 1, approvals }, null, 2) + "\n",
+  );
+}
+
+scenario("approve: CLI allow → exit 0; tracked blanket allow is disclosed", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "allow");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "allow", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      escalateTo: "Alex",
+      rules: [
+        {
+          id: "public-read",
+          action: "file.read",
+          resource: "docs/**",
+          dataClass: "public",
+          decision: "allow",
+          reason: "public docs",
+        },
+      ],
+    });
+    commitAll(repo, "chore: allow rule");
+    const r = run(
+      ["approve", "--action", "file.read", "--resource", "docs/readme", "--actor", "bot", "--data-class", "public"],
+      repo,
+    );
+    assert.equal(r.code, 0, `allow must exit 0\n${r.stderr}\n${r.stdout}`);
+    assert.ok(/allowed/i.test(r.stdout), r.stdout);
+    assert.ok(!/at File|Error:|^\s+at /m.test(r.stderr), r.stderr);
+
+    const repo9 = path.join(base, "blanket");
+    initRepo(repo9);
+    write(repo9, "package.json", JSON.stringify({ name: "blanket", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo9, { default: "allow", escalateTo: "Alex", rules: [] });
+    commitAll(repo9, "chore: blanket allow");
+    const r9 = run(
+      ["approve", "--action", "email.send", "--resource", "news", "--actor", "bot", "--data-class", "public"],
+      repo9,
+    );
+    assert.equal(r9.code, 0, r9.stderr);
+    assert.ok(/blanket allow/i.test(r9.stdout), r9.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: CLI block → exit 1", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "block");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "block", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      rules: [{ id: "no-delete", action: "file.delete", decision: "block", reason: "deletes are blocked" }],
+    });
+    commitAll(repo, "chore: block rule");
+    const r = run(
+      ["approve", "--action", "file.delete", "--resource", "docs/a", "--actor", "bot", "--data-class", "public"],
+      repo,
+    );
+    assert.equal(r.code, 1, `block must exit 1\n${r.stderr}\n${r.stdout}`);
+    assert.ok(/blocked|not allowed/i.test(r.stdout), r.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H1 no policy → escalate, exit 2, no stack trace", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h1");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h1", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: no policy");
+    const r = run(
+      ["approve", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    assert.equal(r.code, 2, `H1 must exit 2 (escalate)\n${r.stderr}\n${r.stdout}`);
+    assert.ok(/waiting on a person|escalat/i.test(r.stdout), r.stdout);
+    assert.ok(/Nothing ran|not allowed/i.test(r.stdout), r.stdout);
+    assert.ok(/--resolve /.test(r.stdout), "next command must be printed");
+    assert.ok(!/^\s+at /m.test(r.stderr + r.stdout), "no stack trace");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: --json emits exactly one parseable object on stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "json");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "json", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const r = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    assert.equal(r.code, 2, r.stderr);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.command, "approve");
+    assert.equal(doc.outcome, "escalate");
+    assert.equal(doc.exitCode, 2);
+    assert.ok(!r.stdout.includes("getAdvantage —"));
+    const trimmed = r.stdout.replace(/^\uFEFF/, "").trim();
+    assert.equal(trimmed[0], "{");
+    assert.equal(trimmed[trimmed.length - 1], "}");
+    assert.ok(/Outcome|waiting on a person|escalat/i.test(r.stderr), "human screen goes to stderr under --json");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: --resolve without --by is refused; second resolve appends and does not mutate", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "resolve");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "resolve", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const first = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    assert.equal(first.code, 2, first.stderr);
+    const doc = JSON.parse(first.stdout);
+    const id = doc.id;
+    assert.ok(id, JSON.stringify(doc));
+    const proof = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    assert.ok(existsSync(proof), proof);
+    const original = readFileSync(proof);
+
+    const refused = run(["approve", "--resolve", id, "--allow"], repo);
+    assert.equal(refused.code, 1, `missing --by must exit 1\n${refused.stderr}\n${refused.stdout}`);
+    assert.ok(/named person|--by/i.test(refused.stderr), refused.stderr);
+    assert.equal(readFileSync(proof).toString("utf8"), original.toString("utf8"), "refuse must not write");
+
+    const ok = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.equal(ok.code, 0, ok.stderr);
+    const afterFirst = readFileSync(proof);
+    assert.ok(afterFirst.toString("utf8").startsWith(original.toString("utf8")));
+    assert.ok(afterFirst.length > original.length);
+
+    const again = run(["approve", "--resolve", id, "--deny", "--by", "Sam"], repo);
+    assert.equal(again.code, 0, again.stderr);
+    const afterSecond = readFileSync(proof);
+    assert.ok(afterSecond.toString("utf8").startsWith(afterFirst.toString("utf8")), "second resolve must not mutate earlier bytes");
+    assert.ok(afterSecond.length > afterFirst.length);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: help approve prints usage; unknown flag exits 1; --version stays 0.15.3", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "help");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "help", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const h = run(["help", "approve"], repo);
+    assert.equal(h.code, 0, h.stderr);
+    assert.ok(/Usage/i.test(h.stdout), h.stdout);
+    assert.ok(/--action/i.test(h.stdout), h.stdout);
+    assert.ok(/--resolve/i.test(h.stdout), h.stdout);
+    assert.ok(!/\bLIVE\b/.test(h.stdout), h.stdout);
+    assert.ok(!/approval agent is live/i.test(h.stdout), h.stdout);
+
+    const bad = run(["approve", "--nonsense-flag"], repo);
+    assert.equal(bad.code, 1, bad.stderr);
+    assert.ok(/Unknown flag: --nonsense-flag/.test(bad.stderr), bad.stderr);
+
+    const allowAsAsk = run(
+      ["approve", "--allow", "--action", "db.write", "--resource", "x", "--actor", "bot", "--data-class", "public"],
+      repo,
+    );
+    assert.equal(allowAsAsk.code, 1, allowAsAsk.stderr);
+    assert.ok(/--resolve/i.test(allowAsAsk.stderr), allowAsAsk.stderr);
+
+    const ownPkg = JSON.parse(readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+    const ver = run(["--version"], repo);
+    assert.equal(ver.code, 0);
+    assert.equal(ver.stdout.trim(), ownPkg.version);
+    assert.equal(ownPkg.version, "0.15.3");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H2 malformed policy.json → exit 1, never allow, no stack", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h2");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h2", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, path.join(".getadvantage", "policy.json"), "{ this is not json\n");
+    commitAll(repo, "chore: malformed policy");
+    const r = run(
+      ["approve", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "public"],
+      repo,
+    );
+    assert.equal(r.code, 1, `H2 must exit 1\n${r.stderr}\n${r.stdout}`);
+    assert.ok(/not valid JSON|could not/i.test(r.stderr + r.stdout), r.stderr + r.stdout);
+    assert.ok(!/Outcome: allowed/i.test(r.stdout));
+    assert.ok(!/^\s+at /m.test(r.stderr + r.stdout), "no stack trace");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H5 action path traversal writes only under .getadvantage/approvals", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h5");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h5", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const r = run(
+      ["approve", "--action", "../../etc/passwd", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    assert.equal(r.code, 2, r.stderr);
+    const etc = path.resolve(repo, "..", "..", "etc", "passwd");
+    assert.equal(existsSync(path.join(repo, "etc", "passwd")), false);
+    const approvals = path.resolve(repo, ".getadvantage", "approvals");
+    assert.ok(existsSync(approvals), "proof dir must exist");
+    function walk(dir, acc) {
+      for (const name of readdirSync(dir)) {
+        const abs = path.join(dir, name);
+        const st = lstatSync(abs);
+        if (st.isDirectory()) walk(abs, acc);
+        else acc.push(abs);
+      }
+      return acc;
+    }
+    const written = walk(path.join(repo, ".getadvantage"), []);
+    assert.ok(written.length >= 1);
+    for (const abs of written) {
+      const resolved = path.resolve(abs);
+      assert.ok(
+        resolved.startsWith(path.resolve(repo, ".getadvantage") + path.sep),
+        `escaped .getadvantage: ${resolved}`,
+      );
+    }
+    const json = run(
+      ["approve", "--json", "--action", "../../etc/passwd", "--resource", "x", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    const doc = JSON.parse(json.stdout);
+    const proofAbs = path.resolve(doc.proof);
+    assert.ok(proofAbs.startsWith(approvals + path.sep), proofAbs);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H6 AWS-shaped key in summary is absent from proof bytes and stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h6");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h6", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const aws = "AKIATESTKEYNOTLIVE12";
+    const r = run(
+      [
+        "approve",
+        "--json",
+        "--action",
+        "db.write",
+        "--resource",
+        "customers",
+        "--actor",
+        "bot",
+        "--data-class",
+        "regulated",
+        "--model",
+        "claude-opus-5",
+        "--summary",
+        `rotate ${aws} in prod`,
+      ],
+      repo,
+    );
+    assert.equal(r.code, 2, r.stderr);
+    const allOut = r.stdout + r.stderr;
+    assert.ok(!allOut.includes(aws), "key must not appear on stdout or stderr");
+    const doc = JSON.parse(r.stdout);
+    assert.ok(!JSON.stringify(doc).includes(aws));
+    const proofAbs = doc.proof;
+    assert.ok(existsSync(proofAbs), proofAbs);
+    const proofBytes = readFileSync(proofAbs, "utf8");
+    assert.ok(!proofBytes.includes(aws), "key must be absent from the proof record bytes");
+    const rec = JSON.parse(proofBytes.trim().split(/\n/)[0]);
+    assert.equal(rec.model, "claude-opus-5");
+    assert.equal(rec.dataClass, "regulated");
+    assert.equal(rec.outcome, "escalate");
+    assert.ok(typeof rec.createdAt === "string" && rec.createdAt.endsWith("Z"));
+    assert.ok(rec.approver == null || rec.approver === rec.ruleId);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H7 non-git folder → clear message, no stack, non-zero exit", () => {
+  const base = freshBase();
+  try {
+    const r = run(
+      ["approve", "--action", "db.write", "--resource", "customers", "--actor", "bot"],
+      base,
+    );
+    assert.notEqual(r.code, 0, "non-git may not allow");
+    assert.ok(/isn't a git repository|no committed policy/i.test(r.stderr + r.stdout), r.stderr + r.stdout);
+    assert.ok(/Nothing ran|not allowed/i.test(r.stderr + r.stdout), r.stderr + r.stdout);
+    assert.ok(!/^\s+at /m.test(r.stderr + r.stdout), "no stack trace");
+    assert.ok(!/getAdvantage crashed/i.test(r.stderr + r.stdout));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: check and gate output on a clean fixture stay GO / PASS", () => {
+  const base = freshBase();
+  try {
+    const repo = scaffold(base);
+    const check = run(["check", "--json", "--no-overview", "--no-brief-check"], repo);
+    assert.equal(check.code, 0, check.stderr);
+    const doc = parseJson(check);
+    assert.equal(doc.command, "check");
+    assert.equal(doc.verdict, "GO");
+    assert.equal(doc.exitCode, 0);
+    assert.ok(Array.isArray(doc.checks));
+    assert.equal("approve" in doc, false);
+
+    const payload = "hello-l1-unchanged";
+    const gate = runGate(["gate"], repo, payload);
+    assert.equal(gate.code, 0, gate.stderr);
+    assert.equal(gate.stdout, payload, "gate PASS must still write the payload byte-for-byte");
   } finally {
     cleanup(base);
   }
