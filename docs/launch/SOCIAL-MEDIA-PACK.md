@@ -119,15 +119,15 @@
 > file. A person who follows them rotates a production credential over a value
 > that never entered git history.
 >
-> The prepared candidate keeps the same scan, the same GO/NO-GO, the same exit
-> codes. It only tells the truth about *where* the finding is. For an untracked
-> file: the value is in a file git is not tracking, one `git add` away from a
-> commit; delete it or add it to `.gitignore`, and rotate the credential **if it
-> is live**. Rotation advice is kept; only the false “it is already in git
-> history” justification is dropped. If the secret really is committed, the
-> existing (true) wording is unchanged. No new command. No new flag. Not an
-> adoption event. Named evaluators / installs / first gates / week-two reuse /
-> retained external teams remain **0**.
+> **Draft only — not on npm.** The prepared candidate **would keep** the same
+> scan, GO/NO-GO, and exit codes. It **would** only change *where* the finding
+> is described. For an untracked file it **would say**: the value is in a file
+> git is not tracking, one `git add` away from a commit; delete it or add it to
+> `.gitignore`, and rotate the credential **if it is live**. Rotation advice
+> **would stay**; the false “already in git history” justification **would be**
+> dropped. If the secret really is committed, today’s (true) wording **would
+> stay**. No new command. No new flag. Not an adoption event. Named evaluators /
+> installs / first gates / week-two reuse / retained external teams remain **0**.
 >
 > **Do not say 0.15.3 is live. It is not.** Rollback for live **0.15.0** stays
 > **0.14.2** / `v0.14.2` / `a16f2d9` until a publish actually happens.

@@ -15844,8 +15844,13 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // in tests/run.mjs; self-block count stays 5); remeasured via PRINT_PINS=1:
   //   9853cd15e7ee0344 → a9c8768ac5d227ca (SARIF)
   //   51c1cc5606dfc6e9 → 38bdf04230670672 (JSON excl. generatedAt)
+  // After 0.15.3 package.json bump (SARIF embeds tool.driver.version; no
+  // startLine shift, JSON excl. generatedAt unchanged); remeasured via
+  // PRINT_PINS=1 / measureRegressionPins:
+  //   a9c8768ac5d227ca → f9b4eecc633c0fd5 (SARIF)
+  //   38bdf04230670672 (JSON excl. generatedAt — unchanged)
   assert.ok(
-    pins.sarifHash.startsWith("a9c8768ac5d227ca"),
+    pins.sarifHash.startsWith("f9b4eecc633c0fd5"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
@@ -17545,7 +17550,7 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("a9c8768ac5d227ca"),
+    pins.sarifHash.startsWith("f9b4eecc633c0fd5"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
