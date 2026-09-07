@@ -258,7 +258,7 @@ ${c.bold("Flags")}
                           same gate but omit Dirty-tree (staging is expected at commit/edit time) and
                           print a visible disclosure line. Not the default; not read from repo config.
                           Plain ${c.cyan("check")} / ${c.cyan("check --ci")} still enforce Dirty-tree for pre-deploy.
-  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")} + ${c.cyan("gate")} + ${c.cyan("approve")}) Print ONE machine-readable JSON document to stdout
+  --json                  (${c.cyan("check")} + ${c.cyan("map")} + ${c.cyan("fan-in")} + ${c.cyan("architecture")} + ${c.cyan("gate")}) Print ONE machine-readable JSON document to stdout
                           — { command, verdict, exitCode, checks?/lanes?, generatedAt } — with the
                           human rendering routed to stderr. For CI and tooling.
   --sarif <path>          (${c.cyan("check")}) Write a dependency-free SARIF 2.1.0 file for GitHub code scanning.

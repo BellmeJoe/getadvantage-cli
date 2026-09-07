@@ -20667,6 +20667,17 @@ scenario("approve: CLI allow → exit 0; tracked blanket allow is disclosed", ()
     );
     assert.equal(r9.code, 0, r9.stderr);
     assert.ok(/blanket allow/i.test(r9.stdout), r9.stdout);
+    assert.ok(/not a missing check/i.test(r9.stdout), r9.stdout);
+    const r9j = run(
+      ["approve", "--json", "--action", "email.send", "--resource", "news", "--actor", "bot", "--data-class", "public"],
+      repo9,
+    );
+    assert.equal(r9j.code, 0, r9j.stderr);
+    const doc9 = JSON.parse(r9j.stdout);
+    assert.equal(doc9.outcome, "allow");
+    assert.equal(doc9.blanketAllow, true);
+    assert.equal(doc9.disclosedAllow, true);
+    assert.equal(doc9.approver, "default");
   } finally {
     cleanup(base);
   }
@@ -20795,6 +20806,13 @@ scenario("approve: help approve prints usage; unknown flag exits 1; --version st
     assert.ok(/--resolve/i.test(h.stdout), h.stdout);
     assert.ok(!/\bLIVE\b/.test(h.stdout), h.stdout);
     assert.ok(!/approval agent is live/i.test(h.stdout), h.stdout);
+
+    const catalog = run(["help"], repo);
+    assert.equal(catalog.code, 0, catalog.stderr);
+    assert.ok(
+      !/\bapprove\b/i.test(catalog.stdout),
+      "unreleased approve must not appear in the global Commands catalog",
+    );
 
     const bad = run(["approve", "--nonsense-flag"], repo);
     assert.equal(bad.code, 1, bad.stderr);

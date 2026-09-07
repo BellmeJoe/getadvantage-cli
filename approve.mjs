@@ -544,8 +544,8 @@ function printNonGit() {
 function whoText(decision) {
   if (decision.outcome === "escalate") {
     return decision.escalateTo
-      ? `this needs a decision from ${decision.escalateTo}`
-      : "this needs a decision from a named person (set approvals.escalateTo in the committed policy)";
+      ? `${decision.escalateTo} (put that name on --by)`
+      : "any named person you pass to --by";
   }
   if (decision.outcome === "allow") {
     if (decision.ruleId) return `policy rule ${decision.ruleId}`;
@@ -568,19 +568,25 @@ function printDecisionScreen({ decision, id, warnings, now }) {
   console.log(`Outcome: ${label}`);
   console.log(`Who: ${whoText(decision)}`);
   console.log(`Why: ${decision.reason}`);
-  if (decision.disclosedAllow) {
+  if (decision.outcome === "allow") {
     console.log("");
-    console.log("This was a real yes. The committed default permits unmatched actions. Every allow is disclosed.");
+    if (decision.ruleId) {
+      console.log("This was a real yes. A committed policy rule allowed this action.");
+    } else {
+      console.log("This was a real yes. The committed default permits unmatched actions. That is not a missing check.");
+    }
   }
   console.log("");
   if (decision.outcome === "allow") {
     console.log("This command allowed only the action you passed in.");
   } else if (decision.outcome === "block") {
     console.log("Nothing ran. The committed policy blocked this action.");
+    console.log("This command only decided the action you passed in. It does not watch the rest of the machine.");
   } else {
     console.log("Nothing ran. A person has to say yes or no.");
+    console.log("This command only decides the action you passed in. It does not watch the rest of the machine.");
     console.log("");
-    console.log("Next (put a real person's name on --by):");
+    console.log("Next (copy these, put a real person's name on --by):");
     const byHint = decision.escalateTo ? `"${decision.escalateTo}"` : "<name>";
     console.log(`  ${bin} approve --resolve ${id} --allow --by ${byHint}`);
     console.log(`  ${bin} approve --resolve ${id} --deny --by ${byHint}`);
@@ -607,21 +613,23 @@ function printResolveScreen({ id, by, resolution, now }) {
 
 export function printApproveHelp() {
   const bin = binName();
-  console.log(`${c.bold("approve")} — decide whether an agent action is allowed, blocked, or sent to a person.`);
+  console.log(`${c.bold("approve")} - yes, no, or wait for a named person. Default: wait.`);
+  console.log("Only the action you pass in. Local record. Not in the published package until a release.");
   console.log("");
   console.log("Usage");
   console.log(`  ${bin} approve --action <name> --resource <res> --actor <who> [--data-class <class>] [--model <m>] [--summary <line>]`);
   console.log(`  ${bin} approve --action-file <path.json>`);
   console.log(`  ${bin} approve --resolve <id> --allow|--deny --by <name>`);
-  console.log(`  ${bin} approve --json …`);
+  console.log(`  ${bin} approve --json ...`);
   console.log("");
   console.log("Policy is the committed `.getadvantage/policy.json` (git index, not an unstaged edit).");
-  console.log("No matching rule → escalate (nothing is allowed automatically).");
+  console.log("Untracked or unstaged policy cannot say yes.");
+  console.log("No matching rule -> wait (nothing is allowed automatically).");
   console.log("A missing data class is treated as unknown and is never allowed by a wildcard rule.");
-  console.log("Every decision writes a proof line under `.getadvantage/approvals/` (digests only, never a payload).");
+  console.log("Every decision writes a local record under `.getadvantage/approvals/` (digests only, never a payload).");
   console.log("");
-  console.log("Exit codes: allowed 0 · blocked 1 · escalated 2 · usage/config error 1.");
-  console.log("Not a network service. Not live as an always-on interceptor.");
+  console.log("Exit codes: allowed 0 · blocked 1 · wait 2 · usage/config error 1.");
+  console.log("Not a proxy. Not always on. Does not change the policy on its own.");
 }
 
 function makeId(now, nonce) {
@@ -642,6 +650,7 @@ function jsonDocForDecision({ decision, id, now, descriptor }) {
     model: nonempty(descriptor?.model) || null,
     dataClass: nonempty(descriptor?.dataClass) || null,
     disclosedAllow: !!decision.disclosedAllow,
+    blanketAllow: decision.outcome === "allow" && !decision.ruleId,
     generatedAt: now,
   };
 }
