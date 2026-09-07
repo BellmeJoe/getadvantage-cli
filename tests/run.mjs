@@ -19909,8 +19909,8 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    379,
-    `suite arithmetic: base 369 + 10 scan-scope-claim scenarios, got ${scenarios.length}`,
+    385,
+    `suite arithmetic: base 379 + 6 L1-approval-agent A1 scenarios, got ${scenarios.length}`,
   );
 });
 
@@ -20238,6 +20238,354 @@ scenario("scan-scope-claim: staged-only secret still uses committed/staged wordi
     assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()), blob);
     assert.ok(!/ · untracked/.test((secret.extra || []).join("\n")));
     assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 64. L1 approval agent stage A — deterministic decide() + policy trust +
+//     append-only proof records (TEST_FILTER=approve)
+// ---------------------------------------------------------------------------
+scenario("approve: decide() is pure; no-match escalates; unknown dataClass never allows; specificity wins", async () => {
+  const { decide } = await import("../approve.mjs");
+  const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+  const decideSrc = src.slice(src.indexOf("export function decide"), src.indexOf("function parseJsonText"));
+  assert.ok(!/readFileSync|writeFileSync|appendFileSync|Date\.now|new Date|randomBytes|Math\.random/.test(decideSrc), decideSrc);
+  assert.ok(!/execFileSync|spawn/.test(decideSrc), decideSrc);
+
+  const desc = {
+    action: "db.write",
+    resource: "customers",
+    actor: "invoice-bot",
+    dataClass: "internal",
+  };
+  const pol = {
+    trusted: true,
+    default: "escalate",
+    escalateTo: "Alex",
+    rules: [
+      { id: "r-broad", action: "db.*", decision: "escalate", reason: "broad db" },
+      {
+        id: "r-win",
+        action: "db.write",
+        resource: "customers",
+        dataClass: "internal",
+        actor: "invoice-bot",
+        decision: "allow",
+        reason: "specific write",
+      },
+    ],
+  };
+  const a = decide(desc, pol);
+  const b = decide(desc, pol);
+  assert.deepEqual(a, b, "decide() must be referentially transparent");
+  assert.equal(a.outcome, "allow");
+  assert.equal(a.ruleId, "r-win");
+  assert.equal(a.escalateTo, "Alex");
+
+  // Equal specificity → earlier in file wins (locked).
+  const tied = decide(
+    { action: "db.write", resource: "x", actor: "bot", dataClass: "internal" },
+    {
+      trusted: true,
+      default: "escalate",
+      rules: [
+        { id: "first-block", action: "db.write", decision: "block", reason: "first" },
+        { id: "second-allow", action: "db.write", decision: "allow", reason: "second" },
+      ],
+    },
+  );
+  assert.equal(tied.outcome, "block");
+  assert.equal(tied.ruleId, "first-block");
+
+  // No match, missing default → escalate, never allow.
+  const nomatch = decide(desc, { trusted: true, rules: [] });
+  assert.equal(nomatch.outcome, "escalate");
+  assert.equal(nomatch.ruleId, null);
+  assert.notEqual(nomatch.outcome, "allow");
+
+  // Absent dataClass never matches a wildcard allow rule.
+  const unknown = decide(
+    { action: "db.write", resource: "customers", actor: "invoice-bot" },
+    {
+      trusted: true,
+      default: "escalate",
+      rules: [{ id: "wild-allow", action: "db.write", decision: "allow", reason: "any class" }],
+    },
+  );
+  assert.equal(unknown.outcome, "escalate", "unknown dataClass must not reach allow via a rule that omitted dataClass");
+  assert.notEqual(unknown.ruleId, "wild-allow");
+
+  // Same rule DOES allow when dataClass is named on both sides.
+  const named = decide(
+    { action: "db.write", resource: "customers", actor: "invoice-bot", dataClass: "internal" },
+    {
+      trusted: true,
+      default: "escalate",
+      rules: [
+        {
+          id: "named-class",
+          action: "db.write",
+          dataClass: "internal",
+          decision: "allow",
+          reason: "named",
+        },
+      ],
+    },
+  );
+  assert.equal(named.outcome, "allow");
+  assert.equal(named.ruleId, "named-class");
+
+  // Untrusted policy cannot allow even if it claims default:allow.
+  const untrusted = decide(desc, { trusted: false, default: "allow", rules: [] });
+  assert.equal(untrusted.outcome, "escalate");
+});
+
+scenario("approve: H8 allow-without-id refused; H9 tracked blanket allow disclosed", async () => {
+  const { decide, loadApprovalsPolicy } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h8");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h8", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      path.join(".getadvantage", "policy.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          approvals: {
+            default: "escalate",
+            rules: [{ decision: "allow", action: "db.write", reason: "no id" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: allow rule without id");
+    const loaded = loadApprovalsPolicy(repo);
+    assert.equal(loaded.ok, false, "H8: policy with allow-and-no-id must be invalid");
+    assert.ok(/stable id|unattributable/i.test(loaded.error || ""), loaded.error);
+
+    const repo9 = path.join(base, "h9");
+    initRepo(repo9);
+    write(repo9, "package.json", JSON.stringify({ name: "h9", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo9,
+      path.join(".getadvantage", "policy.json"),
+      JSON.stringify({ version: 1, approvals: { default: "allow", escalateTo: "Alex", rules: [] } }, null, 2) + "\n",
+    );
+    commitAll(repo9, "chore: tracked blanket allow");
+    const loaded9 = loadApprovalsPolicy(repo9);
+    assert.equal(loaded9.ok, true, loaded9.error);
+    assert.equal(loaded9.policy.trusted, true);
+    const d = decide(
+      { action: "email.send", resource: "customers", actor: "bot", dataClass: "public" },
+      loaded9.policy,
+    );
+    assert.equal(d.outcome, "allow", "H9: tracked default allow is the legitimate blanket");
+    assert.equal(d.ruleId, null);
+    assert.equal(d.disclosedAllow, true);
+    assert.ok(/blanket allow/i.test(d.reason), d.reason);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H10 Windows path separators do not break glob matching", async () => {
+  const { decide, normalizeMatchValue } = await import("../approve.mjs");
+  assert.equal(normalizeMatchValue("invoices\\2026"), "invoices/2026");
+  const d = decide(
+    { action: "file.read", resource: "invoices\\2026\\a.csv", actor: "bot", dataClass: "internal" },
+    {
+      trusted: true,
+      default: "escalate",
+      rules: [
+        {
+          id: "inv-read",
+          action: "file.read",
+          resource: "invoices/**",
+          decision: "allow",
+          reason: "invoices tree",
+          dataClass: "internal",
+        },
+      ],
+    },
+  );
+  assert.equal(d.outcome, "allow");
+  assert.equal(d.ruleId, "inv-read");
+});
+
+scenario("approve: H3 untracked policy.json cannot produce allow", async () => {
+  const { decide, loadApprovalsPolicy } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h3");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h3", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: no policy yet");
+    write(
+      repo,
+      path.join(".getadvantage", "policy.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          approvals: {
+            default: "allow",
+            rules: [{ id: "wild", decision: "allow", reason: "untracked allow" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    const loaded = loadApprovalsPolicy(repo);
+    assert.equal(loaded.ok, true, loaded.error);
+    assert.equal(loaded.policy.trusted, false);
+    assert.ok(/not tracked or staged/i.test(loaded.warnings.join("\n")), loaded.warnings.join("\n"));
+    const d = decide(
+      { action: "db.write", resource: "customers", actor: "bot", dataClass: "public" },
+      loaded.policy,
+    );
+    assert.notEqual(d.outcome, "allow", "H3: untracked policy must never allow");
+    assert.equal(d.outcome, "escalate");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: H4 unstaged worktree allow does not apply; index blob wins", async () => {
+  const { decide, loadApprovalsPolicy } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "h4");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "h4", version: "1.0.0", private: true }, null, 2) + "\n");
+    const benign =
+      JSON.stringify(
+        {
+          version: 1,
+          approvals: {
+            default: "escalate",
+            escalateTo: "Alex",
+            rules: [{ id: "block-writes", action: "db.write", decision: "block", reason: "no writes" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n";
+    const hostile =
+      JSON.stringify(
+        {
+          version: 1,
+          approvals: {
+            default: "escalate",
+            rules: [{ id: "sneak-allow", action: "db.write", decision: "allow", reason: "unstaged" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n";
+    write(repo, path.join(".getadvantage", "policy.json"), benign);
+    commitAll(repo, "chore: tracked block policy");
+    write(repo, path.join(".getadvantage", "policy.json"), hostile);
+    const loaded = loadApprovalsPolicy(repo);
+    assert.equal(loaded.ok, true, loaded.error);
+    assert.equal(loaded.policy.trusted, true);
+    assert.ok(/working tree differs|git index/i.test(loaded.warnings.join("\n")), loaded.warnings.join("\n"));
+    const d = decide(
+      { action: "db.write", resource: "customers", actor: "bot", dataClass: "internal" },
+      loaded.policy,
+    );
+    assert.equal(d.outcome, "block", "H4: index blob still blocks; unstaged allow must not apply");
+    assert.equal(d.ruleId, "block-writes");
+    assert.notEqual(d.ruleId, "sneak-allow");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("approve: proof record omits AWS-shaped payload; resolve appends and does not mutate", async () => {
+  const {
+    buildProofRecord,
+    appendProofRecord,
+    readProofLines,
+    sanitizeRecordId,
+    proofPathForId,
+    decide,
+  } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "proof");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "proof", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+
+    const aws = "AKIATESTKEYNOTLIVE12";
+    const desc = {
+      action: "../../etc/passwd",
+      resource: "customers",
+      actor: "claude-code",
+      model: "claude-opus-5",
+      dataClass: "regulated",
+      summary: `rotate ${aws} in prod`,
+    };
+    const decision = decide(desc, {
+      trusted: true,
+      default: "escalate",
+      escalateTo: "Alex",
+      rules: [{ id: "block-passwd", action: "**", decision: "block", reason: "no" }],
+    });
+    assert.equal(decision.outcome, "block");
+    const now = "2026-09-07T17:00:00.000Z";
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "dec-test-1",
+      decision,
+      descriptor: desc,
+      now,
+    });
+    assert.equal(rec.model, "claude-opus-5");
+    assert.equal(rec.dataClass, "regulated");
+    assert.equal(rec.approver, "block-passwd");
+    assert.equal(rec.outcome, "block");
+    assert.equal(rec.createdAt, now);
+    assert.ok(rec.createdAt.endsWith("Z"));
+    const blob = JSON.stringify(rec);
+    assert.ok(!blob.includes(aws), "H6: raw AWS-shaped key must be absent from the proof record");
+    assert.ok(!blob.includes(desc.summary), "raw summary must not be stored");
+    assert.ok(typeof rec.summaryDigest === "string" && rec.summaryDigest.length === 64);
+    assert.ok(typeof rec.resourceDigest === "string" && rec.resourceDigest.length === 64);
+
+    const abs = appendProofRecord(repo, rec);
+    const approvalsRoot = path.resolve(repo, ".getadvantage", "approvals");
+    assert.ok(path.resolve(abs).startsWith(approvalsRoot + path.sep) || path.resolve(abs) === approvalsRoot);
+    const originalBytes = readFileSync(abs);
+
+    const escaped = proofPathForId(repo, "../../etc/passwd");
+    assert.ok(path.resolve(escaped).startsWith(approvalsRoot + path.sep));
+    assert.ok(!escaped.replace(/\\/g, "/").includes("/etc/"), escaped);
+    assert.equal(sanitizeRecordId("../../etc/passwd"), "passwd");
+
+    const resolution = buildProofRecord({
+      kind: "resolution",
+      id: rec.id,
+      decision: { outcome: "allow", ruleId: null, reason: "Alex allowed this action", escalateTo: null },
+      descriptor: {},
+      now: "2026-09-07T17:05:00.000Z",
+      extra: { by: "Alex", resolves: rec.id, resolution: "allow" },
+    });
+    appendProofRecord(repo, resolution);
+    const after = readProofLines(repo, rec.id);
+    assert.ok(after.lines.length >= 2, "resolution must append a second line");
+    const firstLine = after.lines[0] + (after.raw.includes("\n") ? "\n" : "");
+    // Original record bytes are the first line plus its trailing newline.
+    const originalText = originalBytes.toString("utf8");
+    assert.ok(after.raw.startsWith(originalText), "original record bytes must be unchanged as a prefix");
+    assert.equal(after.lines[0], originalText.trimEnd());
+    assert.ok(!after.raw.includes(aws), "resolution file still has no secret");
   } finally {
     cleanup(base);
   }
