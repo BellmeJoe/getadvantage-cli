@@ -102,6 +102,36 @@
 > **0.14.0** / `v0.14.0` / `cc9d39a` intact behind it). Prefer the
 > `npm dist-tag` path over unpublish.
 
+> **0.15.3 — PREPARED ON THIS BRANCH. NOT PUBLISHED. NOT LIVE. NOT ON npm.**
+> Do not advertise, post, or brief this as a released version. `npx getadvantage`
+> still installs **0.15.0**. `dist-tags.latest` is still **0.15.0**. There is no
+> `v0.15.3` tag and no GitHub Release. Until a later cycle actually publishes,
+> every LIVE claim in this pack remains **0.15.0**. Treat the rest of this
+> paragraph as a draft that is **not yet true for any user**.
+>
+> **What the prepared 0.15.3 candidate would change (plain language):** the tool
+> already looks in untracked files for secret-shaped values — that scan was
+> always correct. What was wrong was the *words*. If the only finding was in a
+> file you had never added to git, live **0.15.0** still says the secret is *in
+> committed/staged files*, that it *ships to every clone*, that *git history
+> keeps it until you rotate the credential at the provider*, and that you should
+> *commit the removal*. All four of those statements are false for an untracked
+> file. A person who follows them rotates a production credential over a value
+> that never entered git history.
+>
+> The prepared candidate keeps the same scan, the same GO/NO-GO, the same exit
+> codes. It only tells the truth about *where* the finding is. For an untracked
+> file: the value is in a file git is not tracking, one `git add` away from a
+> commit; delete it or add it to `.gitignore`, and rotate the credential **if it
+> is live**. Rotation advice is kept; only the false “it is already in git
+> history” justification is dropped. If the secret really is committed, the
+> existing (true) wording is unchanged. No new command. No new flag. Not an
+> adoption event. Named evaluators / installs / first gates / week-two reuse /
+> retained external teams remain **0**.
+>
+> **Do not say 0.15.3 is live. It is not.** Rollback for live **0.15.0** stays
+> **0.14.2** / `v0.14.2` / `a16f2d9` until a publish actually happens.
+
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
 `npm run evidence`; that result does not automatically prove every client,
