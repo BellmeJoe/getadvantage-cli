@@ -1,4 +1,4 @@
-# Social / advertising pack — getadvantage **0.15.0** (LIVE)
+# Social / advertising pack — getadvantage **0.15.3** (LIVE)
 
 > **Owner:** Grok Build. This is the sole CLI advertising-truth source. Maintain
 > it in one assigned lane and keep all 8 evidence checks GREEN. Growth may
@@ -6,19 +6,41 @@
 > platform, and rate preflight. Grok may release only after the objective product
 > gate and independent audit have no open P1/P2.
 
-> **LIVE:** **getadvantage@0.15.0** published **2026-09-06 17:11 +03:00**
-> (minor — first release of the request-time policy gate). `dist-tags.latest`
-> **0.15.0**, registry `gitHead` `83feacf`, tags `v0.15.0` and floating `v1` both
-> peel to `83feacf`, GitHub Release `v0.15.0`, CI run `34038202894` (success, suite
-> **369/369**, evidence **8/8**), published `dist.shasum`
-> `6ed35adc0dc117cb4e97492731bdb3c631772f9e`. Released under a release-scoped
-> independent `REVIEW_GO (release-eligible)` at `83feacf` with 0 open P1/P2. This is
-> also the first release whose full surface ran on **Linux CI** (run `34027694675`,
-> `ubuntu-latest`, step-level 369/369 + 8/8). Prefer leading with the
-> eight core GO/NO-GO claims below; Intent remains the trust-layer follow-on —
-> always *scope verified; semantic correctness not proven*.
+> **LIVE:** **getadvantage@0.15.3** published **2026-09-07 17:11 +03:00**
+> (patch — one wording repair, no new capability). `dist-tags.latest` **0.15.3**,
+> registry `gitHead` `b3d9009`, tags `v0.15.3` and floating `v1` both peel to
+> `b3d9009`, GitHub Release `v0.15.3`, CI run `34131214994` (success, suite
+> **379/379**, evidence **8/8**), published `dist.shasum`
+> `52796fdf413c7fba256562ef1cc1288226e84dc9`. Released under a release-scoped
+> independent `REVIEW_GO (release-eligible)` at `b3d9009` with 0 open P1/P2, and its
+> full surface ran on **Linux CI** (run `34115377587`, `ubuntu-latest`, step-level
+> 379/379 + 9/9 gate stdout fixtures + 8/8). Prefer leading with the eight core
+> GO/NO-GO claims below; Intent remains the trust-layer follow-on — always
+> *scope verified; semantic correctness not proven*.
 >
-> **What 0.15.0 ships (minor — one new command, `gate`):** `getadvantage gate` is a
+> **What 0.15.3 fixes (patch — the words, never the scan).** The tool has always
+> looked in untracked files for secret-shaped values, and that was correct. The
+> wording was not. If your only finding sat in a file you had never added to git,
+> **0.15.0 and every version before it** said the secret was *in committed/staged
+> files*, that it *ships to every clone*, that *git history keeps it until you
+> rotate the credential at the provider*, and that you should *commit the removal*.
+> All four are false for a file git has never seen, and someone following them
+> rotates a production credential over a value that never entered history.
+> **0.15.3 says instead:** the value is in a file git is not tracking, one
+> `git add` away from a commit — delete it or add it to `.gitignore`, and rotate
+> the credential **if it is live**. Rotation advice stayed; only the false
+> “already in your history” justification is gone. If the secret really is
+> committed, the older (true) wording is unchanged, byte for byte. The pass line
+> now reads `Scanned N tracked and untracked files (gitignored skipped)`, which
+> is what it actually scanned.
+>
+> **Say what it is not.** No new command, no new flag, no new detection. The same
+> scan, the same GO/NO-GO, the same exit codes, the same `--json` and SARIF shape.
+> **Nothing that was found before is missed now, and nothing new is found.**
+> Not an adoption event. Named evaluators / installs / first gates / week-two
+> reuse / retained external teams remain **0**.
+>
+> **What 0.15.0 shipped and 0.15.3 carries forward unchanged (the `gate` command):** `getadvantage gate` is a
 > **deterministic outbound** filter on piped stdin. It scans the payload against the
 > same published secret catalogue `check` uses and **BLOCKs by default** (exit 1,
 > nothing on stdout) or masks with `--redact`, **before** the text reaches a model,
@@ -97,40 +119,28 @@
 > GitHub Action + PR summary (`uses: BellmeJoe/getadvantage-cli@v1` — floating
 > major; exact tags from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases));
 > secret scan of committed `.next/static/**`; SARIF 2.1. Not a security guarantee.
-> Rollback target for live **0.15.0**: **getadvantage@0.14.2** /
-> tag `v0.14.2` / `a16f2d9` (with **0.14.1** / `v0.14.1` / `f098c5e` and
-> **0.14.0** / `v0.14.0` / `cc9d39a` intact behind it). Prefer the
-> `npm dist-tag` path over unpublish.
+> Rollback target for live **0.15.3**: **getadvantage@0.15.0** /
+> tag `v0.15.0` / `83feacf` (with **0.14.2** / `v0.14.2` / `a16f2d9`, **0.14.1** /
+> `v0.14.1` / `f098c5e` and **0.14.0** / `v0.14.0` / `cc9d39a` intact behind it).
+> Prefer the `npm dist-tag` path over unpublish.
 
-> **0.15.3 — PREPARED ON THIS BRANCH. NOT PUBLISHED. NOT LIVE. NOT ON npm.**
-> Do not advertise, post, or brief this as a released version. `npx getadvantage`
-> still installs **0.15.0**. `dist-tags.latest` is still **0.15.0**. There is no
-> `v0.15.3` tag and no GitHub Release. Until a later cycle actually publishes,
-> every LIVE claim in this pack remains **0.15.0**. Treat the rest of this
-> paragraph as a draft that is **not yet true for any user**.
+> **0.15.3 IS LIVE ON npm as of 2026-09-07 17:11 +03:00 — this paragraph replaces
+> the “prepared, not published” draft that stood here.** `npx getadvantage` now
+> installs **0.15.3**; `dist-tags.latest` is **0.15.3**; tag `v0.15.3` and floating
+> `v1` both peel to `b3d9009`; GitHub Release `v0.15.3` exists. Verified on the
+> **published** artifact, not on a branch: same throwaway repo, one untracked file
+> holding a key — `0.15.0` printed *“1 possible secret in committed/staged files”*
+> with the git-history justification; `0.15.3` prints *“1 possible secret in
+> untracked files — one git add away from a commit; remove or gitignore, rotate if
+> live”*. Both NO-GO, exit 1. A genuinely tracked secret still prints the older
+> wording, byte-identical, because there it is true.
 >
-> **What the prepared 0.15.3 candidate would change (plain language):** the tool
-> already looks in untracked files for secret-shaped values — that scan was
-> always correct. What was wrong was the *words*. If the only finding was in a
-> file you had never added to git, live **0.15.0** still says the secret is *in
-> committed/staged files*, that it *ships to every clone*, that *git history
-> keeps it until you rotate the credential at the provider*, and that you should
-> *commit the removal*. All four of those statements are false for an untracked
-> file. A person who follows them rotates a production credential over a value
-> that never entered git history.
->
-> **Draft only — not on npm.** The prepared candidate **would keep** the same
-> scan, GO/NO-GO, and exit codes. It **would** only change *where* the finding
-> is described. For an untracked file it **would say**: the value is in a file
-> git is not tracking, one `git add` away from a commit; delete it or add it to
-> `.gitignore`, and rotate the credential **if it is live**. Rotation advice
-> **would stay**; the false “already in git history” justification **would be**
-> dropped. If the secret really is committed, today’s (true) wording **would
-> stay**. No new command. No new flag. Not an adoption event. Named evaluators /
-> installs / first gates / week-two reuse / retained external teams remain **0**.
->
-> **Do not say 0.15.3 is live. It is not.** Rollback for live **0.15.0** stays
-> **0.14.2** / `v0.14.2` / `a16f2d9` until a publish actually happens.
+> **What it does not entitle anyone to say.** This is a patch that repairs a
+> sentence. It is **not** a new capability, **not** better detection, and **not**
+> evidence anyone uses the tool. Do not describe it as a security improvement:
+> nothing that was detectable before is detected differently now. Named
+> evaluators, installs, first gates, week-two reuse and retained external teams
+> are still **0**, and shipping is not adoption.
 
 **For any session that posts, ads, or briefs creators.**  
 Do not invent features. The eight claims in the Evidence map are proven by
@@ -143,12 +153,12 @@ windows.
 
 | Field | Value |
 |--------|--------|
-| **npm (published live)** | **`getadvantage@0.15.0`** (live 2026-09-06; registry `gitHead` `83feacf`) |
-| **Checkout** | Live **0.15.0** minor: `getadvantage gate` — a deterministic outbound stdin filter that BLOCKs (or `--redact` masks) secrets before they reach a model, with a local proof record; not inbound, not a proxy, not a classifier + prior 0.14.2 patch: committed credentials glued to a variable name (`PREFIX_sk_live_…`) are caught instead of returning a false GO (detection still not complete — alphanumeric-adjacent keys remain a deliberate miss) + prior 0.14.0 `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
+| **npm (published live)** | **`getadvantage@0.15.3`** (live 2026-09-07; registry `gitHead` `b3d9009`) |
+| **Checkout** | Live **0.15.3** patch: `check` now describes an **untracked** secret truthfully — *one git add away from a commit; remove or gitignore, rotate if live* — instead of claiming it is committed, ships to every clone and is kept by git history; the tracked wording is unchanged and no detection moved + prior 0.15.0 minor: `getadvantage gate` — a deterministic outbound stdin filter that BLOCKs (or `--redact` masks) secrets before they reach a model, with a local proof record; not inbound, not a proxy, not a classifier + prior 0.14.2 patch: committed credentials glued to a variable name (`PREFIX_sk_live_…`) are caught instead of returning a false GO (detection still not complete — alphanumeric-adjacent keys remain a deliberate miss) + prior 0.14.0 `getadvantage feedback` (print-only issue URL; nothing sent) + prior 0.13.1 `file:line` / dry-run paste-ready repair + `--report-dry-run` + multi-finding Action summary + denser check + symlink-escape coverage + Claude hooks + paste-ready secret remediation + Intent in merge-train + map client orientation + client-bundle scan + Action + SARIF |
 | **Install** | `npx getadvantage` (tracks `latest`) or pin an exact tag from the [releases page](https://github.com/BellmeJoe/getadvantage-cli/releases) (no signup) |
 | **GitHub** | https://github.com/BellmeJoe/getadvantage-cli · [releases](https://github.com/BellmeJoe/getadvantage-cli/releases) · Action `@v1` (floating major) · Marketplace listing [getadvantage-check](https://github.com/marketplace/actions/getadvantage-check) (shelf visibility only) |
 | **Site** | https://getadvantage.app |
-| **Owner truth** | `npm run evidence` → **8/8 GREEN** · full suite **369/369** (Windows local **and** Linux CI) · release fingerprint **`83feacf`** · published `dist.shasum` `6ed35adc0dc117cb4e97492731bdb3c631772f9e` · tag `v0.15.0` + floating `v1` both peel to `83feacf` · CI run `34038202894` · post-release cold `npx getadvantage@0.15.0 --version` → **0.15.0, exit 0, 3s** and cold `check` on a fresh temp repo → **GO, exit 0, 4s**; `gate` fed a live-format Stripe key on stdin → **BLOCK, exit 1, 0 bytes stdout** (all re-measured this cycle, 2026-09-06 17:12-17:16 Amman) · 0 RLS advertised · rollback: `0.14.2` / `v0.14.2` / `a16f2d9` |
+| **Owner truth** | `npm run evidence` → **8/8 GREEN** · full suite **379/379** (Windows local **and** Linux CI run `34115377587`) · release fingerprint **`b3d9009`** · published `dist.shasum` `52796fdf413c7fba256562ef1cc1288226e84dc9` · tag `v0.15.3` + floating `v1` both peel to `b3d9009` · CI run `34131214994` · post-release cold `npx getadvantage@0.15.3 --version` → **0.15.3, exit 0, 3.3s** and cold `check` on a fresh temp repo → **GO, exit 0, 2.8s, 0 B product stderr**; the same repo with one untracked key → **NO-GO, exit 1**, `committed/staged` **0** occurrences (on `0.15.0` it was 1) · real-repo dogfood: `getadvantage-cli` exit 1 / 2.2s / 0 B stderr, site repo exit 1 / 9.0s / 0 B stderr with both findings now correctly named `· untracked`, neither repository mutated (all re-measured on the PUBLISHED artifact this cycle, 2026-09-07 17:12-17:20 Amman) · 0 RLS advertised · rollback: `0.15.0` / `v0.15.0` / `83feacf` |
 | **Tone** | Soft/beta, demo-led. Not “gitleaks killer.” Not “enterprise control plane day one.” |
 
 ---
