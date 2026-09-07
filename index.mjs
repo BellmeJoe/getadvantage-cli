@@ -10,7 +10,7 @@
 //
 //   • dirty-tree guard   — `vercel --prod` ships the working tree, so a dirty
 //                          tree (or another session's work) would ship live
-//   • secret scan        — leaked keys in committed/staged files
+//   • secret scan        — leaked keys in tracked, staged, or untracked files git isn't ignoring
 //   • build + typecheck  — `tsc --noEmit` (and `--build` for a full build)
 //   • schema-bump check  — DDL changed without a SCHEMA_VERSION bump
 //
