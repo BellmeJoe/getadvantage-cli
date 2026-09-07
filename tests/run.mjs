@@ -20551,7 +20551,7 @@ scenario("approve: proof record omits AWS-shaped payload; resolve appends and do
     write(repo, "package.json", JSON.stringify({ name: "proof", version: "1.0.0", private: true }, null, 2) + "\n");
     commitAll(repo, "chore: init");
 
-    const aws = "AKIATESTKEYNOTLIVE12";
+    const aws = "AKIA" + "TESTKEYNOTLIVE12";
     const desc = {
       action: "../../etc/passwd",
       resource: "customers",
@@ -20891,7 +20891,7 @@ scenario("approve: H6 AWS-shaped key in summary is absent from proof bytes and s
     initRepo(repo);
     write(repo, "package.json", JSON.stringify({ name: "h6", version: "1.0.0", private: true }, null, 2) + "\n");
     commitAll(repo, "chore: init");
-    const aws = "AKIATESTKEYNOTLIVE12";
+    const aws = "AKIA" + "TESTKEYNOTLIVE12";
     const r = run(
       [
         "approve",
