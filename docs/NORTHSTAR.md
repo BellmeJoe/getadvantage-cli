@@ -47,6 +47,16 @@ expectation adopted in the week plan, not an ambition.
 12-month target; further latency work is not fundable without profiling evidence
 that real CI time improves.
 
+> **Re-measured 2026-09-05 at `0.14.2`** (weekly review; fresh `git init`,
+> isolated `npm_config_cache`): **1.96s** to a GO verdict, exit 0. The **full
+> activation path** — cold `npx` → `init --claude-code` → first gate → receipt on
+> disk — is **4.14s** (check 1.96s + init 2.18s), receipt verified present. **The
+> fastest reading ever recorded, and it is not an engineering win:** `0.14.2`
+> published ten days earlier, so registry/CDN warmth explains the gain over the
+> 08-29 reading, exactly as tarball-fetch cost explained the loss that week.
+> Target is *hold* < 60s; held with ~14x margin on the whole adoption path. **No
+> latency work is fundable.**
+
 > **Re-measured 2026-08-29 at `0.14.2`** (weekly review; fresh `git init`,
 > isolated `npm_config_cache`): **4.42s** to a GO verdict, exit 0. The **full
 > activation path** — cold `npx` → `init --claude-code` → first gate → receipt on
@@ -116,7 +126,14 @@ header is publicly searchable.
 > observed absence; the `UNKNOWN` path was re-verified the same session (no
 > `GITHUB_TOKEN` → prints `UNKNOWN`, refuses to report a `0`, **exits 1**). *The
 > control fell from 2,048 to 131 between two consecutive reads. Recorded, not
-> explained: the control asserts **reachability**, not magnitude.*
+> explained: the control asserts **reachability**, not magnitude.* **Re-run 2026-09-05 weekly
+> review: `retained-external-teams: 0`, `status: ok — zero code-search hits`,
+> `# positive-control-total-count: 2040`** — observed absence, and the control has
+> recovered from 131 to 2,040 between two weekly reads with no explanation on
+> either side. Recorded, not explained; the recovery corroborates that 131 was a
+> magnitude fluctuation and not a degrading query. The `UNKNOWN` path was
+> re-verified the same session (no `GITHUB_TOKEN` → prints `UNKNOWN`, refuses to
+> report a `0`, **exits 1**).
 
 ## Portfolio order
 
@@ -366,7 +383,8 @@ lane ships or is killed. Only one implementation lane may be open.
 > lane owns the work: three consecutive weeks of **0/20 in-ICP Move 1 touches** now
 > have a diagnosed structural cause, and Move 1 is the north star's only live path
 > to a retained external team. Evidence and the one-variable change are in
-> `agent-opseviews6-08-22-getadvantage-northstar-weekly.md` §4 — in short,
+> `agent-ops
+eviews6-08-22-getadvantage-northstar-weekly.md` §4 — in short,
 > the battery searches **issue text**, so every hit is by construction a defect the
 > team already found; only 5 of 21 candidates failed on the 2-10 contributor floor,
 > so **the floor is right and the query is wrong**. **Consequence for this file:
