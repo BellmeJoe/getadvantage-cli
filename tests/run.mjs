@@ -224,7 +224,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
-import { checkSupabaseRls } from "../checks.mjs";
+import { checkSupabaseRls, filesToScan } from "../checks.mjs";
 import {
   GATE_MAX_STDIN_BYTES,
   GATE_STDIN_IDLE_MS,
@@ -19827,6 +19827,412 @@ scenario("train-union: single corpus + 21-case (id, chars, auth) + evasion", asy
     }
     runAxis("prefix", prefixText, prefixExpected);
     runAxis("suffix", suffixText, suffixExpected);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 0.15.2 scan-scope-claim-truth — wording only; filesToScan() frozen.
+// Pre-lane message builders are pinned as constants so the untracked
+// scenarios FAIL against old behaviour and PASS against live. Do not "fix"
+// these strings to match the new wording — that would delete the fail-before.
+// ---------------------------------------------------------------------------
+const SCAN_SCOPE_PRE_LANE_FAIL_DETAIL = (n) =>
+  `${n} possible secret${n === 1 ? "" : "s"} in committed/staged files — remove + rotate before shipping.`;
+const SCAN_SCOPE_PRE_LANE_PASS_DETAIL = (n) =>
+  `Scanned ${n} tracked/staged file${n === 1 ? "" : "s"} — no leaked-secret patterns matched.`;
+const SCAN_SCOPE_PRE_LANE_WHY =
+  "  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.";
+const SCAN_SCOPE_PRE_LANE_REMEDY =
+  "  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.";
+const SCAN_SCOPE_FILES_TO_SCAN_BODY = `function filesToScan(cwd) {
+  const set = new Set();
+  // gitFilesZ (NUL-terminated) — NOT the newline-split gitSafe: git quotes +
+  // octal-escapes non-ASCII paths by default, which then fail to open and drop
+  // out of the scan silently (a false GO on any repo with an umlaut filename).
+  // Tracked files.
+  for (const f of gitFilesZ(["ls-files"], { cwd })) set.add(f);
+  // Untracked-but-not-ignored (new files a dev created; --others honours .gitignore).
+  for (const f of gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })) set.add(f);
+  return [...set];
+}`;
+
+/** Independent reimplementation of the pre-lane filesToScan algorithm. */
+function filesToScanFrozen(cwd) {
+  const list = (args) => {
+    try {
+      const out = execFileSync("git", [...args, "-z"], {
+        encoding: "utf8",
+        cwd,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      return out.split("\0").filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  const set = new Set();
+  for (const f of list(["ls-files"])) set.add(f);
+  for (const f of list(["ls-files", "--others", "--exclude-standard"])) set.add(f);
+  return [...set];
+}
+
+function scanScopeBlob(secretCheck) {
+  const rem = (secretCheck.findings || [])
+    .flatMap((f) => f.remediation || [])
+    .join("\n");
+  return `${secretCheck.detail || ""}\n${(secretCheck.extra || []).join("\n")}\n${rem}`;
+}
+
+scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked files", () => {
+  // Fail-before pin: these constants ARE the defect. If a later edit "updates"
+  // them to the corrected wording, this scenario must fail.
+  assert.match(SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1), /committed\/staged files/);
+  assert.match(SCAN_SCOPE_PRE_LANE_PASS_DETAIL(2), /tracked\/staged file/);
+  assert.match(SCAN_SCOPE_PRE_LANE_WHY, /committed\/staged and ships to every clone/);
+  assert.match(SCAN_SCOPE_PRE_LANE_WHY, /git history keeps it/);
+  assert.match(SCAN_SCOPE_PRE_LANE_REMEDY, /commit the removal/);
+  assert.equal(
+    SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1),
+    "1 possible secret in committed/staged files — remove + rotate before shipping.",
+  );
+  assert.equal(
+    SCAN_SCOPE_PRE_LANE_PASS_DETAIL(2),
+    "Scanned 2 tracked/staged files — no leaked-secret patterns matched.",
+  );
+  assert.equal(
+    scenarios.length,
+    379,
+    `suite arithmetic: base 369 + 10 scan-scope-claim scenarios, got ${scenarios.length}`,
+  );
+});
+
+scenario("scan-scope-claim: filesToScan set identical to frozen pre-lane algorithm", () => {
+  const src = readFileSync(path.join(__dirname, "..", "checks.mjs"), "utf8");
+  assert.ok(
+    src.includes(SCAN_SCOPE_FILES_TO_SCAN_BODY),
+    "filesToScan() body must stay byte-identical to the pre-lane algorithm",
+  );
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "scan-set");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "scan-set", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export const ok = 1;\n");
+    write(repo, ".gitignore", "*.secret\n");
+    commitAll(repo, "chore: tracked + gitignore");
+    write(repo, "notes.txt", "untracked but not ignored\n");
+    write(repo, "ignored.secret", "should not be scanned\n");
+    const live = [...filesToScan(repo)].sort();
+    const frozen = [...filesToScanFrozen(repo)].sort();
+    assert.deepEqual(live, frozen, `live filesToScan drifted from frozen:\n live=${live.join(",")}\n frozen=${frozen.join(",")}`);
+    assert.ok(live.includes("app.js"), "tracked file must be in the scan set");
+    assert.ok(live.includes("notes.txt"), "untracked-not-ignored must be in the scan set");
+    assert.ok(!live.includes("ignored.secret"), "gitignored file must stay out of the scan set");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: untracked secret BLOCK is NO-GO and does not claim committed/staged/history", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "untracked-secret");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "untracked-secret", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export const ok = 1;\n");
+    commitAll(repo, "chore: clean tree");
+    const key = "sk_live_" + "untr4ckedScr4tch00000001";
+    write(repo, "scratch.bak", `export const K = "${key}";\n`);
+    const por = porcelain(repo);
+    assert.match(por, /\?\? scratch\.bak/);
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `untracked secret must still NO-GO (wording lane)\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const blob = scanScopeBlob(secret);
+
+    // Fail-before: the frozen pre-lane builders would lie about this fixture.
+    assert.match(SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1), /committed\/staged files/);
+    assert.notEqual(secret.detail, SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1));
+    assert.ok(!blob.includes(SCAN_SCOPE_PRE_LANE_WHY.trim()));
+    assert.ok(!blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()));
+
+    assert.ok(/untracked/.test(secret.detail), `detail must name untracked:\n${secret.detail}`);
+    assert.ok(!/in committed\/staged files/.test(secret.detail), secret.detail);
+    assert.ok(!/ships to every clone/.test(blob), blob);
+    assert.ok(!/git history keeps it/.test(blob), blob);
+    assert.ok(!/commit the removal/.test(blob), blob);
+    assert.ok(/scratch\.bak/.test(blob), blob);
+    assert.ok(/ · untracked/.test(blob), `finding row must name untracked:\n${blob}`);
+    assert.ok(/gitignore|\.gitignore|delete the file/i.test(blob), blob);
+    assert.ok(/rotate/i.test(blob), `rotation advice must stay:\n${blob}`);
+    assert.ok(/if live|if it is live/i.test(blob), blob);
+    assert.ok(/one git add away/.test(blob), blob);
+    assert.ok(!/not in git history/i.test(blob), blob);
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+    for (const f of secret.findings || []) {
+      assert.equal("inIndex" in f, false, "no new emitted JSON field inIndex");
+      assert.equal("gitState" in f, false, "no new emitted JSON field gitState");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: tracked secret BLOCK keeps committed/staged wording", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "tracked-secret");
+    initRepo(repo);
+    const key = "sk_live_" + "tr4ckedWordingStay0000001";
+    write(repo, "package.json", JSON.stringify({ name: "tracked-secret", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", `export const K = "${key}";\n`);
+    commitAll(repo, "chore: committed secret");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `tracked secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const blob = scanScopeBlob(secret);
+    assert.equal(secret.detail, SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1));
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_WHY.trim()), blob);
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()), blob);
+    assert.ok(!/ · untracked/.test((secret.extra || []).join("\n")), (secret.extra || []).join("\n"));
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: mutation — neuter tracked wording branch → tracked assertions fail", async () => {
+  const base = freshBase();
+  try {
+    const productPath = path.join(__dirname, "..", "checks.mjs");
+    const original = readFileSync(productPath, "utf8");
+    const scratchDir = path.join(base, "scratch-checks");
+    mkdirSync(scratchDir, { recursive: true });
+    const utilHref = pathToFileURL(path.join(__dirname, "..", "util.mjs")).href;
+    const detectHref = pathToFileURL(path.join(__dirname, "..", "detect.mjs")).href;
+    const policyHref = pathToFileURL(path.join(__dirname, "..", "policy.mjs")).href;
+    const scanHref = pathToFileURL(path.join(__dirname, "..", "scan.mjs")).href;
+    let neutered = original
+      .replaceAll('from "./util.mjs"', `from ${JSON.stringify(utilHref)}`)
+      .replaceAll('from "./detect.mjs"', `from ${JSON.stringify(detectHref)}`)
+      .replaceAll('from "./policy.mjs"', `from ${JSON.stringify(policyHref)}`)
+      .replaceAll('from "./scan.mjs"', `from ${JSON.stringify(scanHref)}`);
+    const before = neutered;
+    neutered = neutered.replace(
+      "inIndex: indexed.has(rel)",
+      "inIndex: false /* MUTATION: force untracked wording */",
+    );
+    assert.ok(neutered !== before, "mutation must change the inIndex assignment");
+    writeFileSync(path.join(scratchDir, "checks.mjs"), neutered, "utf8");
+
+    const repo = path.join(base, "mut-tracked");
+    initRepo(repo);
+    const key = "sk_live_" + "mutTr4ckedWording00000001";
+    write(repo, "package.json", JSON.stringify({ name: "mut-tracked", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", `export const K = "${key}";\n`);
+    commitAll(repo, "chore: committed secret");
+
+    const mod = await import(pathToFileURL(path.join(scratchDir, "checks.mjs")).href + `?mut=${Date.now()}`);
+    const result = mod.checkSecrets(repo);
+    assert.equal(result.status, "fail", "verdict must still fail after wording neuter");
+    const blob = `${result.detail}\n${(result.extra || []).join("\n")}`;
+    assert.equal(
+      blob.includes(SCAN_SCOPE_PRE_LANE_WHY.trim()),
+      false,
+      "neuter must drop tracked why — otherwise the tracked-wording test is vacuous",
+    );
+    assert.equal(
+      blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()),
+      false,
+      "neuter must drop tracked remedy",
+    );
+    assert.notEqual(result.detail, SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1));
+    assert.ok(/untracked/i.test(blob), `neuter must emit untracked wording:\n${blob}`);
+    assert.equal(readFileSync(productPath, "utf8"), original, "product checks.mjs must be untouched");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: pass-path Scanned N matches filesToScan().length and names untracked", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "pass-count");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "pass-count", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", "export const ok = 1;\n");
+    commitAll(repo, "chore: one tracked file");
+    write(repo, "notes.txt", "untracked notes\n");
+    const listed = filesToScan(repo);
+    assert.ok(listed.length >= 2, `expected tracked + untracked in filesToScan, got ${listed.join(",")}`);
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 0, `clean secrets must GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "pass", JSON.stringify(secret));
+    const m = /^Scanned (\d+) /.exec(secret.detail);
+    assert.ok(m, `pass detail must start Scanned N: ${secret.detail}`);
+    assert.equal(Number(m[1]), listed.length, `N=${m[1]} must equal filesToScan().length=${listed.length}: ${secret.detail}`);
+    assert.ok(/untracked/.test(secret.detail), secret.detail);
+    assert.ok(/gitignored skipped/.test(secret.detail), secret.detail);
+    assert.ok(!/tracked\/staged/.test(secret.detail), secret.detail);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: mixed tracked+untracked each carry their own git state", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mixed-secret");
+    initRepo(repo);
+    const trackedKey = "sk_live_" + "mixedTr4cked000000000001";
+    const untrackedKey = "sk_live_" + "mixedUntr4cked0000000001";
+    write(repo, "package.json", JSON.stringify({ name: "mixed-secret", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "app.js", `export const A = "${trackedKey}";\n`);
+    commitAll(repo, "chore: tracked secret");
+    write(repo, "scratch.bak", `export const B = "${untrackedKey}";\n`);
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `mixed secrets must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    assert.equal(doc.verdict, "NO-GO");
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const extra = (secret.extra || []).join("\n");
+    const blob = scanScopeBlob(secret);
+
+    assert.ok(/committed\/staged and untracked/.test(secret.detail), secret.detail);
+    assert.ok(!/in committed\/staged files —/.test(secret.detail), secret.detail);
+    assert.ok(!/in untracked files —/.test(secret.detail), secret.detail);
+
+    const appLine = (secret.extra || []).find((l) => /app\.js/.test(l)) || "";
+    const scratchLine = (secret.extra || []).find((l) => /scratch\.bak/.test(l)) || "";
+    assert.ok(appLine, extra);
+    assert.ok(scratchLine, extra);
+    assert.ok(!/ · untracked/.test(appLine), `tracked row must not be labelled untracked:\n${appLine}`);
+    assert.ok(/ · untracked/.test(scratchLine), `untracked row must be labelled:\n${scratchLine}`);
+
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_WHY.trim()), blob);
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()), blob);
+    assert.ok(/untracked file that is not gitignored/.test(blob), blob);
+    assert.ok(/delete the file or add it to \.gitignore/.test(blob), blob);
+
+    const findings = secret.findings || [];
+    const fa = findings.find((f) => (f.file || "").replace(/\\/g, "/").includes("app.js"));
+    const fb = findings.find((f) => (f.file || "").replace(/\\/g, "/").includes("scratch.bak"));
+    assert.ok(fa && fb, JSON.stringify(findings.map((f) => f.file)));
+    const aRem = (fa.remediation || []).join("\n");
+    const bRem = (fb.remediation || []).join("\n");
+    assert.ok(/ships to every clone/.test(aRem), aRem);
+    assert.ok(/commit the removal/.test(aRem), aRem);
+    assert.ok(!/ships to every clone/.test(bRem), bRem);
+    assert.ok(!/commit the removal/.test(bRem), bRem);
+    assert.ok(/untracked/.test(bRem), bRem);
+    assert.equal("inIndex" in fa, false);
+    assert.equal("inIndex" in fb, false);
+    assert.ok(!JSON.stringify(doc).includes(trackedKey) && !JSON.stringify(doc).includes(untrackedKey));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: README and index.mjs name untracked-not-ignored", () => {
+  const readme = readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const indexSrc = readFileSync(path.join(__dirname, "..", "index.mjs"), "utf8");
+  assert.ok(
+    /untracked \(not gitignored\)/.test(readme),
+    "README secret-scan cell must name untracked (not gitignored)",
+  );
+  assert.ok(
+    !/every tracked \+ staged \*\*text\*\* file/.test(readme),
+    "README must not still claim only tracked + staged text files",
+  );
+  assert.ok(
+    /pattern coverage of tracked and untracked \(not gitignored\) text/.test(readme),
+    "README must not still call this coverage of committed text only",
+  );
+  assert.ok(
+    !/pattern coverage of committed text/.test(readme),
+    "README must drop 'pattern coverage of committed text'",
+  );
+  assert.ok(
+    /untracked files git isn't ignoring/.test(indexSrc),
+    "index.mjs header must name untracked files git isn't ignoring",
+  );
+  assert.ok(
+    !/leaked keys in committed\/staged files/.test(indexSrc),
+    "index.mjs must not still claim committed/staged-only",
+  );
+  assert.ok(!/as of 0\.15|since 0\.15|in 0\.15\.2/i.test(readme), "README wording stays unversioned");
+});
+
+scenario("scan-scope-claim: git rm --cached is untracked wording and does not claim history is empty", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "rm-cached");
+    initRepo(repo);
+    const key = "sk_live_" + "rmC4chedHistory0000000001";
+    write(repo, "package.json", JSON.stringify({ name: "rm-cached", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "held.js", `export const K = "${key}";\n`);
+    commitAll(repo, "chore: secret is in HEAD");
+    g(["rm", "--cached", "-q", "held.js"], repo);
+    assert.ok(existsSync(path.join(repo, "held.js")), "worktree copy remains after rm --cached");
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `rm --cached secret must still NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const blob = scanScopeBlob(secret);
+    assert.ok(/untracked/.test(blob), blob);
+    assert.ok(/rotate/i.test(blob), blob);
+    assert.ok(/if it is live|if live/i.test(blob), blob);
+    assert.ok(!/not in git history/i.test(blob), blob);
+    assert.ok(!/does not ship/i.test(blob), blob);
+    assert.ok(!/ships to every clone/.test(blob), blob);
+    assert.ok(!/git history keeps it/.test(blob), blob);
+    assert.ok(!/commit the removal/.test(blob), blob);
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("scan-scope-claim: staged-only secret still uses committed/staged wording", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "staged-secret");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "staged-secret", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, "ok.js", "export const ok = 1;\n");
+    commitAll(repo, "chore: clean");
+    const key = "sk_live_" + "st4gedOnlyWording00000001";
+    write(repo, "staged.js", `export const K = "${key}";\n`);
+    g(["add", "staged.js"], repo);
+
+    const r = run(["check", "--json"], repo);
+    assert.equal(r.code, 1, `staged secret must NO-GO\n${r.stderr}\n${r.stdout}`);
+    const doc = parseJson(r);
+    const secret = doc.checks.find((c) => c.label === "Secret scan");
+    assert.ok(secret && secret.status === "fail", JSON.stringify(secret));
+    const blob = scanScopeBlob(secret);
+    assert.equal(secret.detail, SCAN_SCOPE_PRE_LANE_FAIL_DETAIL(1));
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_WHY.trim()), blob);
+    assert.ok(blob.includes(SCAN_SCOPE_PRE_LANE_REMEDY.trim()), blob);
+    assert.ok(!/ · untracked/.test((secret.extra || []).join("\n")));
+    assert.ok(!JSON.stringify(doc).includes(key), "full secret must never be echoed");
   } finally {
     cleanup(base);
   }

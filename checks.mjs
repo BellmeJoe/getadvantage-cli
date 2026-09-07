@@ -202,7 +202,7 @@ const SKIP_DIR = new Set([".git", "node_modules", ".vercel", ".data"]);
 const SKIP_BASENAME = new Set([]);
 // Truly BINARY assets only (images, fonts, video, archives, PDFs). Text formats
 // that can carry a copied key are deliberately NOT skipped so the README's "every
-// tracked text file" claim is honest: .map sourcemaps embed original sourcesContent
+// tracked, staged, or untracked (not gitignored) text file" claim is honest: .map sourcemaps embed original sourcesContent
 // (a classic place a bundled key hides), .svg is XML, lockfiles are JSON/YAML.
 const SKIP_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
@@ -301,9 +301,13 @@ function filesToScan(cwd) {
   for (const f of gitFilesZ(["ls-files", "--others", "--exclude-standard"], { cwd })) set.add(f);
   return [...set];
 }
+export { filesToScan };
 
 export function checkSecrets(cwd) {
   const files = filesToScan(cwd);
+  // Index membership (tracked or staged). Used only to word the finding;
+  // filesToScan() already decided what to read. Not emitted on --json/SARIF.
+  const indexed = new Set(gitFilesZ(["ls-files"], { cwd }));
   // (file,label) → { fp, count } so repeated hits are COUNTED, not dropped.
   const hits = new Map();
   // Allowlisted hits (built-in EXAMPLE keys + `.getadvantage/config.json` rules).
@@ -405,6 +409,7 @@ export function checkSecrets(cwd) {
           startLine,
           startColumn,
           endColumn,
+          inIndex: indexed.has(rel),
         });
       }
     }
@@ -450,7 +455,7 @@ export function checkSecrets(cwd) {
     return result(
       "pass",
       "Secret scan",
-      `Scanned ${scanned} tracked/staged file${pl(scanned)} — no leaked-secret patterns matched.${allowSummary}`,
+      `Scanned ${scanned} tracked and untracked file${pl(scanned)} (gitignored skipped) — no leaked-secret patterns matched.${allowSummary}`,
       [...allowedNote, ...policyNote, ...partialNote],
     );
   }
@@ -458,7 +463,7 @@ export function checkSecrets(cwd) {
   const hitList = [...hits.values()];
   const lines = hitList.map(
     (h) =>
-      `${formatHitPath(h)} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}`,
+      `${formatHitPath(h)} → ${h.label}: ${h.fp}${h.count > 1 ? ` (+${h.count - 1} more in this file)` : ""}${h.authId ? ` · auth ${h.authId}` : ""}${hitIsIndexed(h) ? "" : " · untracked"}`,
   );
   // Structured findings for SARIF (and optional --json consumers). Never carry
   // the raw match — only fingerprint, auth id, path, patternId, region.
@@ -486,11 +491,53 @@ export function checkSecrets(cwd) {
   const r = result(
     "fail",
     "Secret scan",
-    `${lines.length} possible secret${pl(lines.length)} in committed/staged files — remove + rotate before shipping.`,
+    secretFailDetail(hitList),
     [...lines.slice(0, 30), ...remediationNote, ...allowedNote, ...policyNote, ...partialNote],
   );
   r.findings = findings;
   return r;
+}
+
+/**
+ * Index membership for wording only. `inIndex === false` is untracked.
+ * Missing/undefined defaults to indexed — fail-closed so a tracked leak is
+ * never described as untracked.
+ */
+function hitIsIndexed(h) {
+  return !h || h.inIndex !== false;
+}
+
+/** Run-level fail detail. All-indexed keeps the pre-lane sentence byte-identical. */
+function secretFailDetail(hitList) {
+  const n = hitList.length;
+  const noun = `possible secret${pl(n)}`;
+  let indexed = 0;
+  let untracked = 0;
+  for (const h of hitList) {
+    if (hitIsIndexed(h)) indexed++;
+    else untracked++;
+  }
+  if (untracked === 0) {
+    return `${n} ${noun} in committed/staged files — remove + rotate before shipping.`;
+  }
+  if (indexed === 0) {
+    return `${n} ${noun} in untracked files — one git add away from a commit; remove or gitignore, rotate if live.`;
+  }
+  return `${n} ${noun} in committed/staged and untracked files — remove or gitignore, and rotate anything live.`;
+}
+
+function secretWhyLine(inIndex) {
+  if (inIndex) {
+    return `  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.`;
+  }
+  return `  Why it matters: this secret-shaped value is in an untracked file that is not gitignored — one git add away from a commit.`;
+}
+
+function secretRemedyLine(inIndex) {
+  if (inIndex) {
+    return `  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.`;
+  }
+  return `  Preferred remedy: delete the file or add it to .gitignore, rotate the credential if it is live, then re-run check.`;
 }
 
 /**
@@ -504,7 +551,7 @@ export function checkSecrets(cwd) {
  * parse per-finding remediation). Human-terminal `extra` uses the densified
  * multi-hit form in `secretHitsRemediationNote` instead.
  *
- * @param {{ file: string, label: string, patternId?: string, authId?: string, fp?: string, startLine?: number }} h
+ * @param {{ file: string, label: string, patternId?: string, authId?: string, fp?: string, startLine?: number, inIndex?: boolean }} h
  * @returns {string[]}
  */
 function secretHitRemediation(h) {
@@ -516,10 +563,11 @@ function secretHitRemediation(h) {
   const patternId = h.patternId || "unknown";
   const nonUnique = isNonUniqueAuthPatternId(patternId);
 
+  const inIndex = hitIsIndexed(h);
   const lines = [
     `Smallest safe next edit — ${h.label} at ${loc}:`,
-    `  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.`,
-    `  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.`,
+    secretWhyLine(inIndex),
+    secretRemedyLine(inIndex),
     `  Escape hatch (deliberate, tracked, reviewable — suppressed hits stay printed as disclosed, never invisible): if this is an intentional fixture/sample, merge the paste-ready snippet below into tracked .getadvantage/config.json and commit it. Authorization reads the git index only.`,
   ];
 
@@ -567,7 +615,7 @@ function secretHitRemediation(h) {
  * Each finding remains individually named on the finding lines (with its own
  * auth id). Does not change verdict or exit code.
  *
- * @param {Array<{ file: string, label: string, patternId?: string, authId?: string, startLine?: number }>} hitList
+ * @param {Array<{ file: string, label: string, patternId?: string, authId?: string, startLine?: number, inIndex?: boolean }>} hitList
  * @returns {string[]}
  */
 function secretHitsRemediationNote(hitList) {
@@ -599,6 +647,10 @@ function secretHitsRemediationNote(hitList) {
   }
 
   const n = hitList.length;
+  // Classify on the full list, not the 30-hit display cap — a 31st untracked
+  // hit must still force mixed wording on the densified note.
+  const anyIndexed = hitList.some((h) => hitIsIndexed(h));
+  const anyUntracked = hitList.some((h) => !hitIsIndexed(h));
   let header;
   if (n === 1) {
     const h = capped[0];
@@ -606,16 +658,22 @@ function secretHitsRemediationNote(hitList) {
     const loc =
       typeof h.startLine === "number" ? `${filePosix}:${h.startLine}` : filePosix;
     header = `Smallest safe next edit — ${h.label} at ${loc}:`;
+  } else if (anyIndexed && anyUntracked) {
+    header = `Smallest safe next edit — ${n} blocking secret finding${pl(n)} (remedy depends on git state; every finding named above with its own auth id):`;
   } else {
     header = `Smallest safe next edit — ${n} blocking secret finding${pl(n)} (same remedy for each; every finding named above with its own auth id):`;
   }
 
-  const lines = [
-    header,
-    `  Why it matters: this secret-shaped value is committed/staged and ships to every clone; git history keeps it until you rotate the credential at the provider.`,
-    `  Preferred remedy: remove the value from the tree, rotate the credential, commit the removal, then re-run check.`,
+  const lines = [header];
+  if (anyIndexed) {
+    lines.push(secretWhyLine(true), secretRemedyLine(true));
+  }
+  if (anyUntracked) {
+    lines.push(secretWhyLine(false), secretRemedyLine(false));
+  }
+  lines.push(
     `  Escape hatch (deliberate, tracked, reviewable — suppressed hits stay printed as disclosed, never invisible): if this is an intentional fixture/sample, merge the paste-ready snippet below into tracked .getadvantage/config.json and commit it. Authorization reads the git index only.`,
-  ];
+  );
 
   if (nonUniquePatternIds.size > 0) {
     const pids = [...nonUniquePatternIds].map((p) => `"${p}"`).join(", ");
