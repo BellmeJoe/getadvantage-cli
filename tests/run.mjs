@@ -20855,6 +20855,9 @@ scenario("approve: help approve prints usage; unknown flag exits 1; --version st
     assert.ok(/Usage/i.test(h.stdout), h.stdout);
     assert.ok(/--action/i.test(h.stdout), h.stdout);
     assert.ok(/--resolve/i.test(h.stdout), h.stdout);
+    assert.ok(/resource and summary as digests/i.test(h.stdout), h.stdout);
+    assert.ok(/secret-shaped name is refused/i.test(h.stdout), h.stdout);
+    assert.ok(!/digests only/i.test(h.stdout), h.stdout);
     assert.ok(!/\bLIVE\b/.test(h.stdout), h.stdout);
     assert.ok(!/approval agent is live/i.test(h.stdout), h.stdout);
 
@@ -21712,15 +21715,37 @@ scenario("mcp: approve_action HB5 malformed tools/call arguments never crash or 
   }
 });
 
-scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and stdout", () => {
+scenario("mcp: approve_action HB6 credential-shaped keys refused in proof metadata", async () => {
   const base = freshBase();
   try {
+    const { credentialProofField } = await import("../approve.mjs");
     const repo = path.join(base, "hb6");
     initRepo(repo);
     write(repo, "package.json", JSON.stringify({ name: "hb6", version: "1.0.0", private: true }, null, 2) + "\n");
     commitAll(repo, "chore: init");
     const aws = "AKIA" + "TESTKEYNOTLIVE12";
     const awsBuf = Buffer.from(aws, "utf8");
+    const shapes = [
+      { name: "aws", value: aws },
+      { name: "stripe-glued", value: "agent_" + "sk_live_" + "ABCDEFGHIJKLMNOP1234" },
+      { name: "openai", value: "sk-proj-" + "a1b2c3d4e5f6g7h8i9j0" + "k1l2" },
+      { name: "platform", value: "adv_live_" + "abcdefghijklmnop" },
+      { name: "github-glued", value: "actor_" + "ghp_" + "A".repeat(36) },
+    ];
+
+    assert.equal(credentialProofField({ actor: "agent-x" }), null);
+    assert.equal(credentialProofField({ actor: "invoice_service" }), null);
+    assert.equal(credentialProofField({ model: "gpt-6-astra" }), null);
+    assert.equal(credentialProofField({ action: "invoice_service", dataClass: "internal" }), null);
+    for (const shape of shapes) {
+      for (const field of ["action", "actor", "model", "dataClass"]) {
+        assert.equal(
+          credentialProofField({ [field]: shape.value }),
+          field,
+          `HB6: ${shape.name} in ${field} must refuse at the serializer`,
+        );
+      }
+    }
 
     const digested = mcpInitAndCall(repo, "approve_action", {
       cwd: repo,
@@ -21753,33 +21778,51 @@ scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and std
     assert.equal("resource" in rec, false);
 
     const plainFields = ["action", "actor", "model", "dataClass"];
-    for (const field of plainFields) {
-      const args = {
-        cwd: repo,
-        action: "db.write",
-        resource: "customers",
-        actor: "bot",
-        dataClass: "internal",
-        model: "claude-opus-5",
-      };
-      args[field] = aws;
-      const mcp = mcpInitAndCall(repo, "approve_action", args);
-      assert.equal(mcp.status, 0, `${field}: ${mcp.stderr}`);
-      assert.equal(Buffer.from(mcp.stdout, "utf8").includes(awsBuf), false, `HB6: ${field} leaked onto stdout`);
-      assert.equal(Buffer.from(mcp.stderr, "utf8").includes(awsBuf), false, `HB6: ${field} leaked onto stderr`);
-      const tool = mcpToolText(mcp.replies, 2);
-      assert.equal(tool.rpcError, null, JSON.stringify(tool.rpcError));
-      assert.ok(tool.isError, `HB6: ${field} must refuse, got:\n${tool.text}`);
-      assert.ok(!tool.text.includes(aws), `HB6: ${field} in tool text`);
-      assert.ok(/looks like a secret/i.test(tool.text), tool.text);
-      assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
-      const approvalsDir = path.join(repo, ".getadvantage", "approvals");
-      if (existsSync(approvalsDir)) {
-        for (const abs of walkFiles(approvalsDir)) {
-          assert.equal(readFileSync(abs).includes(awsBuf), false, `HB6: ${field} in ${abs}`);
+    for (const shape of shapes) {
+      const secretBuf = Buffer.from(shape.value, "utf8");
+      for (const field of plainFields) {
+        const args = {
+          cwd: repo,
+          action: "db.write",
+          resource: "customers",
+          actor: "bot",
+          dataClass: "internal",
+          model: "claude-opus-5",
+        };
+        args[field] = shape.value;
+        const mcp = mcpInitAndCall(repo, "approve_action", args);
+        assert.equal(mcp.status, 0, `${shape.name}/${field}: ${mcp.stderr}`);
+        assert.equal(Buffer.from(mcp.stdout, "utf8").includes(secretBuf), false, `HB6: ${shape.name}/${field} leaked onto stdout`);
+        assert.equal(Buffer.from(mcp.stderr, "utf8").includes(secretBuf), false, `HB6: ${shape.name}/${field} leaked onto stderr`);
+        const tool = mcpToolText(mcp.replies, 2);
+        assert.equal(tool.rpcError, null, JSON.stringify(tool.rpcError));
+        assert.ok(tool.isError, `HB6: ${shape.name}/${field} must refuse, got:\n${tool.text}`);
+        assert.ok(!tool.text.includes(shape.value), `HB6: ${shape.name}/${field} in tool text`);
+        assert.ok(/looks like a secret/i.test(tool.text), tool.text);
+        assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
+        const approvalsDir = path.join(repo, ".getadvantage", "approvals");
+        if (existsSync(approvalsDir)) {
+          for (const abs of walkFiles(approvalsDir)) {
+            assert.equal(readFileSync(abs).includes(secretBuf), false, `HB6: ${shape.name}/${field} in ${abs}`);
+          }
         }
       }
     }
+
+    const ordinary = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "invoice_service",
+      resource: "customers",
+      actor: "agent-x",
+      dataClass: "internal",
+      model: "gpt-6-astra",
+    });
+    assert.equal(ordinary.status, 0, ordinary.stderr);
+    const ordinaryTool = mcpToolText(ordinary.replies, 2);
+    assert.ok(!ordinaryTool.isError, ordinaryTool.text);
+    const ordinaryMachine = parseApproveMachine(ordinaryTool.text);
+    assert.notEqual(ordinaryMachine.decision, null);
+    assert.ok(ordinaryMachine.id, ordinaryTool.text);
   } finally {
     cleanup(base);
   }
@@ -22000,6 +22043,62 @@ scenario("mcp: approve_action policy-read failure is a tool error not a recorded
     assert.ok(/fix \.getadvantage\/policy\.json/i.test(tool.text), tool.text);
     assert.ok(!/"decision"\s*:\s*"escalate"/.test(tool.text), tool.text);
     assert.ok(!/"decision"\s*:\s*"allow"/.test(tool.text), tool.text);
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action policy-read I/O failure is a tool error not a recorded escalation", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "policy-io");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "policy-io", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "allow",
+      rules: [{ id: "r-allow", action: "db.write", dataClass: "public", decision: "allow", reason: "should not apply" }],
+    });
+    commitAll(repo, "chore: committed policy");
+    // Index membership stays true; the blob is missing so `git show :path` fails.
+    execFileSync(
+      "git",
+      ["update-index", "--cacheinfo", "100644,0123456789abcdef0123456789abcdef01234567,.getadvantage/policy.json"],
+      { cwd: repo, encoding: "utf8" },
+    );
+    const listed = execFileSync("git", ["ls-files", "--cached", "--", ".getadvantage/policy.json"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    assert.ok(listed.includes(".getadvantage/policy.json"), listed);
+    let showFailed = false;
+    try {
+      execFileSync("git", ["show", ":.getadvantage/policy.json"], {
+        cwd: repo,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch {
+      showFailed = true;
+    }
+    assert.equal(showFailed, true, "fixture must make git show fail");
+
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "public",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(tool.isError, tool.text);
+    assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
+    assert.ok(/could not be read/i.test(tool.text), tool.text);
+    assert.ok(/git can show/i.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"escalate"/.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"allow"/.test(tool.text), tool.text);
+    assert.ok(/"id"\s*:\s*null/.test(tool.text), tool.text);
     assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals")), false);
   } finally {
     cleanup(base);
