@@ -64,14 +64,19 @@ const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
 // Conservative shapes only — refuse these in cleartext proof fields rather
 // than persist them. Do not import scan.mjs; this door must not widen the
-// secret catalogue. Whole-field and contained AWS access key ids are the
-// live finding; a few other well-known prefixes are the same class of harm.
+// secret catalogue. Anchors are alnum lookarounds, not `\b`: `_` is a JS
+// word char, so `\b` misses ordinary `PREFIX_sk_live_…` names (the 0.14.2
+// scanner defect). Letter/digit adjacency (`xAKIA…`) is a disclosed miss,
+// same as the scanner. sk-proj and adv_live are shapes the scanner already
+// recognizes; they are not a new catalogue.
 const CREDENTIAL_FIELD_RE = [
   /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/,
-  /\bsk_live_[0-9A-Za-z]{16,}/,
-  /\bsk-ant-[A-Za-z0-9\-_]{16,}/,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  /(?<![A-Za-z0-9])sk_live_[0-9A-Za-z]{16,}/,
+  /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9\-_]{16,}/,
+  /(?<![A-Za-z0-9])sk-proj-[A-Za-z0-9\-_]{16,}/,
+  /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}/,
+  /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}(?![A-Za-z0-9])/,
+  /(?<![A-Za-z0-9])adv_live_[a-z0-9]{16,}(?![A-Za-z0-9])/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
 ];
 
@@ -366,8 +371,14 @@ export function loadApprovalsPolicy(cwd) {
 
   const indexText = readGitIndexText(cwd, rel);
   if (indexText == null) {
-    warnings.push(`${rel} is listed in the git index but could not be read — approval rules not applied.`);
-    return { ok: true, policy: empty, source: rel, warnings, error: null };
+    return {
+      ok: false,
+      policy: empty,
+      source: rel,
+      warnings,
+      error:
+        "The committed .getadvantage/policy.json could not be read. Check that git can show that file, then try again.",
+    };
   }
 
   if (onDisk) {
@@ -675,7 +686,7 @@ export function printApproveHelp() {
   console.log("Untracked or unstaged policy cannot say yes.");
   console.log("No matching rule -> wait (nothing is allowed automatically).");
   console.log("A missing data class is treated as unknown and is never allowed by a wildcard rule.");
-  console.log("Every decision writes a local record under `.getadvantage/approvals/` (digests only, never a payload).");
+  console.log("Every decision writes a local record under `.getadvantage/approvals/` (resource and summary as digests; a secret-shaped name is refused).");
   console.log("");
   console.log("Exit codes: allowed 0 · blocked 1 · wait 2 · usage/config error 1.");
   console.log("Not a proxy. Not always on. Does not change the policy on its own.");

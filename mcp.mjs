@@ -453,11 +453,13 @@ function runApproveActionMcp(cwd, args) {
     };
   }
   if (!loaded.ok) {
+    const reason =
+      loaded.error && /could not be read/i.test(loaded.error)
+        ? loaded.error
+        : "The approval policy could not be used. Fix .getadvantage/policy.json, commit it, then try again.";
     return {
       isError: true,
-      text: toolFailureText(
-        "The approval policy could not be used. Fix .getadvantage/policy.json, commit it, then try again.",
-      ),
+      text: toolFailureText(reason),
     };
   }
 
