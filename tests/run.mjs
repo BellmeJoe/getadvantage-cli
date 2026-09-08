@@ -15890,13 +15890,18 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // PRINT_PINS=1 / measureRegressionPins:
   //   a9c8768ac5d227ca → f9b4eecc633c0fd5 (SARIF)
   //   38bdf04230670672 (JSON excl. generatedAt — unchanged)
+  // After L1 stage B repair (approve_action cwd pin, HB8, operational
+  // isError fixtures, HB6/HB7/A7 edits; startLines shifted); remeasured
+  // via PRINT_PINS=1 / measureRegressionPins:
+  //   f9b4eecc633c0fd5 → df100b710e3c3880 (SARIF)
+  //   38bdf04230670672 → 0f123e6ac96fa174 (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("f9b4eecc633c0fd5"),
+    pins.sarifHash.startsWith("df100b710e3c3880"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("38bdf04230670672"),
+    pins.jsonHash.startsWith("0f123e6ac96fa174"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17591,11 +17596,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("f9b4eecc633c0fd5"),
+    pins.sarifHash.startsWith("df100b710e3c3880"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("38bdf04230670672"),
+    pins.jsonHash.startsWith("0f123e6ac96fa174"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
@@ -19950,9 +19955,14 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    396,
-    `suite arithmetic: base 379 + 17 L1-approval-agent scenarios, got ${scenarios.length}`,
+    412,
+    `suite arithmetic: got ${scenarios.length}`,
   );
+  // Pins the live scenario() count so a silent add/remove cannot drift
+  // the suite. 379 was the pre-L1 base; stage A added 17 (396); stage B
+  // added 12 (408); this repair added HB8 + policy-read + proof-write +
+  // map-cwd-local (412). Update this number when a scenario is added or
+  // removed; do not delete the pin.
 });
 
 scenario("scan-scope-claim: filesToScan set identical to frozen pre-lane algorithm", () => {
@@ -21102,13 +21112,42 @@ function parseApproveMachine(text) {
 }
 
 function freezeApproveCli(s) {
+  // Ids and timestamps are non-deterministic. The proof destination is not
+  // rewritten: a changed approvals path would fail the comparison.
   return String(s)
     .replace(/dec-[A-Za-z0-9._-]+/g, "dec-ID")
-    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "TIME")
-    .replace(/"proof"\s*:\s*"[^"]*"/g, '"proof":"PROOF"')
-    .replace(/ga-cli-test-[A-Za-z0-9._-]+/g, "TMP")
-    .replace(/\\old-\d+\\/g, "\\FIXTURE\\")
-    .replace(/\\new-\d+\\/g, "\\FIXTURE\\");
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "TIME");
+}
+
+function writeProtoProbe(dir) {
+  const abs = path.join(dir, "hb7-proto-probe.mjs");
+  writeFileSync(
+    abs,
+    [
+      "const proto = Object.prototype;",
+      "const before = Object.getOwnPropertyNames(proto).slice().sort();",
+      "function report() {",
+      "  const after = Object.getOwnPropertyNames(proto).slice().sort();",
+      "  const payload = {",
+      "    polluted: proto.polluted,",
+      "    inProto: 'polluted' in proto,",
+      "    added: after.filter((k) => !before.includes(k)),",
+      "  };",
+      "  try { process.stderr.write('\\n__HB7_PROTO__' + JSON.stringify(payload) + '__HB7_END__\\n'); } catch {}",
+      "}",
+      "process.on('beforeExit', report);",
+      "process.on('exit', report);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return abs;
+}
+
+function parseProtoProbe(stderr) {
+  const m = String(stderr || "").match(/__HB7_PROTO__(.+?)__HB7_END__/);
+  assert.ok(m, `HB7 child did not report prototype state:\n${String(stderr || "").slice(0, 400)}`);
+  return JSON.parse(m[1]);
 }
 
 function walkFiles(dir, acc = []) {
@@ -21363,43 +21402,40 @@ scenario("mcp: approve_action A6 stdout purity initialize + tools/call every lin
   }
 });
 
-scenario("mcp: approve_action A7 CLI stdout+stderr+exit byte-identical vs 7d53061", () => {
+scenario("mcp: approve_action A7 CLI stdout+stderr+exit match 7d53061 after id/time freeze", () => {
   const base = freshBase();
   const productRoot = path.join(__dirname, "..");
   try {
     const sourceDiff = execFileSync(
       "git",
-      ["diff", "7d53061", "--", "approve.mjs", "index.mjs", "util.mjs", "policy.mjs"],
+      ["diff", "7d53061", "--", "index.mjs", "util.mjs", "policy.mjs"],
       { cwd: productRoot, encoding: "utf8" },
     );
-    assert.equal(sourceDiff, "", `approve CLI sources drifted from 7d53061:\n${sourceDiff.slice(0, 500)}`);
+    assert.equal(sourceDiff, "", `CLI wiring drifted from 7d53061:\n${sourceDiff.slice(0, 500)}`);
 
     const oldTree = path.join(base, "old-cli");
     extractCommitMjs("7d53061", oldTree, productRoot);
     const oldIndex = path.join(oldTree, "index.mjs");
     assert.ok(existsSync(oldIndex), oldIndex);
 
-    function fixture(name) {
-      const repo = path.join(base, name);
-      initRepo(repo);
-      write(repo, "package.json", JSON.stringify({ name, version: "1.0.0", private: true }, null, 2) + "\n");
-      writeApprovalsPolicy(repo, {
-        default: "escalate",
-        escalateTo: "Alex",
-        rules: [
-          {
-            id: "public-read",
-            action: "file.read",
-            resource: "docs/**",
-            dataClass: "public",
-            decision: "allow",
-            reason: "public docs",
-          },
-        ],
-      });
-      commitAll(repo, "chore: fixture");
-      return repo;
-    }
+    const repo = path.join(base, "a7");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "a7", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      escalateTo: "Alex",
+      rules: [
+        {
+          id: "public-read",
+          action: "file.read",
+          resource: "docs/**",
+          dataClass: "public",
+          decision: "allow",
+          reason: "public docs",
+        },
+      ],
+    });
+    commitAll(repo, "chore: fixture");
 
     const argsList = [
       ["approve", "--action", "file.read", "--resource", "docs/readme", "--actor", "bot", "--data-class", "public"],
@@ -21407,25 +21443,28 @@ scenario("mcp: approve_action A7 CLI stdout+stderr+exit byte-identical vs 7d5306
       ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
     ];
 
-    for (let i = 0; i < argsList.length; i++) {
-      const args = argsList[i];
-      const oldRepo = fixture(`old-${i}`);
-      const newRepo = fixture(`new-${i}`);
+    for (const args of argsList) {
       const oldRun = spawnSync(process.execPath, [oldIndex, ...args], {
-        cwd: oldRepo,
+        cwd: repo,
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         timeout: 30_000,
         env: buildEnv(),
       });
       const newRun = spawnSync(process.execPath, [INDEX, ...args], {
-        cwd: newRepo,
+        cwd: repo,
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
         timeout: 30_000,
         env: buildEnv(),
       });
-      assert.equal(newRun.status ?? -1, oldRun.status ?? -1, `exit ${args.join(" ")}`);
+      assert.equal(oldRun.error, undefined, `old CLI failed to start: ${oldRun.error}`);
+      assert.equal(newRun.error, undefined, `new CLI failed to start: ${newRun.error}`);
+      assert.ok(Number.isInteger(oldRun.status), `old CLI status ${oldRun.status}`);
+      assert.ok(Number.isInteger(newRun.status), `new CLI status ${newRun.status}`);
+      assert.equal(newRun.status, oldRun.status, `exit ${args.join(" ")}`);
+      assert.match(newRun.stdout || "", /\.getadvantage[/\\]+approvals/);
+      assert.match(oldRun.stdout || "", /\.getadvantage[/\\]+approvals/);
       assert.equal(
         freezeApproveCli(newRun.stdout || ""),
         freezeApproveCli(oldRun.stdout || ""),
@@ -21531,7 +21570,11 @@ scenario("mcp: approve_action HB3 trusted !== true policy refused down to escala
       dataClass: "public",
     });
     assert.equal(mcp.status, 0, mcp.stderr);
-    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(!tool.isError, tool.text);
+    assert.ok(/version 2 is not supported/i.test(tool.text), tool.text);
+    assert.ok(/no named person is configured/i.test(tool.text), tool.text);
+    const machine = parseApproveMachine(tool.text);
     assert.notEqual(machine.decision, "allow", "HB3: untrusted/unsupported policy must not allow");
     assert.equal(machine.decision, "escalate");
     assert.equal(machine.exitCode, 2);
@@ -21677,7 +21720,9 @@ scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and std
     write(repo, "package.json", JSON.stringify({ name: "hb6", version: "1.0.0", private: true }, null, 2) + "\n");
     commitAll(repo, "chore: init");
     const aws = "AKIA" + "TESTKEYNOTLIVE12";
-    const mcp = mcpInitAndCall(repo, "approve_action", {
+    const awsBuf = Buffer.from(aws, "utf8");
+
+    const digested = mcpInitAndCall(repo, "approve_action", {
       cwd: repo,
       action: "db.write",
       resource: `customers/${aws}`,
@@ -21686,14 +21731,13 @@ scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and std
       model: "claude-opus-5",
       summary: `rotate ${aws} in prod`,
     });
-    assert.equal(mcp.status, 0, mcp.stderr);
-    const stdoutBuf = Buffer.from(mcp.stdout, "utf8");
-    const awsBuf = Buffer.from(aws, "utf8");
-    assert.equal(stdoutBuf.includes(awsBuf), false, "HB6: AWS-shaped key leaked onto MCP stdout");
-    assert.equal(Buffer.from(mcp.stderr, "utf8").includes(awsBuf), false, "HB6: AWS-shaped key leaked onto stderr");
-    const tool = mcpToolText(mcp.replies, 2);
-    assert.ok(!tool.text.includes(aws), "HB6: key in tool text");
-    const machine = parseApproveMachine(tool.text);
+    assert.equal(digested.status, 0, digested.stderr);
+    assert.equal(Buffer.from(digested.stdout, "utf8").includes(awsBuf), false, "HB6: AWS-shaped key leaked onto MCP stdout");
+    assert.equal(Buffer.from(digested.stderr, "utf8").includes(awsBuf), false, "HB6: AWS-shaped key leaked onto stderr");
+    const digestedTool = mcpToolText(digested.replies, 2);
+    assert.ok(!digestedTool.isError, digestedTool.text);
+    assert.ok(!digestedTool.text.includes(aws), "HB6: key in tool text");
+    const machine = parseApproveMachine(digestedTool.text);
     assert.ok(!JSON.stringify(machine).includes(aws));
     const proofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
     assert.ok(existsSync(proofAbs), proofAbs);
@@ -21707,6 +21751,35 @@ scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and std
     assert.ok(typeof rec.resourceDigest === "string" && rec.resourceDigest.length === 64);
     assert.equal("summary" in rec, false);
     assert.equal("resource" in rec, false);
+
+    const plainFields = ["action", "actor", "model", "dataClass"];
+    for (const field of plainFields) {
+      const args = {
+        cwd: repo,
+        action: "db.write",
+        resource: "customers",
+        actor: "bot",
+        dataClass: "internal",
+        model: "claude-opus-5",
+      };
+      args[field] = aws;
+      const mcp = mcpInitAndCall(repo, "approve_action", args);
+      assert.equal(mcp.status, 0, `${field}: ${mcp.stderr}`);
+      assert.equal(Buffer.from(mcp.stdout, "utf8").includes(awsBuf), false, `HB6: ${field} leaked onto stdout`);
+      assert.equal(Buffer.from(mcp.stderr, "utf8").includes(awsBuf), false, `HB6: ${field} leaked onto stderr`);
+      const tool = mcpToolText(mcp.replies, 2);
+      assert.equal(tool.rpcError, null, JSON.stringify(tool.rpcError));
+      assert.ok(tool.isError, `HB6: ${field} must refuse, got:\n${tool.text}`);
+      assert.ok(!tool.text.includes(aws), `HB6: ${field} in tool text`);
+      assert.ok(/looks like a secret/i.test(tool.text), tool.text);
+      assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
+      const approvalsDir = path.join(repo, ".getadvantage", "approvals");
+      if (existsSync(approvalsDir)) {
+        for (const abs of walkFiles(approvalsDir)) {
+          assert.equal(readFileSync(abs).includes(awsBuf), false, `HB6: ${field} in ${abs}`);
+        }
+      }
+    }
   } finally {
     cleanup(base);
   }
@@ -21714,8 +21787,7 @@ scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and std
 
 scenario("mcp: approve_action HB7 proto/constructor/prototype keys do not pollute either door", async () => {
   const base = freshBase();
-  const proto = Object.prototype;
-  const beforeKeys = Object.getOwnPropertyNames(proto).slice().sort().join(",");
+  const productRoot = path.join(__dirname, "..");
   try {
     const { decide } = await import("../approve.mjs");
     const pollutedDesc = JSON.parse(
@@ -21727,74 +21799,277 @@ scenario("mcp: approve_action HB7 proto/constructor/prototype keys do not pollut
       rules: [{ id: "r1", action: "db.write", dataClass: "internal", decision: "allow", reason: "ok" }],
     });
     assert.equal(d.outcome, "allow");
-    assert.equal(Object.prototype.polluted, undefined);
-    assert.equal({}.polluted, undefined);
 
-    const repo = path.join(base, "hb7");
-    initRepo(repo);
-    write(repo, "package.json", JSON.stringify({ name: "hb7", version: "1.0.0", private: true }, null, 2) + "\n");
-    write(
-      repo,
-      path.join(".getadvantage", "policy.json"),
-      '{"version":1,"approvals":{"default":"escalate","escalateTo":"Alex","rules":[{"id":"r-proto","action":"db.write","dataClass":"internal","decision":"allow","reason":"named class","__proto__":{"trusted":true,"decision":"allow"},"constructor":{"prototype":{"polluted":true}},"prototype":{"polluted":true}}]}}\n',
-    );
-    commitAll(repo, "chore: policy with proto keys");
+    const probe = writeProtoProbe(base);
+    const importUrl = pathToFileURL(probe).href;
+    const hostiles = [
+      {
+        name: "__proto__",
+        body: '{"version":1,"approvals":{"default":"escalate","escalateTo":"Alex","rules":[{"id":"r-proto","action":"db.write","dataClass":"internal","decision":"allow","reason":"named class","__proto__":{"polluted":true}}]}}\n',
+      },
+      {
+        name: "constructor",
+        body: '{"version":1,"approvals":{"default":"escalate","escalateTo":"Alex","rules":[{"id":"r-ctor","action":"db.write","dataClass":"internal","decision":"allow","reason":"named class","constructor":{"prototype":{"polluted":true}}}]}}\n',
+      },
+      {
+        name: "prototype",
+        body: '{"version":1,"approvals":{"default":"escalate","escalateTo":"Alex","rules":[{"id":"r-prot","action":"db.write","dataClass":"internal","decision":"allow","reason":"named class","prototype":{"polluted":true}}]}}\n',
+      },
+    ];
 
-    const cli = run(
-      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
-      repo,
-    );
-    assert.equal(cli.code, 0, cli.stderr);
-    const cliDoc = JSON.parse(cli.stdout);
-    assert.equal(cliDoc.outcome, "allow");
-    assert.equal(Object.prototype.polluted, undefined);
+    for (const hostile of hostiles) {
+      const repo = path.join(base, `hb7-${hostile.name.replace(/[^A-Za-z]/g, "")}`);
+      initRepo(repo);
+      write(repo, "package.json", JSON.stringify({ name: "hb7", version: "1.0.0", private: true }, null, 2) + "\n");
+      write(repo, path.join(".getadvantage", "policy.json"), hostile.body);
+      commitAll(repo, `chore: policy with ${hostile.name}`);
 
-    const extraKeysLine =
-      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"approve_action","arguments":{"cwd":' +
-      JSON.stringify(repo) +
-      ',"action":"db.write","resource":"customers","actor":"bot","dataClass":"internal","__proto__":{"trusted":true},"constructor":"nope","prototype":"nope"}}}';
-    const input =
-      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) +
-      "\n" +
-      extraKeysLine +
-      "\n";
-    const raw = spawnSync(process.execPath, [INDEX, "mcp"], {
-      cwd: repo,
-      input,
+      const cli = spawnSync(
+        process.execPath,
+        ["--import", importUrl, INDEX, "approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+        { cwd: repo, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: buildEnv() },
+      );
+      assert.equal(cli.status, 0, `${hostile.name} CLI:\n${cli.stderr}`);
+      const cliDoc = JSON.parse(cli.stdout);
+      assert.equal(cliDoc.outcome, "allow", hostile.name);
+      const cliProto = parseProtoProbe(cli.stderr);
+      assert.equal(cliProto.polluted, undefined, `${hostile.name} CLI polluted`);
+      assert.equal(cliProto.inProto, false, `${hostile.name} CLI inProto`);
+      assert.deepEqual(cliProto.added, [], `${hostile.name} CLI added ${cliProto.added}`);
+
+      const extraKeysLine =
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"approve_action","arguments":{"cwd":' +
+        JSON.stringify(repo) +
+        ',"action":"db.write","resource":"customers","actor":"bot","dataClass":"internal","constructor":"nope","prototype":"nope"}}}';
+      const input =
+        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) +
+        "\n" +
+        extraKeysLine +
+        "\n" +
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: {
+            name: "approve_action",
+            arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", dataClass: "internal" },
+          },
+        }) +
+        "\n";
+      const raw = spawnSync(process.execPath, ["--import", importUrl, INDEX, "mcp"], {
+        cwd: repo,
+        input,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 60_000,
+        env: buildEnv(),
+      });
+      assert.equal(raw.status, 0, `${hostile.name} MCP:\n${raw.stderr}`);
+      const mcpProto = parseProtoProbe(raw.stderr);
+      assert.equal(mcpProto.polluted, undefined, `${hostile.name} MCP polluted`);
+      assert.equal(mcpProto.inProto, false, `${hostile.name} MCP inProto`);
+      assert.deepEqual(mcpProto.added, [], `${hostile.name} MCP added ${mcpProto.added}`);
+      const replies = (raw.stdout || "")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
+      const extraReply = replies.find((m) => m.id === 2);
+      assert.ok(extraReply && extraReply.error, `${hostile.name} extra key must be schema-rejected`);
+      assert.equal(extraReply.error.code, -32602);
+      const okReply = replies.find((m) => m.id === 3);
+      assert.ok(okReply && okReply.result && okReply.result.content, `${hostile.name} happy call`);
+      const machine = parseApproveMachine(okReply.result.content[0].text);
+      assert.equal(machine.decision, "allow", hostile.name);
+    }
+
+    const loadProbe = `
+import { loadApprovalsPolicy } from ${JSON.stringify(pathToFileURL(path.join(productRoot, "approve.mjs")).href)};
+const repo = ${JSON.stringify(path.join(base, "hb7-proto"))};
+const before = Object.getOwnPropertyNames(Object.prototype).slice().sort();
+loadApprovalsPolicy(repo);
+const after = Object.getOwnPropertyNames(Object.prototype).slice().sort();
+process.stdout.write(JSON.stringify({
+  polluted: Object.prototype.polluted,
+  inProto: "polluted" in Object.prototype,
+  added: after.filter((k) => !before.includes(k)),
+}) + "\\n");
+`;
+    const loadChild = spawnSync(process.execPath, ["--input-type=module", "-e", loadProbe], {
+      cwd: productRoot,
       encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 60_000,
+      timeout: 30_000,
       env: buildEnv(),
     });
-    assert.equal(raw.status, 0, raw.stderr);
-    for (const line of (raw.stdout || "").split("\n").filter(Boolean)) JSON.parse(line);
-    assert.equal(Object.prototype.polluted, undefined);
-    const extraReply = (raw.stdout || "")
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l))
-      .find((m) => m.id === 2);
-    assert.ok(extraReply && extraReply.error, "extra proto keys must be schema-rejected");
-    assert.equal(extraReply.error.code, -32602);
+    assert.equal(loadChild.status, 0, loadChild.stderr);
+    const loadReport = JSON.parse(loadChild.stdout);
+    assert.equal(loadReport.polluted, undefined);
+    assert.equal(loadReport.inProto, false);
+    assert.deepEqual(loadReport.added, []);
+  } finally {
+    cleanup(base);
+  }
+});
 
+scenario("mcp: approve_action HB8 foreign cwd cannot pick the authorizing repository", () => {
+  const base = freshBase();
+  try {
+    const victim = path.join(base, "victim");
+    initRepo(victim);
+    write(victim, "package.json", JSON.stringify({ name: "victim", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(victim, "chore: victim has no approvals policy");
+
+    const attacker = path.join(base, "attacker");
+    initRepo(attacker);
+    write(attacker, "package.json", JSON.stringify({ name: "attacker", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      attacker,
+      path.join(".getadvantage", "policy.json"),
+      JSON.stringify({
+        version: 1,
+        approvals: {
+          escalateTo: "nobody",
+          rules: [
+            {
+              id: "r-allow",
+              action: "db.write",
+              dataClass: "public",
+              decision: "allow",
+              reason: "attacker rule",
+            },
+          ],
+        },
+      }) + "\n",
+    );
+    commitAll(attacker, "chore: attacker committed allow policy");
+
+    const args = { action: "db.write", resource: "customers", actor: "agent-x", dataClass: "public" };
+
+    const foreign = mcpInitAndCall(victim, "approve_action", { cwd: attacker, ...args });
+    assert.equal(foreign.status, 0, foreign.stderr);
+    assertNoStackOnStdout(foreign.stdout);
+    const foreignTool = mcpToolText(foreign.replies, 2);
+    assert.equal(foreignTool.rpcError, null, JSON.stringify(foreignTool.rpcError));
+    assert.ok(foreignTool.isError, `HB8 must refuse, got:\n${foreignTool.text}`);
+    assert.ok(/different git repository/i.test(foreignTool.text), foreignTool.text);
+    assert.ok(/omit cwd/i.test(foreignTool.text), foreignTool.text);
+    assert.ok(!/this was a real yes/i.test(foreignTool.text), foreignTool.text);
+    assert.ok(!/"decision"\s*:\s*"allow"/.test(foreignTool.text), foreignTool.text);
+    assert.equal(existsSync(path.join(attacker, ".getadvantage", "approvals")), false, "attacker must not receive a proof");
+    assert.equal(existsSync(path.join(victim, ".getadvantage", "approvals")), false, "victim must not record a foreign-cwd call");
+
+    const nested = path.join(victim, "nested", "dir");
+    mkdirSync(nested, { recursive: true });
+    const sameRoot = mcpInitAndCall(victim, "approve_action", { cwd: nested, ...args });
+    assert.equal(sameRoot.status, 0, sameRoot.stderr);
+    const sameTool = mcpToolText(sameRoot.replies, 2);
+    assert.ok(!sameTool.isError, sameTool.text);
+    const sameMachine = parseApproveMachine(sameTool.text);
+    assert.notEqual(sameMachine.decision, "allow");
+    assert.equal(sameMachine.decision, "escalate");
+
+    const omitted = mcpInitAndCall(victim, "approve_action", args);
+    assert.equal(omitted.status, 0, omitted.stderr);
+    const omittedTool = mcpToolText(omitted.replies, 2);
+    assert.ok(!omittedTool.isError, omittedTool.text);
+    const omittedMachine = parseApproveMachine(omittedTool.text);
+    assert.equal(omittedMachine.decision, "escalate");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action policy-read failure is a tool error not a recorded escalation", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "bad-policy");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "bad-policy", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(repo, path.join(".getadvantage", "policy.json"), "{ not json\n");
+    commitAll(repo, "chore: malformed policy");
     const mcp = mcpInitAndCall(repo, "approve_action", {
       cwd: repo,
       action: "db.write",
       resource: "customers",
       actor: "bot",
-      dataClass: "internal",
+      dataClass: "public",
     });
     assert.equal(mcp.status, 0, mcp.stderr);
-    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
-    assert.equal(machine.decision, "allow");
-    assert.equal(Object.prototype.polluted, undefined);
-    assert.equal({}.polluted, undefined);
-    assert.equal("polluted" in Object.prototype, false);
-    const afterKeys = Object.getOwnPropertyNames(proto).slice().sort().join(",");
-    assert.equal(afterKeys, beforeKeys, "Object.prototype gained or lost names");
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(tool.isError, tool.text);
+    assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
+    assert.ok(/fix \.getadvantage\/policy\.json/i.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"escalate"/.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"allow"/.test(tool.text), tool.text);
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals")), false);
   } finally {
     cleanup(base);
-    assert.equal(Object.prototype.polluted, undefined);
+  }
+});
+
+scenario("mcp: approve_action proof-write failure is a tool error not a recorded escalation", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "proof-fail");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "proof-fail", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      rules: [{ id: "r-allow", action: "db.write", dataClass: "public", decision: "allow", reason: "ok" }],
+    });
+    commitAll(repo, "chore: allowing policy");
+    writeFileSync(path.join(repo, ".getadvantage", "approvals"), "not-a-directory\n", "utf8");
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "public",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(tool.isError, tool.text);
+    assert.ok(/could not be recorded/i.test(tool.text), tool.text);
+    assert.ok(/not a recorded decision/i.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"escalate"/.test(tool.text), tool.text);
+    assert.ok(!/"decision"\s*:\s*"allow"/.test(tool.text), tool.text);
+    assert.ok(!/this was a real yes/i.test(tool.text), tool.text);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: map still accepts cwd in another repo (approve_action pin is tool-local)", () => {
+  const base = freshBase();
+  try {
+    const serverRepo = path.join(base, "server");
+    initRepo(serverRepo);
+    write(serverRepo, "package.json", JSON.stringify({ name: "server", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(serverRepo, "chore: server repo");
+
+    const other = path.join(base, "other");
+    initRepo(other);
+    write(other, "package.json", '{"name":"other","version":"1.0.0","dependencies":{"express":"^4.19.0"}}\n');
+    write(
+      other,
+      "server.js",
+      [
+        "const express = require('express');",
+        "const app = express();",
+        "app.get('/items', (req, res) => res.json([]));",
+        "app.post('/items', (req, res) => res.status(201).end());",
+        "app.listen(3000);",
+      ].join("\n"),
+    );
+    commitAll(other, "chore: express other");
+
+    const mcp = mcpInitAndCall(serverRepo, "map", { cwd: other });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(!tool.isError, tool.text);
+    assert.ok(/API surface map/.test(tool.text), tool.text);
+    assert.ok(/\/items/.test(tool.text) && /POST/.test(tool.text), tool.text);
+  } finally {
+    cleanup(base);
   }
 });
 
