@@ -28,7 +28,7 @@
 // Node built-ins only. ESM.
 
 import { randomBytes } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJsonFile, repoRoot } from "./util.mjs";
@@ -46,6 +46,7 @@ import {
   sanitizeRecordId,
   EXIT,
   MATCH_KEYS,
+  credentialProofField,
 } from "./approve.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -121,6 +122,71 @@ function resolveRepo(args) {
       error: `Not inside a git repository at ${start}. getAdvantage runs in your project's repo — pass a "cwd" inside a git repo.`,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// approve_action authority pin — startup git root, not caller-supplied cwd.
+// Other tools still use resolveRepo(args). This door is the one that
+// authorizes, so the caller cannot pick the rulebook.
+// ---------------------------------------------------------------------------
+function canonicalizeGitRoot(start) {
+  const root = repoRoot(start);
+  let abs;
+  try {
+    abs = realpathSync(root);
+  } catch {
+    abs = path.resolve(root);
+  }
+  abs = path.resolve(abs);
+  if (abs.length > 3 && (abs.endsWith(path.sep) || abs.endsWith("/"))) {
+    abs = abs.replace(/[/\\]+$/, "");
+  }
+  return process.platform === "win32" ? abs.toLowerCase() : abs;
+}
+
+let STARTUP_REPO = null;
+
+function pinStartupRepo() {
+  if (STARTUP_REPO) return STARTUP_REPO;
+  const start = process.cwd();
+  try {
+    const display = repoRoot(start);
+    STARTUP_REPO = { root: canonicalizeGitRoot(display), display, error: null };
+  } catch {
+    STARTUP_REPO = {
+      root: null,
+      display: null,
+      error: `Not inside a git repository at ${start}. getAdvantage runs in your project's repo.`,
+    };
+  }
+  return STARTUP_REPO;
+}
+
+function foreignCwdRefusal() {
+  return [
+    "This approval was not checked. The path you passed is a different git repository from the one this server was started in.",
+    "Approvals use that repository's committed policy. A tool call cannot pick a different folder's rules.",
+    "Start getadvantage mcp in the repository whose policy should decide, or omit cwd.",
+  ].join("\n");
+}
+
+function pinApproveAuthority(args) {
+  const startup = pinStartupRepo();
+  if (startup.error) return { cwd: null, error: startup.error };
+
+  const requested = args && typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : "";
+  if (!requested) return { cwd: startup.display, error: null };
+
+  let requestedRoot;
+  try {
+    requestedRoot = canonicalizeGitRoot(requested);
+  } catch {
+    return { cwd: null, error: foreignCwdRefusal() };
+  }
+  if (requestedRoot !== startup.root) {
+    return { cwd: null, error: foreignCwdRefusal() };
+  }
+  return { cwd: startup.display, error: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +272,15 @@ const TOOLS = [
   {
     name: "approve_action",
     description:
-      "Ask whether one proposed action is allowed, blocked, or waiting on a named person. Uses the committed .getadvantage/policy.json (git index, not an unstaged edit). Default is wait. Writes a local proof record under .getadvantage/approvals/ (digests only, never the payload). Same decision engine as getadvantage approve. Not in the published package until a release.",
+      "Ask whether one proposed action is allowed, blocked, or waiting on a named person. Uses the committed .getadvantage/policy.json of the repository this server was started in. A cwd in a different repository is refused. Default is wait. Writes a local proof record (resource and summary as digests; a secret-shaped name is refused). Same as getadvantage approve. Not in the published package until a release.",
     inputSchema: {
       type: "object",
       properties: {
-        ...CWD_PROP,
+        cwd: {
+          type: "string",
+          description:
+            "Optional path inside the same git repository the server was started in. A path in a different repository is refused. Approvals always use the started-in repository's committed policy.",
+        },
         action: {
           type: "string",
           description: "What the agent wants to do (for example file.read or db.write).",
@@ -292,6 +362,16 @@ function noteFromWarning(w) {
   if (/working tree differs/i.test(s)) {
     return ".getadvantage/policy.json working tree differs from the git index. Only the staged content authorizes.";
   }
+  if (/unsupported version/i.test(s)) {
+    const m = s.match(/unsupported version (\S+)/i);
+    const ver = m ? m[1] : null;
+    return ver
+      ? `.getadvantage/policy.json version ${ver} is not supported, so those rules are not applied.`
+      : ".getadvantage/policy.json version is not supported, so those rules are not applied.";
+  }
+  if (/could not be read/i.test(s)) {
+    return ".getadvantage/policy.json is in git but could not be read, so those rules are not applied.";
+  }
   return null;
 }
 
@@ -312,6 +392,8 @@ function formatApproveActionText({ decision, id, warnings }) {
     lines.push("Nothing ran. A person has to say yes or no.");
     if (decision.escalateTo) {
       lines.push(`Named person: ${decision.escalateTo}.`);
+    } else {
+      lines.push("No named person is configured to review this.");
     }
   }
   lines.push(`Why: ${decision.reason}`);
@@ -333,18 +415,13 @@ function formatApproveActionText({ decision, id, warnings }) {
   return lines.join("\n");
 }
 
-function refuseApproveAction(reason, exitCode) {
+function toolFailureText(reason) {
   const lines = [
     "The action was not allowed.",
     `Why: ${reason}`,
+    "Nothing ran. This is not a recorded decision.",
     "",
-    machineBlock({
-      decision: "escalate",
-      id: null,
-      reason,
-      escalateTo: null,
-      exitCode: exitCode ?? 2,
-    }),
+    JSON.stringify({ ok: false, error: reason, id: null, exitCode: 1 }),
   ];
   return lines.join("\n");
 }
@@ -352,31 +429,74 @@ function refuseApproveAction(reason, exitCode) {
 function runApproveActionMcp(cwd, args) {
   const descriptor = descriptorFromToolArgs(args);
   if (!descriptor.action.trim() || !descriptor.resource.trim() || !descriptor.actor.trim()) {
-    return refuseApproveAction("Need action, resource and actor.", 1);
+    return { isError: true, text: toolFailureText("Need action, resource and actor.") };
   }
 
-  const loaded = loadApprovalsPolicy(cwd);
+  const credField = credentialProofField(descriptor);
+  if (credField) {
+    return {
+      isError: true,
+      text: toolFailureText(
+        `The ${credField} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+      ),
+    };
+  }
+
+  let loaded;
+  try {
+    loaded = loadApprovalsPolicy(cwd);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      isError: true,
+      text: toolFailureText(`The approval policy could not be read (${msg}).`),
+    };
+  }
   if (!loaded.ok) {
-    return refuseApproveAction(loaded.error || "The approval policy could not be read.", 1);
+    return {
+      isError: true,
+      text: toolFailureText(
+        "The approval policy could not be used. Fix .getadvantage/policy.json, commit it, then try again.",
+      ),
+    };
   }
 
   const decision = decide(descriptor, loaded.policy);
   const now = new Date().toISOString();
   const nonce = randomBytes(4).toString("hex");
   const id = makeDecisionId(now, nonce);
-  const record = buildProofRecord({
-    kind: "decision",
-    id,
-    decision,
-    descriptor,
-    now,
-  });
-  appendProofRecord(cwd, record);
-  return formatApproveActionText({
-    decision,
-    id,
-    warnings: loaded.warnings,
-  });
+  let record;
+  try {
+    record = buildProofRecord({
+      kind: "decision",
+      id,
+      decision,
+      descriptor,
+      now,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { isError: true, text: toolFailureText(msg) };
+  }
+  try {
+    appendProofRecord(cwd, record);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      isError: true,
+      text: toolFailureText(
+        `The decision could not be recorded (${msg}). Check that .getadvantage/approvals/ can be written.`,
+      ),
+    };
+  }
+  return {
+    isError: false,
+    text: formatApproveActionText({
+      decision,
+      id,
+      warnings: loaded.warnings,
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -481,9 +601,15 @@ const TOOL_IMPL = {
     const { result, error } = captureStdout(() => runApproveActionMcp(cwd, args));
     if (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      return refuseApproveAction(`Could not finish the approval decision (${msg}).`, 2);
+      return {
+        isError: true,
+        text: toolFailureText(`Could not finish the approval decision (${msg}).`),
+      };
     }
-    return typeof result === "string" ? result : refuseApproveAction("Could not finish the approval decision.", 2);
+    if (result && typeof result === "object" && typeof result.text === "string") {
+      return { isError: !!result.isError, text: result.text };
+    }
+    return { isError: true, text: toolFailureText("Could not finish the approval decision.") };
   },
 };
 
@@ -603,15 +729,30 @@ async function handleToolsCall(id, params) {
     return rpcError(id, -32602, schemaErr);
   }
 
-  const { cwd, error } = resolveRepo(args);
-  if (error) {
-    // Surface as a tool error (isError), not a transport error — the agent can
-    // read the message and retry with a valid cwd.
-    return rpcResult(id, { content: [{ type: "text", text: error }], isError: true });
+  let cwd;
+  if (name === "approve_action") {
+    const pinned = pinApproveAuthority(args);
+    if (pinned.error) {
+      return rpcResult(id, { content: [{ type: "text", text: pinned.error }], isError: true });
+    }
+    cwd = pinned.cwd;
+  } else {
+    const resolved = resolveRepo(args);
+    if (resolved.error) {
+      // Surface as a tool error (isError), not a transport error — the agent can
+      // read the message and retry with a valid cwd.
+      return rpcResult(id, { content: [{ type: "text", text: resolved.error }], isError: true });
+    }
+    cwd = resolved.cwd;
   }
 
   try {
     const text = await impl(cwd, args);
+    if (text && typeof text === "object" && typeof text.text === "string") {
+      const payload = { content: [{ type: "text", text: text.text }] };
+      if (text.isError) payload.isError = true;
+      return rpcResult(id, payload);
+    }
     return rpcResult(id, { content: [{ type: "text", text: String(text) }] });
   } catch (e) {
     logErr(`tool ${name} failed: ${e.stack || e}`);
@@ -671,6 +812,7 @@ async function handleMessage(msg) {
  * @returns {Promise<number>} exit code (0 on a clean stdin close)
  */
 export function runMcp() {
+  pinStartupRepo();
   logErr(`getadvantage MCP server v${pkgVersion()} — stdio, protocol ${PROTOCOL_VERSION}. Reading JSON-RPC on stdin.`);
 
   return new Promise((resolve) => {
