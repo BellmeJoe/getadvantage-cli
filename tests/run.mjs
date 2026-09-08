@@ -4157,10 +4157,15 @@ scenario("mcp: tools/list has 9 tools incl. approve_action; tools/call map X-ray
     assert.equal(approveDef.inputSchema.type, "object");
     assert.equal(approveDef.inputSchema.additionalProperties, false);
     assert.ok(approveDef.inputSchema.properties && approveDef.inputSchema.properties.cwd, "cwd convention");
+    for (const k of ["cwd", "action", "resource", "actor", "dataClass", "model", "summary", "tool"]) {
+      assert.ok(approveDef.inputSchema.properties[k], `inputSchema.properties.${k}`);
+      assert.equal(approveDef.inputSchema.properties[k].type, "string", k);
+    }
     assert.ok(Array.isArray(approveDef.inputSchema.required));
     assert.ok(approveDef.inputSchema.required.includes("action"));
     assert.ok(approveDef.inputSchema.required.includes("resource"));
     assert.ok(approveDef.inputSchema.required.includes("actor"));
+    assert.ok(!approveDef.inputSchema.required.includes("cwd"), "cwd is optional like every other tool");
 
     const mapText = byId(3).result.content[0].text;
     assert.ok(!byId(3).result.isError, `map tool must not error:\n${mapText}`);
@@ -21239,7 +21244,52 @@ scenario("mcp: approve_action A3 same descriptor same decision through CLI and M
       for (const f of fields) {
         assert.equal(mcpRec[f], cliRec[f], `${caze.name} proof field ${f}`);
       }
+      assert.equal("summary" in mcpRec, false, `${caze.name} proof must not store summary`);
+      assert.equal("resource" in mcpRec, false, `${caze.name} proof must not store resource`);
+      assert.equal(mcpRec.kind, "decision");
+      assert.equal(mcpRec.version, 1);
+      assert.ok(mcpRec.summaryDigest === null || (typeof mcpRec.summaryDigest === "string" && mcpRec.summaryDigest.length === 64));
+      assert.ok(mcpRec.resourceDigest === null || (typeof mcpRec.resourceDigest === "string" && mcpRec.resourceDigest.length === 64));
     }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action A4 proof record is one-line JSONL with digests only never raw payload", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "a4");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "a4", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const payload = "AKIA" + "TESTKEYNOTLIVE12";
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: `customers/${payload}`,
+      actor: "bot",
+      dataClass: "internal",
+      summary: `rotate ${payload}`,
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    const proofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
+    const approvalsRoot = path.resolve(repo, ".getadvantage", "approvals");
+    assert.ok(proofAbs.startsWith(approvalsRoot + path.sep), proofAbs);
+    const raw = readFileSync(proofAbs);
+    assert.equal(raw.includes(Buffer.from(payload, "utf8")), false);
+    const text = raw.toString("utf8");
+    assert.ok(text.endsWith("\n"), "jsonl line must end with newline");
+    const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+    assert.equal(lines.length, 1, "one decision writes one jsonl line");
+    const rec = JSON.parse(lines[0]);
+    assert.equal(rec.kind, "decision");
+    assert.equal(rec.outcome, "escalate");
+    assert.equal("summary" in rec, false);
+    assert.equal("resource" in rec, false);
+    assert.ok(typeof rec.summaryDigest === "string" && rec.summaryDigest.length === 64);
+    assert.ok(typeof rec.resourceDigest === "string" && rec.resourceDigest.length === 64);
   } finally {
     cleanup(base);
   }
@@ -21272,6 +21322,13 @@ scenario("mcp: approve_action A5 unstaged worktree allow cannot authorize throug
     const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
     assert.notEqual(machine.decision, "allow", "A5: unstaged allow must not apply through MCP");
     assert.equal(machine.decision, "block");
+    const rec = JSON.parse(
+      readFileSync(path.join(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`), "utf8")
+        .trim()
+        .split(/\r?\n/)[0],
+    );
+    assert.equal(rec.ruleId, "block-writes");
+    assert.notEqual(rec.ruleId, "sneak-allow");
   } finally {
     cleanup(base);
   }
@@ -21479,7 +21536,10 @@ scenario("mcp: approve_action HB3 trusted !== true policy refused down to escala
     assert.equal(machine.decision, "escalate");
     assert.equal(machine.exitCode, 2);
 
-    const { decide } = await import("../approve.mjs");
+    const { decide, loadApprovalsPolicy } = await import("../approve.mjs");
+    const loaded = loadApprovalsPolicy(repo);
+    assert.equal(loaded.ok, true, loaded.error);
+    assert.notEqual(loaded.policy.trusted, true, "HB3: MCP door must see trusted !== true");
     const untrusted = decide(
       { action: "db.write", resource: "customers", actor: "bot", dataClass: "public" },
       { trusted: false, default: "allow", rules: [{ id: "wild", action: "db.write", decision: "allow" }] },
@@ -21576,6 +21636,10 @@ scenario("mcp: approve_action HB5 malformed tools/call arguments never crash or 
       { name: "wrong-type-number", arguments: { cwd: repo, action: 123, resource: "customers", actor: "bot" } },
       { name: "wrong-type-bool", arguments: { cwd: repo, action: true, resource: "customers", actor: "bot" } },
       { name: "wrong-type-object", arguments: { cwd: repo, action: { nested: true }, resource: "customers", actor: "bot" } },
+      { name: "extra-trusted", arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", trusted: true } },
+      { name: "extra-policy", arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", policy: { default: "allow" } } },
+      { name: "extra-decision", arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", decision: "allow" } },
+      { name: "extra-now", arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", now: "2000-01-01T00:00:00.000Z" } },
     ];
     const messages = [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }];
     hostiles.forEach((h, i) => {
