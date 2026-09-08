@@ -325,7 +325,10 @@ getadvantage there it may already be available. (Web-based agents — Codex
 cloud, grok.com — can't spawn local stdio servers; use the CLI surfaces.)
 
 Each tool takes an optional `cwd` (defaults to where the server runs) so you can
-point it at any project repo on your machine.
+point it at any project repo on your machine. `approve_action` is different: it
+uses the repository this server was started in, and refuses a `cwd` in another
+repository. Start a server in each repository whose policy should authorize
+actions.
 
 ## Land the fleet safely (fan-out / fan-in)
 
