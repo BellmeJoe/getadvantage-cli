@@ -4100,7 +4100,7 @@ scenario("map on a client-only React/Vite app: de-jargoned, friendly empty-SPA l
 // 36. MCP live protocol: tools/list exposes map + architecture; tools/call map
 //     returns the real API-surface text (0.8.1)
 // ---------------------------------------------------------------------------
-scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X-rays an Express repo", () => {
+scenario("mcp: tools/list has 9 tools incl. approve_action; tools/call map X-rays an Express repo", () => {
   const base = freshBase();
   try {
     const repo = path.join(base, "sample");
@@ -4121,6 +4121,15 @@ scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X
         JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
         JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "map", arguments: { cwd: repo } } }),
         JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "architecture", arguments: { cwd: repo, top: 3 } } }),
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "approve_action",
+            arguments: { cwd: repo, action: "db.write", resource: "customers", actor: "bot", dataClass: "internal" },
+          },
+        }),
       ].join("\n") + "\n";
     const r = spawnSync(process.execPath, [INDEX, "mcp"], {
       cwd: repo,
@@ -4135,12 +4144,23 @@ scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X
     const replies = r.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
     const byId = (id) => replies.find((m) => m.id === id);
 
-    const tools = byId(2).result.tools.map((t) => t.name);
+    const listed = byId(2).result.tools;
+    const tools = listed.map((t) => t.name);
+    assert.equal(listed.length, 9, `tool catalogue must have 9 tools, got ${listed.length}: ${tools.join(", ")}`);
     assert.deepEqual(
       [...tools].sort(),
-      ["architecture", "check", "gauge", "get_brief", "get_handoff", "map", "refresh_brief", "save_handoff"],
-      `tool catalogue must be exactly the 8 tools: ${tools.join(", ")}`,
+      ["approve_action", "architecture", "check", "gauge", "get_brief", "get_handoff", "map", "refresh_brief", "save_handoff"],
+      `tool catalogue must be exactly the 9 tools: ${tools.join(", ")}`,
     );
+    const approveDef = listed.find((t) => t.name === "approve_action");
+    assert.ok(approveDef, "approve_action must be listed");
+    assert.equal(approveDef.inputSchema.type, "object");
+    assert.equal(approveDef.inputSchema.additionalProperties, false);
+    assert.ok(approveDef.inputSchema.properties && approveDef.inputSchema.properties.cwd, "cwd convention");
+    assert.ok(Array.isArray(approveDef.inputSchema.required));
+    assert.ok(approveDef.inputSchema.required.includes("action"));
+    assert.ok(approveDef.inputSchema.required.includes("resource"));
+    assert.ok(approveDef.inputSchema.required.includes("actor"));
 
     const mapText = byId(3).result.content[0].text;
     assert.ok(!byId(3).result.isError, `map tool must not error:\n${mapText}`);
@@ -4152,9 +4172,25 @@ scenario("mcp: tools/list has 8 tools incl. map + architecture; tools/call map X
     assert.ok(!byId(4).result.isError, `architecture tool must not error:\n${archText}`);
     assert.ok(/Signal band:/.test(archText), `architecture must report its signal band:\n${archText}`);
 
+    const approveReply = byId(5);
+    assert.ok(approveReply && approveReply.result && approveReply.result.content, "approve_action reply");
+    assert.equal(approveReply.result.content[0].type, "text");
+    const atext = approveReply.result.content[0].text;
+    assert.ok(!approveReply.result.isError, `approve_action happy path must not be a tool error:\n${atext}`);
+    assert.ok(/waiting on a person/i.test(atext), atext);
+    assert.ok(/nothing is allowed automatically/i.test(atext), atext);
+    const machineLine = atext.split(/\n/).map((l) => l.trim()).filter((l) => l.startsWith("{") && l.endsWith("}")).pop();
+    const machine = JSON.parse(machineLine);
+    assert.equal(machine.decision, "escalate");
+    assert.equal(machine.exitCode, 2);
+    assert.ok(typeof machine.id === "string" && machine.id.length > 0, JSON.stringify(machine));
+    assert.ok(typeof machine.reason === "string" && machine.reason.length > 0);
+    const proofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
+    assert.ok(existsSync(proofAbs), proofAbs);
+
     // stdout is the protocol channel — every line must be JSON-RPC, no leaked prose.
     for (const line of r.stdout.split("\n").filter(Boolean)) {
-      assert.ok(line.startsWith("{"), `non-JSON leaked onto the protocol channel: ${line.slice(0, 80)}`);
+      JSON.parse(line);
     }
   } finally {
     cleanup(base);

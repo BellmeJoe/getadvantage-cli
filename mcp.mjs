@@ -27,6 +27,7 @@
 //
 // Node built-ins only. ESM.
 
+import { randomBytes } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +38,15 @@ import { runChecks } from "./checks-runner.mjs";
 import { runGauge } from "./gauge.mjs";
 import { renderMap } from "./overviews.mjs";
 import { runArchitecture } from "./architecture.mjs";
+import {
+  decide,
+  loadApprovalsPolicy,
+  buildProofRecord,
+  appendProofRecord,
+  sanitizeRecordId,
+  EXIT,
+  MATCH_KEYS,
+} from "./approve.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROTOCOL_VERSION = "2024-11-05";
@@ -193,7 +203,181 @@ const TOOLS = [
       "A quick 'is this session getting heavy?' read — a heuristic from repo activity since the last handoff (commits + lines changed + time elapsed). Nudges a reset before things slow down. It is NOT a read of your context window or token count.",
     inputSchema: { type: "object", properties: { ...CWD_PROP }, additionalProperties: false },
   },
+  {
+    name: "approve_action",
+    description:
+      "Ask whether one proposed action is allowed, blocked, or waiting on a named person. Uses the committed .getadvantage/policy.json (git index, not an unstaged edit). Default is wait. Writes a local proof record under .getadvantage/approvals/ (digests only, never the payload). Same decision engine as getadvantage approve. Not in the published package until a release.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...CWD_PROP,
+        action: {
+          type: "string",
+          description: "What the agent wants to do (for example file.read or db.write).",
+        },
+        resource: {
+          type: "string",
+          description: "The resource the action would touch (path, table, endpoint).",
+        },
+        actor: {
+          type: "string",
+          description: "Who is proposing the action (agent name, bot, or person).",
+        },
+        dataClass: {
+          type: "string",
+          description: "Data class of the resource (public, internal, regulated). Omit if unknown; unknown is never allowed by a wildcard rule.",
+        },
+        model: {
+          type: "string",
+          description: "Model that proposed the action, if known.",
+        },
+        summary: {
+          type: "string",
+          description: "Optional one-line description. Stored as a digest only; never written in the clear.",
+        },
+        tool: {
+          type: "string",
+          description: "The agent tool that would perform the action (for example bash or write).",
+        },
+      },
+      required: ["action", "resource", "actor"],
+      additionalProperties: false,
+    },
+  },
 ];
+
+// ---------------------------------------------------------------------------
+// approve_action — same decide() engine as `getadvantage approve`. The MCP
+// door maps flat tool arguments onto the stage A descriptor and writes the
+// same proof record. It does not accept a policy, a trusted flag, a decision,
+// or a record id from the caller.
+// ---------------------------------------------------------------------------
+function ownString(obj, key) {
+  if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return "";
+  if (!Object.prototype.hasOwnProperty.call(obj, key)) return "";
+  const v = obj[key];
+  return typeof v === "string" ? v : "";
+}
+
+function descriptorFromToolArgs(args) {
+  const desc = Object.create(null);
+  for (const key of MATCH_KEYS) desc[key] = ownString(args, key);
+  desc.summary = ownString(args, "summary");
+  return desc;
+}
+
+function makeDecisionId(now, nonce) {
+  const stamp = String(now).replace(/[:.]/g, "-");
+  return sanitizeRecordId(`dec-${stamp}-${nonce}`);
+}
+
+function machineBlock(fields) {
+  return JSON.stringify({
+    decision: fields.decision,
+    id: fields.id,
+    reason: fields.reason,
+    escalateTo: fields.escalateTo ?? null,
+    exitCode: fields.exitCode,
+  });
+}
+
+function noteFromWarning(w) {
+  const s = String(w || "");
+  if (/nothing is allowed automatically/i.test(s)) {
+    return "No .getadvantage/policy.json is committed, so nothing is allowed automatically.";
+  }
+  if (/not tracked or staged/i.test(s)) {
+    return ".getadvantage/policy.json is not tracked or staged in git, so those rules are not applied.";
+  }
+  if (/working tree differs/i.test(s)) {
+    return ".getadvantage/policy.json working tree differs from the git index. Only the staged content authorizes.";
+  }
+  return null;
+}
+
+function formatApproveActionText({ decision, id, warnings }) {
+  const lines = [];
+  if (decision.outcome === "allow") {
+    lines.push("This action is allowed.");
+    if (decision.ruleId) {
+      lines.push("A committed policy rule allowed this action. This was a real yes.");
+    } else {
+      lines.push("The committed default permits unmatched actions. This was a real yes. That is not a missing check.");
+    }
+  } else if (decision.outcome === "block") {
+    lines.push("This action is blocked.");
+    lines.push("Nothing ran. The committed policy blocked this action.");
+  } else {
+    lines.push("This action is waiting on a person.");
+    lines.push("Nothing ran. A person has to say yes or no.");
+    if (decision.escalateTo) {
+      lines.push(`Named person: ${decision.escalateTo}.`);
+    }
+  }
+  lines.push(`Why: ${decision.reason}`);
+  if (id) lines.push(`Record: .getadvantage/approvals/${id}.jsonl`);
+  for (const w of warnings || []) {
+    const note = noteFromWarning(w);
+    if (note) lines.push(`Note: ${note}`);
+  }
+  lines.push("");
+  lines.push(
+    machineBlock({
+      decision: decision.outcome,
+      id,
+      reason: decision.reason,
+      escalateTo: decision.escalateTo,
+      exitCode: EXIT[decision.outcome] ?? 2,
+    }),
+  );
+  return lines.join("\n");
+}
+
+function refuseApproveAction(reason, exitCode) {
+  const lines = [
+    "The action was not allowed.",
+    `Why: ${reason}`,
+    "",
+    machineBlock({
+      decision: "escalate",
+      id: null,
+      reason,
+      escalateTo: null,
+      exitCode: exitCode ?? 2,
+    }),
+  ];
+  return lines.join("\n");
+}
+
+function runApproveActionMcp(cwd, args) {
+  const descriptor = descriptorFromToolArgs(args);
+  if (!descriptor.action.trim() || !descriptor.resource.trim() || !descriptor.actor.trim()) {
+    return refuseApproveAction("Need action, resource and actor.", 1);
+  }
+
+  const loaded = loadApprovalsPolicy(cwd);
+  if (!loaded.ok) {
+    return refuseApproveAction(loaded.error || "The approval policy could not be read.", 1);
+  }
+
+  const decision = decide(descriptor, loaded.policy);
+  const now = new Date().toISOString();
+  const nonce = randomBytes(4).toString("hex");
+  const id = makeDecisionId(now, nonce);
+  const record = buildProofRecord({
+    kind: "decision",
+    id,
+    decision,
+    descriptor,
+    now,
+  });
+  appendProofRecord(cwd, record);
+  return formatApproveActionText({
+    decision,
+    id,
+    warnings: loaded.warnings,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // tool implementations — each returns a plain text string (the tool result)
@@ -288,6 +472,18 @@ const TOOL_IMPL = {
     // the nudge points at save_handoff, never at a CLI command it can't run.
     const { text } = captureStdout(() => runGauge({ cwd, saveHint: "the save_handoff tool" }));
     return text.trim() || "(no gauge output)";
+  },
+
+  approve_action(cwd, args) {
+    // STDOUT PURITY: approve.mjs prints via console.log on the CLI path.
+    // This door must never let that (or anything else) touch the JSON-RPC
+    // channel. captureStdout is the same shim every other tool uses.
+    const { result, error } = captureStdout(() => runApproveActionMcp(cwd, args));
+    if (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return refuseApproveAction(`Could not finish the approval decision (${msg}).`, 2);
+    }
+    return typeof result === "string" ? result : refuseApproveAction("Could not finish the approval decision.", 2);
   },
 };
 
