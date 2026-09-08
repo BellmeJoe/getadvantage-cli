@@ -58,8 +58,22 @@ export const MATCH_KEYS = Object.freeze([
   "model",
 ]);
 export const EXIT = Object.freeze({ allow: 0, block: 1, escalate: 2 });
+/** Proof fields stored in the clear so an owner can read what happened. */
+export const PROOF_PLAIN_FIELDS = Object.freeze(["action", "actor", "model", "dataClass"]);
 const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
+// Conservative shapes only — refuse these in cleartext proof fields rather
+// than persist them. Do not import scan.mjs; this door must not widen the
+// secret catalogue. Whole-field and contained AWS access key ids are the
+// live finding; a few other well-known prefixes are the same class of harm.
+const CREDENTIAL_FIELD_RE = [
+  /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/,
+  /\bsk_live_[0-9A-Za-z]{16,}/,
+  /\bsk-ant-[A-Za-z0-9\-_]{16,}/,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+];
 
 function own(obj, key) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return undefined;
@@ -77,6 +91,32 @@ function asString(v) {
 function nonempty(v) {
   const s = asString(v).trim();
   return s.length > 0 ? s : "";
+}
+
+function fieldLooksLikeCredential(value) {
+  const s = asString(value);
+  if (!s) return false;
+  for (const re of CREDENTIAL_FIELD_RE) {
+    re.lastIndex = 0;
+    if (re.test(s)) return true;
+  }
+  return false;
+}
+
+/**
+ * Name of the first persisted caller-controlled field that looks like a
+ * secret, or null. resource and summary are digested and are not checked
+ * here. `extra.by` is checked when present (resolution records).
+ */
+export function credentialProofField(descriptor, extra) {
+  const desc = descriptor && typeof descriptor === "object" ? descriptor : {};
+  for (const key of PROOF_PLAIN_FIELDS) {
+    const v = nonempty(desc[key]);
+    if (v && fieldLooksLikeCredential(v)) return key;
+  }
+  const by = nonempty(extra?.by);
+  if (by && fieldLooksLikeCredential(by)) return "by";
+  return null;
 }
 
 /** Forward-slash path form for glob matching (H10). */
@@ -438,6 +478,15 @@ export function proofPathForId(cwd, id) {
  */
 export function buildProofRecord({ kind, id, decision, descriptor, now, extra }) {
   const desc = descriptor || {};
+  const bad = credentialProofField(desc, extra);
+  if (bad) {
+    const err = new Error(
+      `The ${bad} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+    );
+    err.code = "PROOF_CREDENTIAL_FIELD";
+    err.field = bad;
+    throw err;
+  }
   const summary = asString(desc.summary);
   const resource = asString(desc.resource);
   const rec = {
@@ -702,6 +751,11 @@ export function runApprove(opts = {}) {
       if (!nonempty(by)) {
         return usageError("A named person is required to resolve an escalation (--by <name>).");
       }
+      if (credentialProofField({}, { by: nonempty(by) })) {
+        return usageError(
+          "The --by value looks like a secret, so it was not stored and this action was not allowed. Pass a person's name, not a key.",
+        );
+      }
       const allow = !!flags.allow;
       const deny = !!flags.deny;
       if (allow === deny) {
@@ -749,6 +803,12 @@ export function runApprove(opts = {}) {
     const descriptor = built.descriptor;
     if (!nonempty(descriptor.action) || !nonempty(descriptor.resource) || !nonempty(descriptor.actor)) {
       return usageError("Need --action, --resource and --actor (or an --action-file that has them).");
+    }
+    const credField = credentialProofField(descriptor);
+    if (credField) {
+      return usageError(
+        `The ${credField} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+      );
     }
 
     const loaded = loadApprovalsPolicy(repoCwd);
