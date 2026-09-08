@@ -19955,14 +19955,14 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    412,
+    413,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
   // the suite. 379 was the pre-L1 base; stage A added 17 (396); stage B
-  // added 12 (408); this repair added HB8 + policy-read + proof-write +
-  // map-cwd-local (412). Update this number when a scenario is added or
-  // removed; do not delete the pin.
+  // added 12 (408); stage B repair added HB8 + policy-read + proof-write +
+  // map-cwd-local (412); this round added policy-read I/O (413). Update
+  // this number when a scenario is added or removed; do not delete the pin.
 });
 
 scenario("scan-scope-claim: filesToScan set identical to frozen pre-lane algorithm", () => {
