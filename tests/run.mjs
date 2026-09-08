@@ -21024,6 +21024,716 @@ scenario("approve: check and gate output on a clean fixture stay GO / PASS", () 
   }
 });
 
+// ---------------------------------------------------------------------------
+// 65. L1 approval agent stage B — MCP tool approve_action (TEST_FILTER=approve_action)
+// ---------------------------------------------------------------------------
+function runMcpJsonRpc(cwd, messages) {
+  const input = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
+  const r = spawnSync(process.execPath, [INDEX, "mcp"], {
+    cwd,
+    input,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 60_000,
+    env: buildEnv(),
+  });
+  if (r.error) throw r.error;
+  const stdout = r.stdout || "";
+  const stderr = r.stderr || "";
+  const lines = stdout.split("\n").filter((l) => l.length > 0);
+  const replies = [];
+  for (const line of lines) {
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      throw new Error(`non-JSON leaked onto the protocol channel: ${line.slice(0, 160)}`);
+    }
+    replies.push(parsed);
+  }
+  return { status: r.status ?? -1, stdout, stderr, replies, lines };
+}
+
+function mcpInitAndCall(cwd, toolName, args, id = 2) {
+  return runMcpJsonRpc(cwd, [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id, method: "tools/call", params: { name: toolName, arguments: args } },
+  ]);
+}
+
+function mcpReply(replies, id) {
+  const msg = replies.find((m) => m.id === id);
+  assert.ok(msg, `missing JSON-RPC reply id ${id}`);
+  return msg;
+}
+
+function mcpToolText(replies, id) {
+  const msg = mcpReply(replies, id);
+  if (msg.error) return { rpcError: msg.error, text: null, result: null };
+  assert.ok(msg.result && Array.isArray(msg.result.content) && msg.result.content[0], JSON.stringify(msg));
+  assert.equal(msg.result.content[0].type, "text");
+  return {
+    rpcError: null,
+    text: msg.result.content[0].text,
+    result: msg.result,
+    isError: !!msg.result.isError,
+  };
+}
+
+function parseApproveMachine(text) {
+  assert.ok(typeof text === "string" && text.length > 0, "approve_action returned empty text");
+  const jsonLines = [];
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (t.startsWith("{") && t.endsWith("}")) {
+      jsonLines.push(JSON.parse(t));
+    }
+  }
+  assert.ok(jsonLines.length >= 1, `approve_action text had no parseable machine JSON:\n${text}`);
+  const doc = jsonLines[jsonLines.length - 1];
+  assert.equal(typeof doc, "object");
+  assert.ok(doc !== null);
+  return doc;
+}
+
+function freezeApproveCli(s) {
+  return String(s)
+    .replace(/dec-[A-Za-z0-9._-]+/g, "dec-ID")
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "TIME")
+    .replace(/"proof"\s*:\s*"[^"]*"/g, '"proof":"PROOF"')
+    .replace(/ga-cli-test-[A-Za-z0-9._-]+/g, "TMP")
+    .replace(/\\old-\d+\\/g, "\\FIXTURE\\")
+    .replace(/\\new-\d+\\/g, "\\FIXTURE\\");
+}
+
+function walkFiles(dir, acc = []) {
+  if (!existsSync(dir)) return acc;
+  for (const name of readdirSync(dir)) {
+    const abs = path.join(dir, name);
+    const st = lstatSync(abs);
+    if (st.isDirectory()) walkFiles(abs, acc);
+    else acc.push(abs);
+  }
+  return acc;
+}
+
+function extractCommitMjs(sha, dest, productRoot) {
+  mkdirSync(dest, { recursive: true });
+  const names = execFileSync("git", ["ls-tree", "-r", "--name-only", sha], {
+    cwd: productRoot,
+    encoding: "utf8",
+  })
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean);
+  for (const rel of names) {
+    if (rel.startsWith("tests/") || rel.startsWith("docs/") || rel.startsWith("ops/") || rel.startsWith("fixtures/")) continue;
+    if (!(rel.endsWith(".mjs") || rel === "package.json" || rel === "action.yml" || rel.startsWith("action/"))) continue;
+    const body = execFileSync("git", ["show", `${sha}:${rel.replace(/\\/g, "/")}`], { cwd: productRoot });
+    const abs = path.join(dest, rel);
+    mkdirSync(path.dirname(abs), { recursive: true });
+    writeFileSync(abs, body);
+  }
+}
+
+function assertNoStackOnStdout(stdout) {
+  assert.ok(!/^\s+at /m.test(stdout), `stack trace leaked onto MCP stdout:\n${stdout.slice(0, 400)}`);
+}
+
+scenario("mcp: approve_action A3 same descriptor same decision through CLI and MCP doors", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "parity");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "parity", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      escalateTo: "Alex",
+      rules: [
+        {
+          id: "public-read",
+          action: "file.read",
+          resource: "docs/**",
+          dataClass: "public",
+          decision: "allow",
+          reason: "public docs",
+        },
+        {
+          id: "no-delete",
+          action: "file.delete",
+          decision: "block",
+          reason: "deletes are blocked",
+        },
+      ],
+    });
+    commitAll(repo, "chore: tracked approvals policy");
+
+    const cases = [
+      {
+        name: "allow",
+        args: { action: "file.read", resource: "docs/readme", actor: "bot", dataClass: "public", model: "claude-opus-5" },
+        expect: "allow",
+      },
+      {
+        name: "block",
+        args: { action: "file.delete", resource: "docs/a", actor: "bot", dataClass: "public" },
+        expect: "block",
+      },
+      {
+        name: "escalate",
+        args: { action: "db.write", resource: "customers", actor: "bot", dataClass: "internal" },
+        expect: "escalate",
+      },
+    ];
+
+    for (const caze of cases) {
+      const cliArgs = [
+        "approve",
+        "--json",
+        "--action",
+        caze.args.action,
+        "--resource",
+        caze.args.resource,
+        "--actor",
+        caze.args.actor,
+        "--data-class",
+        caze.args.dataClass,
+      ];
+      if (caze.args.model) cliArgs.push("--model", caze.args.model);
+      const cli = run(cliArgs, repo);
+      const cliDoc = JSON.parse(cli.stdout);
+      assert.equal(cliDoc.outcome, caze.expect, `${caze.name} CLI`);
+
+      const mcp = mcpInitAndCall(repo, "approve_action", { cwd: repo, ...caze.args });
+      assert.equal(mcp.status, 0, mcp.stderr);
+      assertNoStackOnStdout(mcp.stdout);
+      const tool = mcpToolText(mcp.replies, 2);
+      assert.equal(tool.rpcError, null, JSON.stringify(tool.rpcError));
+      const machine = parseApproveMachine(tool.text);
+      assert.equal(machine.decision, cliDoc.outcome, `${caze.name} decision`);
+      assert.equal(machine.reason, cliDoc.reason, `${caze.name} reason`);
+      assert.equal(machine.escalateTo, cliDoc.escalateTo, `${caze.name} escalateTo`);
+      assert.equal(machine.exitCode, cliDoc.exitCode, `${caze.name} exitCode`);
+      assert.ok(typeof machine.id === "string" && machine.id.length > 0);
+
+      const cliProofAbs = cliDoc.proof;
+      const mcpProofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
+      assert.ok(existsSync(cliProofAbs), cliProofAbs);
+      assert.ok(existsSync(mcpProofAbs), mcpProofAbs);
+      const cliRec = JSON.parse(readFileSync(cliProofAbs, "utf8").trim().split(/\r?\n/)[0]);
+      const mcpLines = readFileSync(mcpProofAbs, "utf8").trim().split(/\r?\n/);
+      const mcpRec = JSON.parse(mcpLines[mcpLines.length - 1]);
+      const fields = [
+        "outcome",
+        "ruleId",
+        "reason",
+        "escalateTo",
+        "approver",
+        "model",
+        "dataClass",
+        "actor",
+        "action",
+        "resourceDigest",
+        "summaryDigest",
+      ];
+      for (const f of fields) {
+        assert.equal(mcpRec[f], cliRec[f], `${caze.name} proof field ${f}`);
+      }
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action A5 unstaged worktree allow cannot authorize through MCP", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "unstaged");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "unstaged", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      escalateTo: "Alex",
+      rules: [{ id: "block-writes", action: "db.write", decision: "block", reason: "no writes" }],
+    });
+    commitAll(repo, "chore: tracked block policy");
+    writeApprovalsPolicy(repo, {
+      default: "escalate",
+      rules: [{ id: "sneak-allow", action: "db.write", decision: "allow", reason: "unstaged" }],
+    });
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    assert.notEqual(machine.decision, "allow", "A5: unstaged allow must not apply through MCP");
+    assert.equal(machine.decision, "block");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action A6 stdout purity initialize + tools/call every line JSON.parse", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "purity");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "purity", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    assert.ok(mcp.lines.length >= 2, `expected initialize + tools/call replies, got ${mcp.lines.length}`);
+    for (const line of mcp.lines) {
+      const parsed = JSON.parse(line);
+      assert.equal(typeof parsed, "object");
+      assert.equal(parsed.jsonrpc, "2.0");
+    }
+    assertNoStackOnStdout(mcp.stdout);
+    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    assert.equal(machine.decision, "escalate");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action A7 CLI stdout+stderr+exit byte-identical vs 7d53061", () => {
+  const base = freshBase();
+  const productRoot = path.join(__dirname, "..");
+  try {
+    const sourceDiff = execFileSync(
+      "git",
+      ["diff", "7d53061", "--", "approve.mjs", "index.mjs", "util.mjs", "policy.mjs"],
+      { cwd: productRoot, encoding: "utf8" },
+    );
+    assert.equal(sourceDiff, "", `approve CLI sources drifted from 7d53061:\n${sourceDiff.slice(0, 500)}`);
+
+    const oldTree = path.join(base, "old-cli");
+    extractCommitMjs("7d53061", oldTree, productRoot);
+    const oldIndex = path.join(oldTree, "index.mjs");
+    assert.ok(existsSync(oldIndex), oldIndex);
+
+    function fixture(name) {
+      const repo = path.join(base, name);
+      initRepo(repo);
+      write(repo, "package.json", JSON.stringify({ name, version: "1.0.0", private: true }, null, 2) + "\n");
+      writeApprovalsPolicy(repo, {
+        default: "escalate",
+        escalateTo: "Alex",
+        rules: [
+          {
+            id: "public-read",
+            action: "file.read",
+            resource: "docs/**",
+            dataClass: "public",
+            decision: "allow",
+            reason: "public docs",
+          },
+        ],
+      });
+      commitAll(repo, "chore: fixture");
+      return repo;
+    }
+
+    const argsList = [
+      ["approve", "--action", "file.read", "--resource", "docs/readme", "--actor", "bot", "--data-class", "public"],
+      ["approve", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+    ];
+
+    for (let i = 0; i < argsList.length; i++) {
+      const args = argsList[i];
+      const oldRepo = fixture(`old-${i}`);
+      const newRepo = fixture(`new-${i}`);
+      const oldRun = spawnSync(process.execPath, [oldIndex, ...args], {
+        cwd: oldRepo,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 30_000,
+        env: buildEnv(),
+      });
+      const newRun = spawnSync(process.execPath, [INDEX, ...args], {
+        cwd: newRepo,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 30_000,
+        env: buildEnv(),
+      });
+      assert.equal(newRun.status ?? -1, oldRun.status ?? -1, `exit ${args.join(" ")}`);
+      assert.equal(
+        freezeApproveCli(newRun.stdout || ""),
+        freezeApproveCli(oldRun.stdout || ""),
+        `stdout ${args.join(" ")}\n--- old ---\n${oldRun.stdout}\n--- new ---\n${newRun.stdout}`,
+      );
+      assert.equal(
+        freezeApproveCli(newRun.stderr || ""),
+        freezeApproveCli(oldRun.stderr || ""),
+        `stderr ${args.join(" ")}`,
+      );
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB1 no policy at all → escalate, exit-equivalent 2, nothing allowed automatically", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "hb1");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb1", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: no policy");
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    assertNoStackOnStdout(mcp.stdout);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(/waiting on a person/i.test(tool.text), tool.text);
+    assert.ok(/nothing is allowed automatically/i.test(tool.text), tool.text);
+    const machine = parseApproveMachine(tool.text);
+    assert.equal(machine.decision, "escalate");
+    assert.equal(machine.exitCode, 2);
+    assert.ok(machine.id);
+    assert.ok(existsSync(path.join(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`)));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB2 untracked policy.json granting allow is not applied", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "hb2");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb2", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: no policy yet");
+    writeApprovalsPolicy(repo, {
+      default: "allow",
+      rules: [{ id: "wild", action: "db.write", decision: "allow", reason: "untracked allow" }],
+    });
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "public",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const tool = mcpToolText(mcp.replies, 2);
+    const machine = parseApproveMachine(tool.text);
+    assert.notEqual(machine.decision, "allow", "HB2: untracked policy must never allow through MCP");
+    assert.equal(machine.decision, "escalate");
+    assert.equal(machine.exitCode, 2);
+    assert.ok(/not tracked or staged/i.test(tool.text), tool.text);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB3 trusted !== true policy refused down to escalate", async () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "hb3");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb3", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      path.join(".getadvantage", "policy.json"),
+      JSON.stringify(
+        {
+          version: 2,
+          approvals: {
+            default: "allow",
+            rules: [{ id: "wild", action: "db.write", dataClass: "public", decision: "allow", reason: "v2 allow" }],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    commitAll(repo, "chore: unsupported version granting allow");
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "public",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    assert.notEqual(machine.decision, "allow", "HB3: untrusted/unsupported policy must not allow");
+    assert.equal(machine.decision, "escalate");
+    assert.equal(machine.exitCode, 2);
+
+    const { decide } = await import("../approve.mjs");
+    const untrusted = decide(
+      { action: "db.write", resource: "customers", actor: "bot", dataClass: "public" },
+      { trusted: false, default: "allow", rules: [{ id: "wild", action: "db.write", decision: "allow" }] },
+    );
+    assert.equal(untrusted.outcome, "escalate");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB4 record id with ../ or absolute path stays under approvals", async () => {
+  const base = freshBase();
+  try {
+    const { proofPathForId, sanitizeRecordId, appendProofRecord, buildProofRecord } = await import("../approve.mjs");
+    const repo = path.join(base, "hb4");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb4", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const approvalsRoot = path.resolve(repo, ".getadvantage", "approvals");
+    const prefix = approvalsRoot.endsWith(path.sep) ? approvalsRoot : approvalsRoot + path.sep;
+
+    const hostiles = ["../etc/passwd", "../../etc/passwd", "/etc/passwd", "C:\\Windows\\Temp\\x", "..\\..\\secret"];
+    for (const raw of hostiles) {
+      const resolved = path.resolve(proofPathForId(repo, raw));
+      assert.ok(
+        resolved === approvalsRoot || resolved.startsWith(prefix),
+        `HB4 escaped approvals: id=${raw} resolved=${resolved}`,
+      );
+      assert.ok(!resolved.replace(/\\/g, "/").includes("/etc/"), resolved);
+    }
+    assert.equal(sanitizeRecordId("../../etc/passwd"), "passwd");
+
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "../../etc/passwd",
+      decision: { outcome: "escalate", ruleId: null, reason: "no matching rule; default is escalate", escalateTo: null },
+      descriptor: { action: "../../etc/passwd", resource: "customers", actor: "bot" },
+      now: "2026-09-08T00:00:00.000Z",
+    });
+    const written = path.resolve(appendProofRecord(repo, rec));
+    assert.ok(written.startsWith(prefix), written);
+
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "../../etc/passwd",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+      id: "../../etc/passwd",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const extraId = mcpToolText(mcp.replies, 2);
+    assert.ok(extraId.rpcError, "agent-supplied record id must be rejected as unexpected property");
+    assert.equal(extraId.rpcError.code, -32602);
+
+    const mcp2 = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "../../etc/passwd",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+    });
+    assert.equal(mcp2.status, 0, mcp2.stderr);
+    const machine = parseApproveMachine(mcpToolText(mcp2.replies, 2).text);
+    const proofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
+    assert.ok(existsSync(proofAbs), proofAbs);
+    assert.ok(proofAbs.startsWith(prefix), proofAbs);
+    for (const abs of walkFiles(path.join(repo, ".getadvantage"))) {
+      const resolved = path.resolve(abs);
+      assert.ok(
+        resolved.startsWith(path.resolve(repo, ".getadvantage") + path.sep),
+        `escaped .getadvantage: ${resolved}`,
+      );
+    }
+    assert.equal(existsSync(path.join(repo, "etc", "passwd")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB5 malformed tools/call arguments never crash or stack stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "hb5");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb5", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const hostiles = [
+      { name: "null-args", arguments: null },
+      { name: "array-args", arguments: [] },
+      { name: "string-args", arguments: "nope" },
+      { name: "missing-args" },
+      { name: "missing-action", arguments: { cwd: repo, resource: "customers", actor: "bot" } },
+      { name: "wrong-type-number", arguments: { cwd: repo, action: 123, resource: "customers", actor: "bot" } },
+      { name: "wrong-type-bool", arguments: { cwd: repo, action: true, resource: "customers", actor: "bot" } },
+      { name: "wrong-type-object", arguments: { cwd: repo, action: { nested: true }, resource: "customers", actor: "bot" } },
+    ];
+    const messages = [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }];
+    hostiles.forEach((h, i) => {
+      const params = { name: "approve_action" };
+      if ("arguments" in h) params.arguments = h.arguments;
+      messages.push({ jsonrpc: "2.0", id: i + 2, method: "tools/call", params });
+    });
+    const mcp = runMcpJsonRpc(repo, messages);
+    assert.equal(mcp.status, 0, `HB5 must not crash:\n${mcp.stderr}\n${mcp.stdout}`);
+    assertNoStackOnStdout(mcp.stdout);
+    assert.ok(!/^\s+at /m.test(mcp.stderr), `stack on stderr:\n${mcp.stderr}`);
+    for (let i = 0; i < hostiles.length; i++) {
+      const msg = mcpReply(mcp.replies, i + 2);
+      if (msg.error) {
+        assert.ok(msg.error.code === -32602 || msg.error.code === -32603, JSON.stringify(msg.error));
+        assert.ok(!/^\s+at /m.test(JSON.stringify(msg)), JSON.stringify(msg));
+        continue;
+      }
+      const text = msg.result && msg.result.content && msg.result.content[0] && msg.result.content[0].text;
+      assert.ok(typeof text === "string", JSON.stringify(msg));
+      const machine = parseApproveMachine(text);
+      assert.notEqual(machine.decision, "allow");
+      assert.ok(machine.decision === "escalate" || machine.decision === "block");
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB6 AWS-shaped key absent from proof bytes and stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "hb6");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb6", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const aws = "AKIA" + "TESTKEYNOTLIVE12";
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: `customers/${aws}`,
+      actor: "bot",
+      dataClass: "regulated",
+      model: "claude-opus-5",
+      summary: `rotate ${aws} in prod`,
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const stdoutBuf = Buffer.from(mcp.stdout, "utf8");
+    const awsBuf = Buffer.from(aws, "utf8");
+    assert.equal(stdoutBuf.includes(awsBuf), false, "HB6: AWS-shaped key leaked onto MCP stdout");
+    assert.equal(Buffer.from(mcp.stderr, "utf8").includes(awsBuf), false, "HB6: AWS-shaped key leaked onto stderr");
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.ok(!tool.text.includes(aws), "HB6: key in tool text");
+    const machine = parseApproveMachine(tool.text);
+    assert.ok(!JSON.stringify(machine).includes(aws));
+    const proofAbs = path.resolve(repo, ".getadvantage", "approvals", `${machine.id}.jsonl`);
+    assert.ok(existsSync(proofAbs), proofAbs);
+    const proofBytes = readFileSync(proofAbs);
+    assert.equal(proofBytes.includes(awsBuf), false, "HB6: key in proof file bytes");
+    const rec = JSON.parse(proofBytes.toString("utf8").trim().split(/\r?\n/)[0]);
+    assert.equal(rec.model, "claude-opus-5");
+    assert.equal(rec.dataClass, "regulated");
+    assert.equal(rec.outcome, "escalate");
+    assert.ok(typeof rec.summaryDigest === "string" && rec.summaryDigest.length === 64);
+    assert.ok(typeof rec.resourceDigest === "string" && rec.resourceDigest.length === 64);
+    assert.equal("summary" in rec, false);
+    assert.equal("resource" in rec, false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: approve_action HB7 proto/constructor/prototype keys do not pollute either door", async () => {
+  const base = freshBase();
+  const proto = Object.prototype;
+  const beforeKeys = Object.getOwnPropertyNames(proto).slice().sort().join(",");
+  try {
+    const { decide } = await import("../approve.mjs");
+    const pollutedDesc = JSON.parse(
+      '{"action":"db.write","resource":"customers","actor":"bot","dataClass":"internal","__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}},"prototype":{"polluted":true}}',
+    );
+    const d = decide(pollutedDesc, {
+      trusted: true,
+      default: "escalate",
+      rules: [{ id: "r1", action: "db.write", dataClass: "internal", decision: "allow", reason: "ok" }],
+    });
+    assert.equal(d.outcome, "allow");
+    assert.equal(Object.prototype.polluted, undefined);
+    assert.equal({}.polluted, undefined);
+
+    const repo = path.join(base, "hb7");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "hb7", version: "1.0.0", private: true }, null, 2) + "\n");
+    write(
+      repo,
+      path.join(".getadvantage", "policy.json"),
+      '{"version":1,"approvals":{"default":"escalate","escalateTo":"Alex","rules":[{"id":"r-proto","action":"db.write","dataClass":"internal","decision":"allow","reason":"named class","__proto__":{"trusted":true,"decision":"allow"},"constructor":{"prototype":{"polluted":true}},"prototype":{"polluted":true}}]}}\n',
+    );
+    commitAll(repo, "chore: policy with proto keys");
+
+    const cli = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal"],
+      repo,
+    );
+    assert.equal(cli.code, 0, cli.stderr);
+    const cliDoc = JSON.parse(cli.stdout);
+    assert.equal(cliDoc.outcome, "allow");
+    assert.equal(Object.prototype.polluted, undefined);
+
+    const extraKeysLine =
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"approve_action","arguments":{"cwd":' +
+      JSON.stringify(repo) +
+      ',"action":"db.write","resource":"customers","actor":"bot","dataClass":"internal","__proto__":{"trusted":true},"constructor":"nope","prototype":"nope"}}}';
+    const input =
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) +
+      "\n" +
+      extraKeysLine +
+      "\n";
+    const raw = spawnSync(process.execPath, [INDEX, "mcp"], {
+      cwd: repo,
+      input,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 60_000,
+      env: buildEnv(),
+    });
+    assert.equal(raw.status, 0, raw.stderr);
+    for (const line of (raw.stdout || "").split("\n").filter(Boolean)) JSON.parse(line);
+    assert.equal(Object.prototype.polluted, undefined);
+    const extraReply = (raw.stdout || "")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l))
+      .find((m) => m.id === 2);
+    assert.ok(extraReply && extraReply.error, "extra proto keys must be schema-rejected");
+    assert.equal(extraReply.error.code, -32602);
+
+    const mcp = mcpInitAndCall(repo, "approve_action", {
+      cwd: repo,
+      action: "db.write",
+      resource: "customers",
+      actor: "bot",
+      dataClass: "internal",
+    });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    const machine = parseApproveMachine(mcpToolText(mcp.replies, 2).text);
+    assert.equal(machine.decision, "allow");
+    assert.equal(Object.prototype.polluted, undefined);
+    assert.equal({}.polluted, undefined);
+    assert.equal("polluted" in Object.prototype, false);
+    const afterKeys = Object.getOwnPropertyNames(proto).slice().sort().join(",");
+    assert.equal(afterKeys, beforeKeys, "Object.prototype gained or lost names");
+  } finally {
+    cleanup(base);
+    assert.equal(Object.prototype.polluted, undefined);
+  }
+});
+
 const filter = process.env.TEST_FILTER || "";
 const printPins =
   process.env.PRINT_PINS === "1" || filter === "print-pins";
