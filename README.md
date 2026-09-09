@@ -332,8 +332,13 @@ actions.
 
 `getadvantage approve` writes a local record under `.getadvantage/approvals/`.
 `getadvantage proof export <id>` prints a local copy of one of those records.
-Both are in this checkout. Neither is in the published package until a release.
-Nothing is uploaded. There is no hosted page. Do not treat the copy as a finished handoff.
+The copy says **unverified**, **partial**, or **intact** for the hash chain:
+intact only when every line is bound. A missing link after the chain starts is
+refused, not treated as unsigned. Nested secret-shaped values are refused; a
+caller who passes an array still gets a refusal if any nested string looks like
+a key, and the key is not copied into the error. Both commands are in this
+checkout. Neither is in the published package until a release. Nothing is
+uploaded. There is no hosted page. Do not treat the copy as a finished handoff.
 
 ## Land the fleet safely (fan-out / fan-in)
 

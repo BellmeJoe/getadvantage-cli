@@ -37,10 +37,14 @@ import {
   closeSync,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -50,7 +54,6 @@ import {
   c,
   classifyGitCwd,
   cliVersion,
-  markerFileForWrite,
   MARKER_DIR,
   readGitIndexText,
   readJsonFile,
@@ -75,6 +78,11 @@ export const PROOF_PLAIN_FIELDS = Object.freeze(["action", "actor", "model", "da
 export const PROOF_PACKET_SCHEMA = "getadvantage.proof.packet.v1";
 export const PROOF_GENESIS_DIGEST = "0".repeat(64);
 export const PROOF_EXPORT_MAX_LINES = 10000;
+/** One byte ceiling for a JSONL line on both write and read. Hash the complete line. */
+export const PROOF_RECORD_MAX_BYTES = 256 * 1024;
+const PROOF_LOCK_WAIT_MS = 10_000;
+const PROOF_LOCK_STALE_MS = 30_000;
+const PROOF_CRED_WALK_MAX_DEPTH = 16;
 const PROOF_RECORD_VERSIONS = new Set([1, 2]);
 const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
@@ -122,6 +130,13 @@ function fieldLooksLikeCredential(value) {
     if (re.test(s)) return true;
   }
   return false;
+}
+
+/** Field names in diagnostics must never carry an unvalidated value. */
+function diagnosticFieldName(key) {
+  const s = typeof key === "string" ? key : "";
+  if (!/^[A-Za-z0-9._-]{1,80}$/.test(s) || fieldLooksLikeCredential(s)) return "record";
+  return s;
 }
 
 /**
@@ -482,17 +497,81 @@ export function loadApprovalsPolicy(cwd) {
   return { ok: true, policy, source: rel, warnings, error: null };
 }
 
+function containedIn(child, parent) {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  if (c === p) return true;
+  const prefix = p.endsWith(path.sep) ? p : p + path.sep;
+  if (c.startsWith(prefix)) return true;
+  if (process.platform === "win32") {
+    const cl = c.toLowerCase();
+    const pl = p.toLowerCase();
+    const pfx = pl.endsWith(path.sep) ? pl : pl + path.sep;
+    return cl === pl || cl.startsWith(pfx);
+  }
+  return false;
+}
+
+function isSymlinkOrReparse(abs) {
+  try {
+    return lstatSync(abs).isSymbolicLink();
+  } catch (e) {
+    if (e && e.code === "ENOENT") return false;
+    throw e;
+  }
+}
+
+function realExisting(abs) {
+  try {
+    return realpathSync(abs);
+  } catch {
+    return path.resolve(abs);
+  }
+}
+
+function escapedApprovalsError() {
+  return new Error("approval record path escaped .getadvantage/approvals/");
+}
+
+/**
+ * Containment is a filesystem fact, not a string prefix. Refuse symlinks and
+ * directory junctions on the approvals root, the output path, and its parent.
+ */
+function assertApprovalsContainment(cwd, abs) {
+  const marker = path.resolve(cwd, MARKER_DIR);
+  const root = path.resolve(marker, APPROVALS_SUBDIR);
+  const resolved = path.resolve(abs);
+  if (!containedIn(resolved, root)) throw escapedApprovalsError();
+  if (existsSync(marker) && isSymlinkOrReparse(marker)) {
+    if (!containedIn(realExisting(marker), path.resolve(cwd))) throw escapedApprovalsError();
+  }
+  if (existsSync(root) && isSymlinkOrReparse(root)) throw escapedApprovalsError();
+  const parent = path.dirname(resolved);
+  if (existsSync(parent) && isSymlinkOrReparse(parent)) throw escapedApprovalsError();
+  if (existsSync(abs) && isSymlinkOrReparse(abs)) throw escapedApprovalsError();
+  if (existsSync(abs)) {
+    const realAbs = realExisting(abs);
+    const realRoot = existsSync(root) ? realExisting(root) : root;
+    if (!containedIn(realAbs, root) && !containedIn(realAbs, realRoot)) throw escapedApprovalsError();
+  } else if (existsSync(parent)) {
+    const realParent = realExisting(parent);
+    if (!containedIn(realParent, root) && realParent !== root) throw escapedApprovalsError();
+  }
+}
+
 function approvalsAbs(cwd, file, opts = {}) {
   const rel = path.join(APPROVALS_SUBDIR, file);
-  const abs = opts.create === false ? path.join(cwd, MARKER_DIR, rel) : markerFileForWrite(cwd, rel);
-  if (opts.create !== false) mkdirSync(path.dirname(abs), { recursive: true });
-  const root = path.resolve(path.join(cwd, MARKER_DIR, APPROVALS_SUBDIR));
-  const resolved = path.resolve(abs);
-  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
-  if (resolved !== root && !resolved.startsWith(prefix)) {
-    throw new Error("approval record path escaped .getadvantage/approvals/");
+  const abs = path.resolve(cwd, MARKER_DIR, rel);
+  const root = path.resolve(cwd, MARKER_DIR, APPROVALS_SUBDIR);
+  if (!containedIn(abs, root)) throw escapedApprovalsError();
+  if (opts.create !== false) {
+    const marker = path.resolve(cwd, MARKER_DIR);
+    if (!existsSync(marker)) mkdirSync(marker, { recursive: true });
+    if (existsSync(root) && isSymlinkOrReparse(root)) throw escapedApprovalsError();
+    if (!existsSync(root)) mkdirSync(root, { recursive: true });
   }
-  return resolved;
+  assertApprovalsContainment(cwd, abs);
+  return abs;
 }
 
 export function proofPathForId(cwd, id, opts = {}) {
@@ -509,10 +588,10 @@ export function buildProofRecord({ kind, id, decision, descriptor, now, extra })
   const bad = credentialProofField(desc, extra);
   if (bad) {
     const err = new Error(
-      `The ${bad} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+      `The ${diagnosticFieldName(bad)} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
     );
     err.code = "PROOF_CREDENTIAL_FIELD";
-    err.field = bad;
+    err.field = diagnosticFieldName(bad);
     throw err;
   }
   const summary = asString(desc.summary);
@@ -541,31 +620,146 @@ export function buildProofRecord({ kind, id, decision, descriptor, now, extra })
     if (extra.by) rec.by = nonempty(extra.by);
     if (extra.resolves) rec.resolves = sanitizeRecordId(extra.resolves);
     if (extra.resolution) rec.resolution = extra.resolution;
+    if (typeof extra.resourceDigest === "string") rec.resourceDigest = extra.resourceDigest;
+    if (typeof extra.summaryDigest === "string") rec.summaryDigest = extra.summaryDigest;
+  }
+  const storedBad = credentialRecordField(rec);
+  if (storedBad) {
+    const err = new Error(
+      `The ${diagnosticFieldName(storedBad)} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+    );
+    err.code = "PROOF_CREDENTIAL_FIELD";
+    err.field = diagnosticFieldName(storedBad);
+    throw err;
   }
   return rec;
 }
 
 export function jsonlLineDigest(raw) {
+  if (Buffer.isBuffer(raw)) return createHash("sha256").update(raw).digest("hex");
   return createHash("sha256").update(String(raw ?? ""), "utf8").digest("hex");
 }
 
-function sha256File(abs) {
-  const CHUNK = 64 * 1024;
+function decodeUtf8Line(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function tipPathFor(abs) {
+  return `${abs}.tip`;
+}
+
+function readTipFile(abs) {
+  const p = tipPathFor(abs);
+  if (!existsSync(p)) return null;
+  if (isSymlinkOrReparse(p)) throw escapedApprovalsError();
+  try {
+    const j = JSON.parse(readFileSync(p, "utf8"));
+    if (!j || typeof j !== "object" || Array.isArray(j)) return { corrupt: true };
+    return j;
+  } catch {
+    return { corrupt: true };
+  }
+}
+
+function writeTipFile(abs, tip) {
+  const p = tipPathFor(abs);
+  if (existsSync(p) && isSymlinkOrReparse(p)) throw escapedApprovalsError();
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify(tip) + "\n", "utf8");
+  try {
+    if (existsSync(p)) unlinkSync(p);
+    renameSync(tmp, p);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    throw e;
+  }
+}
+
+function countJsonlLines(abs) {
+  if (!existsSync(abs)) return 0;
   const fd = openSync(abs, "r");
   try {
     const st = fstatSync(fd);
-    const h = createHash("sha256");
+    if (st.size === 0) return 0;
     let pos = 0;
+    let n = 0;
+    const CHUNK = 64 * 1024;
+    let last = 0;
     while (pos < st.size) {
-      const n = Math.min(CHUNK, st.size - pos);
-      const buf = Buffer.alloc(n);
-      readSync(fd, buf, 0, n, pos);
-      pos += n;
-      h.update(buf);
+      const k = Math.min(CHUNK, st.size - pos);
+      const buf = Buffer.alloc(k);
+      readSync(fd, buf, 0, k, pos);
+      pos += k;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] === 0x0a) n += 1;
+      }
+      last = buf[buf.length - 1];
     }
-    return h.digest("hex");
+    if (last !== 0x0a) n += 1;
+    return n;
   } finally {
     closeSync(fd);
+  }
+}
+
+function withProofLock(abs, fn) {
+  const lockPath = `${abs}.lock`;
+  const start = Date.now();
+  let fd;
+  for (;;) {
+    try {
+      fd = openSync(lockPath, "wx");
+      break;
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") throw e;
+      let stale = false;
+      try {
+        const st = lstatSync(lockPath);
+        if (Date.now() - st.mtimeMs > PROOF_LOCK_STALE_MS) stale = true;
+      } catch {
+        stale = true;
+      }
+      if (stale) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* raced */
+        }
+        continue;
+      }
+      if (Date.now() - start > PROOF_LOCK_WAIT_MS) {
+        const err = new Error("another approve is writing this record; retry in a moment");
+        err.code = "PROOF_LOCK_TIMEOUT";
+        throw err;
+      }
+      sleepMs(20);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -575,17 +769,26 @@ function lastJsonlLine(abs) {
   try {
     const st = fstatSync(fd);
     if (st.size === 0) return null;
-    const max = Math.min(st.size, 256 * 1024);
-    const buf = Buffer.alloc(max);
-    readSync(fd, buf, 0, max, st.size - max);
-    let text = buf.toString("utf8");
-    if (text.endsWith("\n")) text = text.slice(0, -1);
-    if (text.endsWith("\r")) text = text.slice(0, -1);
-    const idxN = text.lastIndexOf("\n");
-    const idxR = text.lastIndexOf("\r");
-    const idx = Math.max(idxN, idxR);
-    const line = idx === -1 ? text : text.slice(idx + 1);
-    return line.length > 0 ? line : null;
+    const window = Math.min(st.size, PROOF_RECORD_MAX_BYTES + 2);
+    const buf = Buffer.alloc(window);
+    readSync(fd, buf, 0, window, st.size - window);
+    let end = buf.length;
+    if (end > 0 && buf[end - 1] === 0x0a) end -= 1;
+    if (end > 0 && buf[end - 1] === 0x0d) end -= 1;
+    let start = 0;
+    let found = false;
+    for (let i = end - 1; i >= 0; i--) {
+      if (buf[i] === 0x0a) {
+        start = i + 1;
+        found = true;
+        break;
+      }
+    }
+    if (!found && st.size > window) return { tooLarge: true, bytes: null };
+    const line = buf.subarray(start, end);
+    if (line.length === 0) return null;
+    if (line.length > PROOF_RECORD_MAX_BYTES) return { tooLarge: true, bytes: null };
+    return { tooLarge: false, bytes: Buffer.from(line) };
   } finally {
     closeSync(fd);
   }
@@ -594,13 +797,51 @@ function lastJsonlLine(abs) {
 export function appendProofRecord(cwd, record) {
   const id = sanitizeRecordId(record?.id);
   const abs = proofPathForId(cwd, id);
-  const prevLine = lastJsonlLine(abs);
-  const rec = {
-    ...record,
-    prevDigest: prevLine ? jsonlLineDigest(prevLine) : PROOF_GENESIS_DIGEST,
-  };
-  appendFileSync(abs, JSON.stringify(rec) + "\n", "utf8");
-  return abs;
+  return withProofLock(abs, () => {
+    assertApprovalsContainment(cwd, abs);
+    if (existsSync(abs) && isSymlinkOrReparse(abs)) throw escapedApprovalsError();
+    const prevLine = lastJsonlLine(abs);
+    if (prevLine && prevLine.tooLarge) {
+      const err = new Error("The previous approval line is too large to chain.");
+      err.code = "PROOF_RECORD_TOO_LARGE";
+      throw err;
+    }
+    const rec = {
+      ...record,
+      prevDigest: prevLine ? jsonlLineDigest(prevLine.bytes) : PROOF_GENESIS_DIGEST,
+    };
+    const bad = credentialRecordField(rec);
+    if (bad) {
+      const err = new Error(
+        `The ${diagnosticFieldName(bad)} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+      );
+      err.code = "PROOF_CREDENTIAL_FIELD";
+      err.field = diagnosticFieldName(bad);
+      throw err;
+    }
+    const payload = JSON.stringify(rec);
+    const buf = Buffer.from(`${payload}\n`, "utf8");
+    if (buf.length - 1 > PROOF_RECORD_MAX_BYTES) {
+      const err = new Error("The approval record is too large to store.");
+      err.code = "PROOF_RECORD_TOO_LARGE";
+      throw err;
+    }
+    let lineCount = 1;
+    const tip = readTipFile(abs);
+    if (tip && !tip.corrupt && Number.isInteger(tip.lineCount) && tip.lineCount >= 0) {
+      lineCount = tip.lineCount + 1;
+    } else if (existsSync(abs)) {
+      lineCount = countJsonlLines(abs) + 1;
+    }
+    appendFileSync(abs, buf);
+    writeTipFile(abs, {
+      v: 1,
+      lineCount,
+      tipDigest: jsonlLineDigest(buf.subarray(0, buf.length - 1)),
+      bytes: buf.length - 1,
+    });
+    return abs;
+  });
 }
 
 export function readProofLines(cwd, id) {
@@ -611,12 +852,12 @@ export function readProofLines(cwd, id) {
   return { abs, raw, lines };
 }
 
-function* iterateJsonlLines(abs) {
+function* iterateJsonlLines(abs, fileHash) {
   const CHUNK = 64 * 1024;
   const fd = openSync(abs, "r");
   try {
     const st = fstatSync(fd);
-    let carry = "";
+    let carry = Buffer.alloc(0);
     let pos = 0;
     let lineNo = 0;
     while (pos < st.size) {
@@ -624,21 +865,40 @@ function* iterateJsonlLines(abs) {
       const buf = Buffer.alloc(n);
       readSync(fd, buf, 0, n, pos);
       pos += n;
-      carry += buf.toString("utf8");
-      let nl;
-      while ((nl = carry.indexOf("\n")) !== -1) {
-        let raw = carry.slice(0, nl);
-        carry = carry.slice(nl + 1);
-        if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+      if (fileHash) fileHash.update(buf);
+      carry = carry.length ? Buffer.concat([carry, buf]) : buf;
+      let start = 0;
+      for (let i = 0; i < carry.length; i++) {
+        if (carry[i] === 0x0a) {
+          lineNo += 1;
+          let raw = carry.subarray(start, i);
+          if (raw.length && raw[raw.length - 1] === 0x0d) raw = raw.subarray(0, raw.length - 1);
+          yield {
+            lineNo,
+            rawBytes: Buffer.from(raw),
+            truncated: false,
+            tooLarge: raw.length > PROOF_RECORD_MAX_BYTES,
+          };
+          start = i + 1;
+        }
+      }
+      carry = start === 0 ? carry : carry.subarray(start);
+      if (carry.length > PROOF_RECORD_MAX_BYTES) {
         lineNo += 1;
-        yield { lineNo, raw, truncated: false };
+        yield { lineNo, rawBytes: carry, truncated: true, tooLarge: true };
+        return;
       }
     }
     if (carry.length > 0) {
-      let raw = carry;
-      if (raw.endsWith("\r")) raw = raw.slice(0, -1);
       lineNo += 1;
-      yield { lineNo, raw, truncated: true };
+      let raw = carry;
+      if (raw.length && raw[raw.length - 1] === 0x0d) raw = raw.subarray(0, raw.length - 1);
+      yield {
+        lineNo,
+        rawBytes: Buffer.from(raw),
+        truncated: true,
+        tooLarge: raw.length > PROOF_RECORD_MAX_BYTES,
+      };
     }
   } finally {
     closeSync(fd);
@@ -665,19 +925,38 @@ function deriveApproverKind(rec) {
   return null;
 }
 
-function credentialInValue(value) {
-  const s = asString(value);
-  if (!s) return false;
-  return fieldLooksLikeCredential(s);
+function credentialInTree(value, field, depth) {
+  if (value == null) return null;
+  if (depth > PROOF_CRED_WALK_MAX_DEPTH) return null;
+  if (typeof value === "string") {
+    return fieldLooksLikeCredential(value) ? field : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return fieldLooksLikeCredential(String(value)) ? field : null;
+  }
+  if (typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = credentialInTree(item, field, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  for (const key of Object.keys(value)) {
+    const hit = credentialInTree(value[key], field, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /**
- * Name of the first string field on a stored record that looks like a secret,
- * or null. Walks own enumerable keys (hostile extra keys included). Nested
- * objects are not walked: the 0.15.3 line is flat.
+ * Name of the first field on a stored record that looks like a secret, or
+ * null. Walks own enumerable keys and nested arrays/objects (the complete
+ * record). Reports the top-level key so diagnostics never echo a value.
  */
 export function credentialRecordField(rec) {
-  if (rec == null || typeof rec !== "object" || Array.isArray(rec)) return null;
+  if (rec == null || typeof rec !== "object") return null;
+  if (Array.isArray(rec)) return credentialInTree(rec, "record", 0);
   const desc = {
     action: rec.action,
     actor: rec.actor,
@@ -687,40 +966,209 @@ export function credentialRecordField(rec) {
   const named = credentialProofField(desc, { by: rec.by });
   if (named) return named;
   for (const key of Object.keys(rec)) {
-    if (credentialInValue(rec[key])) return key;
+    const hit = credentialInTree(rec[key], key, 0);
+    if (hit) return hit;
   }
   return null;
 }
 
+function projectedScalar(v) {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  return null;
+}
+
 function projectProofRecord(rec, seq, lineDigestHex, chainBound) {
-  const dataClass = nonempty(rec.dataClass) || "unknown";
+  const dataClass = nonempty(typeof rec.dataClass === "string" ? rec.dataClass : "") || "unknown";
   return {
     seq,
     sourceVersion: typeof rec.version === "number" && Number.isFinite(rec.version) ? rec.version : 1,
     chainBound,
     lineDigest: lineDigestHex,
     prevDigest: typeof rec.prevDigest === "string" ? rec.prevDigest : null,
-    kind: rec.kind || null,
-    id: rec.id || null,
-    outcome: rec.outcome || null,
+    kind: projectedScalar(rec.kind),
+    id: projectedScalar(rec.id),
+    outcome: projectedScalar(rec.outcome),
     ruleId: rec.ruleId ?? null,
-    reason: rec.reason || null,
-    escalateTo: rec.escalateTo ?? null,
-    approver: rec.approver ?? null,
+    reason: projectedScalar(rec.reason),
+    escalateTo: projectedScalar(rec.escalateTo),
+    approver: projectedScalar(rec.approver),
     approverKind: deriveApproverKind(rec),
-    model: rec.model ?? null,
-    actor: rec.actor ?? null,
-    action: rec.action ?? null,
+    model: projectedScalar(rec.model),
+    actor: projectedScalar(rec.actor),
+    action: projectedScalar(rec.action),
     dataTouched: {
       dataClass,
-      resourceDigest: rec.resourceDigest ?? null,
+      resourceDigest: projectedScalar(rec.resourceDigest),
     },
-    summaryDigest: rec.summaryDigest ?? null,
-    createdAt: rec.createdAt || null,
-    by: rec.by || null,
-    resolves: rec.resolves || null,
-    resolution: rec.resolution || null,
+    summaryDigest: projectedScalar(rec.summaryDigest),
+    createdAt: projectedScalar(rec.createdAt),
+    by: projectedScalar(rec.by),
+    resolves: projectedScalar(rec.resolves),
+    resolution: projectedScalar(rec.resolution),
   };
+}
+
+function latestFromProjected(projected) {
+  const last = projected[projected.length - 1] || null;
+  let ctx = last;
+  for (let i = projected.length - 1; i >= 0; i--) {
+    if (projected[i].kind === "decision") {
+      ctx = projected[i];
+      break;
+    }
+  }
+  const lastClass = nonempty(last?.dataTouched?.dataClass);
+  const ctxClass = nonempty(ctx?.dataTouched?.dataClass);
+  return {
+    outcome: last?.outcome ?? null,
+    dataClass: lastClass && lastClass !== "unknown" ? lastClass : ctxClass || "unknown",
+    model: nonempty(last?.model) || nonempty(ctx?.model) || null,
+    createdAt: last?.createdAt ?? null,
+    approver: last?.approver ?? null,
+  };
+}
+
+function readDecisionContext(abs) {
+  const ctx = {
+    model: null,
+    dataClass: null,
+    actor: null,
+    action: null,
+    resourceDigest: null,
+    summaryDigest: null,
+  };
+  try {
+    for (const line of iterateJsonlLines(abs)) {
+      if (line.tooLarge || line.truncated) continue;
+      const text = decodeUtf8Line(line.rawBytes);
+      if (!text) continue;
+      let rec;
+      try {
+        rec = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+      if (nonempty(rec.kind) !== "decision" && ctx.action) continue;
+      if (typeof rec.model === "string") ctx.model = rec.model;
+      if (typeof rec.dataClass === "string") ctx.dataClass = rec.dataClass;
+      if (typeof rec.actor === "string") ctx.actor = rec.actor;
+      if (typeof rec.action === "string") ctx.action = rec.action;
+      if (typeof rec.resourceDigest === "string") ctx.resourceDigest = rec.resourceDigest;
+      if (typeof rec.summaryDigest === "string") ctx.summaryDigest = rec.summaryDigest;
+    }
+  } catch {
+    /* ignore — resolve still records its own outcome */
+  }
+  return ctx;
+}
+
+function publishReplace(tmp, dest) {
+  if (existsSync(dest) && isSymlinkOrReparse(dest)) throw escapedApprovalsError();
+  if (existsSync(dest) && lstatSync(dest).isDirectory()) {
+    throw new Error("output path is a directory");
+  }
+  if (existsSync(dest)) {
+    const bak = `${dest}.bak`;
+    try {
+      unlinkSync(bak);
+    } catch {
+      /* no bak */
+    }
+    renameSync(dest, bak);
+    try {
+      renameSync(tmp, dest);
+    } catch (e) {
+      try {
+        renameSync(bak, dest);
+      } catch {
+        /* ignore */
+      }
+      throw e;
+    }
+    return bak;
+  }
+  renameSync(tmp, dest);
+  return null;
+}
+
+function restoreFromBak(dest) {
+  const bak = `${dest}.bak`;
+  if (existsSync(bak)) {
+    try {
+      if (existsSync(dest)) unlinkSync(dest);
+    } catch {
+      /* ignore */
+    }
+    try {
+      renameSync(bak, dest);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    if (existsSync(dest)) unlinkSync(dest);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeProofOutputs(cwd, id, packet, html) {
+  const jsonAbs = approvalsAbs(cwd, `${id}.packet.json`, { create: true });
+  const htmlAbs = approvalsAbs(cwd, `${id}.html`, { create: true });
+  const jsonTmp = `${jsonAbs}.tmp`;
+  const htmlTmp = `${htmlAbs}.tmp`;
+  const jsonRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.packet.json`;
+  const htmlRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.html`;
+  let jsonPublished = false;
+  let jsonBak = null;
+  let htmlBak = null;
+  try {
+    for (const p of [jsonTmp, htmlTmp, jsonAbs, htmlAbs]) {
+      if (existsSync(p) && isSymlinkOrReparse(p)) throw escapedApprovalsError();
+    }
+    for (const p of [jsonAbs, htmlAbs]) {
+      if (existsSync(p) && lstatSync(p).isDirectory()) {
+        throw new Error("output path is a directory");
+      }
+    }
+    writeFileSync(jsonTmp, JSON.stringify(packet, null, 2) + "\n", "utf8");
+    writeFileSync(htmlTmp, html, "utf8");
+    jsonBak = publishReplace(jsonTmp, jsonAbs);
+    jsonPublished = true;
+    htmlBak = publishReplace(htmlTmp, htmlAbs);
+    for (const bak of [jsonBak, htmlBak]) {
+      if (bak) {
+        try {
+          unlinkSync(bak);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return { jsonAbs, htmlAbs, jsonRel, htmlRel, published: "both" };
+  } catch (e) {
+    try {
+      unlinkSync(jsonTmp);
+    } catch {
+      /* ignore */
+    }
+    try {
+      unlinkSync(htmlTmp);
+    } catch {
+      /* ignore */
+    }
+    let published = "none";
+    if (jsonPublished) {
+      published = restoreFromBak(jsonAbs) ? "none" : "partial";
+    }
+    const err = e instanceof Error ? e : new Error(String(e));
+    err.published = published;
+    throw err;
+  }
 }
 
 function escapeHtml(s) {
@@ -730,6 +1178,34 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function chainStatusOf(boundCount, unboundCount, lineCount) {
+  if (lineCount <= 0) return "unverified";
+  if (boundCount === lineCount) return "verified";
+  if (boundCount > 0) return "partial";
+  return "unverified";
+}
+
+function chainStatusLabel(chain) {
+  const s = chain?.status;
+  if (s === "verified") return "intact";
+  if (s === "partial") return "partial";
+  return "unverified";
+}
+
+function isWellFormedPrevDigest(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function nestedOwnField(rec) {
+  if (rec == null || typeof rec !== "object") return "record";
+  if (Array.isArray(rec)) return "record";
+  for (const key of Object.keys(rec)) {
+    const v = rec[key];
+    if (v != null && typeof v === "object") return key;
+  }
+  return null;
 }
 
 function renderProofHtml(packet) {
@@ -760,7 +1236,7 @@ th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:14px;word-
 <body>
 <h1>getAdvantage proof record</h1>
 <p>This page was written on this machine by getadvantage proof export. It is not hosted. There is no public URL.</p>
-<p>Id: ${escapeHtml(packet.id)} · Lines: ${escapeHtml(String(packet.chain?.lineCount ?? 0))} · Chain: ${packet.chain?.ok ? "intact" : "not intact"} · Unsigned lines: ${escapeHtml(String(packet.chain?.unboundCount ?? 0))}</p>
+<p>Id: ${escapeHtml(packet.id)} · Lines: ${escapeHtml(String(packet.chain?.lineCount ?? 0))} · Chain: ${escapeHtml(chainStatusLabel(packet.chain))} · Unsigned lines: ${escapeHtml(String(packet.chain?.unboundCount ?? 0))}</p>
 <table>
 <thead><tr><th>When</th><th>Outcome</th><th>Who</th><th>Model</th><th>Data class</th><th>Resource digest</th></tr></thead>
 <tbody>${tr}</tbody>
@@ -821,22 +1297,54 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
   let boundCount = 0;
   let unboundCount = 0;
   let lineCount = 0;
+  let chainStarted = false;
+  let lastLineDigest = null;
+  const fileHash = createHash("sha256");
   try {
-    for (const { lineNo, raw: lineRaw, truncated } of iterateJsonlLines(abs)) {
+    if (isSymlinkOrReparse(abs)) {
+      return {
+        ok: false,
+        error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
+        next: "pass the record id printed by getadvantage approve, not a file path",
+        published: "none",
+      };
+    }
+    for (const { lineNo, rawBytes, truncated, tooLarge } of iterateJsonlLines(abs, fileHash)) {
       if (lineCount >= PROOF_EXPORT_MAX_LINES) {
         return {
           ok: false,
           error: `The approval record ${id} has more than ${PROOF_EXPORT_MAX_LINES} lines, so it was not exported.`,
           next: "split the work into a new approve run; this export stays bounded",
           line: lineNo,
+          published: "none",
         };
       }
-      if (!lineRaw || truncated) {
+      if (tooLarge) {
+        return {
+          ok: false,
+          error: `The approval record ${id} has a line over ${PROOF_RECORD_MAX_BYTES} bytes at line ${lineNo}, so it was not exported.`,
+          next: "split the work into a new approve run; this export stays bounded",
+          line: lineNo,
+          published: "none",
+        };
+      }
+      if (!rawBytes || truncated) {
         return {
           ok: false,
           error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
           next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
           line: lineNo,
+          published: "none",
+        };
+      }
+      const lineRaw = decodeUtf8Line(rawBytes);
+      if (lineRaw == null) {
+        return {
+          ok: false,
+          error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
+          next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
+          line: lineNo,
+          published: "none",
         };
       }
       let rec;
@@ -848,6 +1356,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
           error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
           next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
           line: lineNo,
+          published: "none",
         };
       }
       if (rec == null || typeof rec !== "object" || Array.isArray(rec)) {
@@ -856,57 +1365,103 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
           error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
           next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
           line: lineNo,
+          published: "none",
+        };
+      }
+      const bad = credentialRecordField(rec);
+      if (bad) {
+        const field = diagnosticFieldName(bad);
+        return {
+          ok: false,
+          error: `The ${field} value looks like a secret, so it was not exported.`,
+          next: "pass a name, not a key. If this record is already stored, do not copy it; say only the field name",
+          line: lineNo,
+          field,
+          published: "none",
+        };
+      }
+      const nested = nestedOwnField(rec);
+      if (nested) {
+        const field = diagnosticFieldName(nested);
+        return {
+          ok: false,
+          error: `The ${field} value is not a name string, so it was not exported.`,
+          next: "pass a name, not a list. If this record is already stored, do not copy it; say only the field name",
+          line: lineNo,
+          field,
+          published: "none",
         };
       }
       const ver = own(rec, "version");
       if (ver != null && (typeof ver !== "number" || !PROOF_RECORD_VERSIONS.has(ver))) {
         return {
           ok: false,
-          error: `The approval record ${id} has unsupported version ${ver} at line ${lineNo}, so it was not exported.`,
+          error: `The approval record ${id} has an unsupported version at line ${lineNo}, so it was not exported.`,
           next: "this export reads version 1 records written by 0.15.3 and version 2 lines with a previous-line digest",
           line: lineNo,
+          published: "none",
         };
       }
-      const bad = credentialRecordField(rec);
-      if (bad) {
-        return {
-          ok: false,
-          error: `The ${bad} value looks like a secret, so it was not exported.`,
-          next: "pass a name, not a key. If this record is already stored, do not copy it; say only the field name",
-          line: lineNo,
-          field: bad,
-        };
-      }
-      const digest = jsonlLineDigest(lineRaw);
+      const digest = jsonlLineDigest(rawBytes);
       const storedPrev = own(rec, "prevDigest");
-      const chainBound = typeof storedPrev === "string" && storedPrev.length > 0;
-      if (chainBound) {
+      const wellFormed = isWellFormedPrevDigest(storedPrev);
+      if (chainStarted) {
+        if (!wellFormed) {
+          return {
+            ok: false,
+            error: `The approval record ${id} is missing its previous-line digest at line ${lineNo}, so it was not exported.`,
+            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            line: lineNo,
+            published: "none",
+          };
+        }
         if (storedPrev !== prev) {
           return {
             ok: false,
             error: `The approval record ${id} does not match its previous line at line ${lineNo}, so it was not exported.`,
             next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
             line: lineNo,
+            published: "none",
           };
         }
         boundCount += 1;
-      } else {
+      } else if (storedPrev == null || storedPrev === "") {
         unboundCount += 1;
+      } else {
+        if (!wellFormed || storedPrev !== prev) {
+          return {
+            ok: false,
+            error: `The approval record ${id} does not match its previous line at line ${lineNo}, so it was not exported.`,
+            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            line: lineNo,
+            published: "none",
+          };
+        }
+        chainStarted = true;
+        boundCount += 1;
       }
+      const chainBound = wellFormed && storedPrev === prev;
       const event = projectProofRecord(rec, projected.length, digest, chainBound);
       if (event.dataTouched.dataClass === "allowed" || event.dataTouched.dataClass === "allow") {
         event.dataTouched.dataClass = "unknown";
       }
       projected.push(event);
       prev = digest;
+      lastLineDigest = digest;
       lineCount += 1;
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const escaped = /escaped \.getadvantage\/approvals/.test(msg);
     return {
       ok: false,
-      error: `Could not read the approval record (${msg}).`,
-      next: "check that the file is readable, then re-run proof export",
+      error: escaped
+        ? "That id is not a local record name (it tries to leave .getadvantage/approvals/)."
+        : `Could not read the approval record (${msg}).`,
+      next: escaped
+        ? "pass the record id printed by getadvantage approve, not a file path"
+        : "check that the file is readable, then re-run proof export",
+      published: "none",
     };
   }
 
@@ -915,13 +1470,48 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
       ok: false,
       error: `No approval record named ${id} was found under .getadvantage/approvals/.`,
       next: "run getadvantage approve for the action, then re-run proof export with that record id",
+      published: "none",
     };
+  }
+
+  const sourceSha256 = fileHash.digest("hex");
+  try {
+    const tip = readTipFile(abs);
+    if (tip && tip.corrupt) {
+      return {
+        ok: false,
+        error: `The approval record ${id} does not match its write checkpoint, so it was not exported.`,
+        next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+        published: "none",
+      };
+    }
+    if (tip && Number.isInteger(tip.lineCount) && typeof tip.tipDigest === "string") {
+      if (tip.lineCount !== lineCount || tip.tipDigest !== lastLineDigest) {
+        return {
+          ok: false,
+          error: `The approval record ${id} does not match its write checkpoint, so it was not exported.`,
+          next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+          published: "none",
+        };
+      }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/escaped \.getadvantage\/approvals/.test(msg)) {
+      return {
+        ok: false,
+        error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
+        next: "pass the record id printed by getadvantage approve, not a file path",
+        published: "none",
+      };
+    }
+    throw e;
   }
 
   const jsonRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.packet.json`;
   const htmlRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.html`;
   const contentDigest = createHash("sha256").update(JSON.stringify(projected), "utf8").digest("hex");
-  const latest = projected[projected.length - 1];
+  const chainStatus = chainStatusOf(boundCount, unboundCount, lineCount);
   const packet = {
     schemaVersion: PROOF_PACKET_SCHEMA,
     kind: "getadvantage.proof.packet",
@@ -931,21 +1521,22 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     cliVersion: cliVersion(),
     source: {
       path: `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`,
-      sha256: sha256File(abs),
+      sha256: sourceSha256,
       lineCount,
     },
     resourceNaming: "digest-only",
     compatibility: {
       recordVersions: [1, 2],
       promise:
-        "A reader may rely on id, kind, outcome, approver, approverKind, model, dataTouched.dataClass, dataTouched.resourceDigest, createdAt, lineDigest, and chain.ok. Version 1 records written by 0.15.3 export. Missing dataClass becomes unknown. Resource plaintext is never present. prevDigest is additive; its absence means the line is unsigned.",
+        "A reader may rely on id, kind, outcome, approver, approverKind, model, dataTouched.dataClass, dataTouched.resourceDigest, createdAt, lineDigest, chain.status, and chain.ok. Version 1 records written by 0.15.3 export as unverified. Missing dataClass becomes unknown. Resource plaintext is never present. chain.status is unverified, partial, or verified. chain.ok is true only when every line after the chain starts is bound. Chain: intact prints only for verified.",
     },
     chain: {
       algorithm: "sha256",
       encoding: "hex",
-      hashed: "utf8 jsonl line without trailing newline",
+      hashed: "complete jsonl line bytes without trailing newline",
       genesis: PROOF_GENESIS_DIGEST,
-      ok: true,
+      status: chainStatus,
+      ok: chainStatus === "verified",
       boundCount,
       unboundCount,
       lineCount,
@@ -960,44 +1551,41 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     limitations: [
       "Local files only. Not a hosted page. There is no public URL.",
       "The resource match string is not stored. dataClass names the class; resourceDigest identifies the resource.",
-      "Version 1 lines have no write-time prevDigest. chain.ok covers lines that store prevDigest.",
+      "Version 1 lines have no write-time prevDigest. chain.status unverified means no line is bound. partial means a v1 prefix then a bound suffix. verified means every line is bound. A missing prevDigest after the chain starts is a failure, not an unsigned line.",
+      "A write-time line-count and tip-digest checkpoint is stored beside the ledger. Export refuses a mismatch. An attacker who rewrites both the ledger and the checkpoint consistently is outside this check; export-time hashing alone cannot authenticate the terminal digest.",
       "A name on --by is a name string, not a cryptographic identity.",
       "Not in the published package until a release.",
     ],
-    latest: {
-      outcome: latest?.outcome ?? null,
-      dataClass: latest?.dataTouched?.dataClass || "unknown",
-      model: latest?.model ?? null,
-      createdAt: latest?.createdAt ?? null,
-      approver: latest?.approver ?? null,
-    },
+    latest: latestFromProjected(projected),
   };
 
-  let jsonAbs;
-  let htmlAbs;
-  try {
-    jsonAbs = approvalsAbs(cwd, `${id}.packet.json`, { create: true });
-    htmlAbs = approvalsAbs(cwd, `${id}.html`, { create: true });
-  } catch {
-    return {
-      ok: false,
-      error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
-      next: "pass the record id printed by getadvantage approve, not a file path",
-    };
-  }
   const html = renderProofHtml(packet);
   try {
-    writeFileSync(jsonAbs, JSON.stringify(packet, null, 2) + "\n", "utf8");
-    writeFileSync(htmlAbs, html, "utf8");
+    const written = writeProofOutputs(cwd, id, packet, html);
+    return {
+      ok: true,
+      packet,
+      html,
+      jsonRel: written.jsonRel,
+      htmlRel: written.htmlRel,
+      jsonAbs: written.jsonAbs,
+      htmlAbs: written.htmlAbs,
+      published: written.published,
+    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const escaped = /escaped \.getadvantage\/approvals/.test(msg);
     return {
       ok: false,
-      error: `Could not write the local copy (${msg}).`,
-      next: "check that .getadvantage/approvals/ is writable, then re-run proof export",
+      error: escaped
+        ? "That id is not a local record name (it tries to leave .getadvantage/approvals/)."
+        : `Could not write the local copy (${msg}).`,
+      next: escaped
+        ? "pass the record id printed by getadvantage approve, not a file path"
+        : "check that .getadvantage/approvals/ is writable, then re-run proof export",
+      published: e && e.published ? e.published : "none",
     };
   }
-  return { ok: true, packet, html, jsonRel, htmlRel, jsonAbs, htmlAbs };
 }
 
 function descriptorFromFlags(flags, invocationCwd) {
@@ -1158,14 +1746,15 @@ export function printProofHelp() {
   console.log(`  ${bin} proof export <id> --json`);
   console.log("");
   console.log("Reads `.getadvantage/approvals/<id>.jsonl` on this machine. Nothing is uploaded.");
-  console.log("There is no hosted page. A broken or secret-shaped record is refused.");
+  console.log("There is no hosted page. A broken chain or secret-shaped record is refused.");
   console.log("");
   console.log("Exit codes: printed 0 · refused 1.");
 }
 
-function proofFail(msg, next) {
+function proofFail(msg, next, published) {
   console.error(c.red(`✗ ${msg}`));
-  console.error("Nothing was written.");
+  if (published === "partial") console.error("A partial local copy may have been written.");
+  else console.error("Nothing was written.");
   if (next) console.error(c.gray(`  → ${next}`));
   return 1;
 }
@@ -1183,8 +1772,9 @@ function printProofScreen({ packet, jsonRel, htmlRel }) {
   console.log("");
   console.log(`Id: ${packet.id}`);
   console.log(`Lines: ${packet.chain.lineCount}`);
-  console.log(`Chain: ${packet.chain.unboundCount === packet.chain.lineCount ? "unsigned" : "intact"}`);
+  console.log(`Chain: ${chainStatusLabel(packet.chain)}`);
   console.log(`Data class: ${latest.dataClass || "unknown"}`);
+  if (nonempty(latest.model)) console.log(`Model: ${latest.model}`);
   console.log(`Outcome: ${outcomeLabel(latest.outcome)}`);
   console.log(`Wrote: ${jsonRel}`);
   console.log(`Page: ${htmlRel}`);
@@ -1244,7 +1834,7 @@ export function runProof(opts = {}) {
           generatedAt: now,
         });
       }
-      return proofFail(result.error, result.next);
+      return proofFail(result.error, result.next, result.published);
     }
 
     printProofScreen({
@@ -1345,10 +1935,16 @@ export function runApprove(opts = {}) {
         return usageError("Say --allow or --deny (exactly one).");
       }
       const id = sanitizeRecordId(idRaw);
-      const existing = readProofLines(repoCwd, id);
-      if (!existing.raw) {
+      let existingAbs;
+      try {
+        existingAbs = proofPathForId(repoCwd, id, { create: false });
+      } catch {
         return usageError(`No approval record named ${id} was found under .getadvantage/approvals/.`);
       }
+      if (!existsSync(existingAbs)) {
+        return usageError(`No approval record named ${id} was found under .getadvantage/approvals/.`);
+      }
+      const ctx = readDecisionContext(existingAbs);
       const resolution = allow ? "allow" : "deny";
       const record = buildProofRecord({
         kind: "resolution",
@@ -1359,9 +1955,20 @@ export function runApprove(opts = {}) {
           reason: `${by} ${allow ? "allowed" : "denied"} this action`,
           escalateTo: null,
         },
-        descriptor: {},
+        descriptor: {
+          action: ctx.action || "",
+          actor: ctx.actor || "",
+          model: ctx.model || "",
+          dataClass: ctx.dataClass || "",
+        },
         now,
-        extra: { by: nonempty(by), resolves: id, resolution },
+        extra: {
+          by: nonempty(by),
+          resolves: id,
+          resolution,
+          resourceDigest: ctx.resourceDigest,
+          summaryDigest: ctx.summaryDigest,
+        },
       });
       record.approver = nonempty(by);
       const abs = appendProofRecord(repoCwd, record);

@@ -19955,15 +19955,15 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    425,
+    439,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
   // the suite. 379 was the pre-L1 base; stage A added 17 (396); stage B
   // added 12 (408); stage B repair added HB8 + policy-read + proof-write +
   // map-cwd-local (412); r2 added policy-read I/O (413); L2 proof export
-  // added 12 (425). Update this number when a scenario is added or removed;
-  // do not delete the pin.
+  // added 12 (425); L2 repair added 14 (439). Update this number when a
+  // scenario is added or removed; do not delete the pin.
 });
 
 scenario("scan-scope-claim: filesToScan set identical to frozen pre-lane algorithm", () => {
@@ -22254,6 +22254,12 @@ scenario("proof: v1 fixture from 0.15.3 exports; digest-only; local HTML is not 
     assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"), html);
     assert.ok(!html.includes("getadvantage.app/v/"));
     assert.ok(!/https?:\/\//.test(html), html);
+    assert.equal(p.chain.status, "unverified");
+    assert.equal(p.chain.ok, false);
+    assert.ok(/Chain: unverified/.test(r.stdout), r.stdout);
+    assert.ok(!/Chain: intact/.test(r.stdout), r.stdout);
+    assert.ok(html.includes("Chain: unverified"), html);
+    assert.ok(!html.includes("Chain: intact"), html);
   } finally {
     cleanup(base);
   }
@@ -22314,7 +22320,8 @@ scenario("proof: v2 write stores prevDigest; mixed v1/v2 file exports", async ()
     assert.equal(packet.records[0].chainBound, false);
     assert.equal(packet.records[1].chainBound, true);
     assert.equal(packet.records[1].prevDigest, jsonlLineDigest(v1Line));
-    assert.equal(packet.chain.ok, true);
+    assert.equal(packet.chain.status, "partial");
+    assert.equal(packet.chain.ok, false);
     assert.equal(packet.chain.boundCount, 1);
     assert.equal(packet.chain.unboundCount, 1);
     assert.equal(packet.records[1].approverKind, "person");
@@ -22510,7 +22517,8 @@ scenario("proof: credential-shaped value refused at export and at write", async 
     );
     assert.equal(written.code, 1, written.stderr);
     assert.ok(/looks like a secret/.test(written.stderr), written.stderr);
-    assert.ok(!written.stderr.includes(aws) || /looks like a secret/.test(written.stderr));
+    assert.ok(!written.stderr.includes(aws), "secret absence is independent of the error phrase");
+    assert.ok(!written.stdout.includes(aws));
   } finally {
     cleanup(base);
   }
@@ -22646,6 +22654,459 @@ scenario("proof: --json emits exactly one parseable packet on stdout", () => {
     assert.ok(/local copy/i.test(r.stderr), r.stderr);
     const again = JSON.parse(r.stdout);
     assert.deepEqual(doc, again);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: nested array credential is refused and the secret is absent from every output", async () => {
+  const { credentialRecordField, credentialProofField } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "nested-arr");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "nested-arr", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const stripe = "sk_live_" + "ABCDEFGHIJKLMNOP1234";
+    const rec = v1ProofLine({ id: "dec-nested-arr", model: [stripe] });
+    assert.equal(credentialProofField({ model: rec.model }), null, "named-field string check must miss the array");
+    assert.equal(credentialRecordField(rec), "model");
+    writeProofJsonl(repo, rec.id, [rec]);
+    const exp = run(["proof", "export", rec.id], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/looks like a secret/.test(exp.stderr), exp.stderr);
+    assert.ok(!exp.stderr.includes(stripe), "secret absence is independent of the error phrase");
+    assert.ok(!exp.stdout.includes(stripe));
+    const packetAbs = path.join(repo, ".getadvantage", "approvals", "dec-nested-arr.packet.json");
+    const htmlAbs = path.join(repo, ".getadvantage", "approvals", "dec-nested-arr.html");
+    assert.equal(existsSync(packetAbs), false);
+    assert.equal(existsSync(htmlAbs), false);
+    if (existsSync(packetAbs)) {
+      assert.ok(!readFileSync(packetAbs, "utf8").includes(stripe));
+    }
+    if (existsSync(htmlAbs)) {
+      assert.ok(!readFileSync(htmlAbs, "utf8").includes(stripe));
+    }
+    const clean = v1ProofLine({ id: "dec-arr-clean", model: ["claude-opus-5"] });
+    writeProofJsonl(repo, clean.id, [clean]);
+    const exp2 = run(["proof", "export", clean.id], repo);
+    assert.equal(exp2.code, 1, exp2.stderr);
+    assert.ok(/not a name string/.test(exp2.stderr), exp2.stderr);
+    assert.ok(!/looks like a secret/.test(exp2.stderr), exp2.stderr);
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals", "dec-arr-clean.packet.json")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: extra nested key credential is refused even when named fields are clean", async () => {
+  const { credentialRecordField, credentialProofField } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "nested-extra");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "nested-extra", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const stripe = "sk_live_" + "ABCDEFGHIJKLMNOP1234";
+    const rec = v1ProofLine({ id: "dec-nested-extra", model: "claude-opus-5" });
+    rec.note = { wrapped: stripe };
+    assert.equal(credentialProofField({ model: rec.model, action: rec.action, actor: rec.actor, dataClass: rec.dataClass }), null);
+    assert.equal(credentialRecordField(rec), "note");
+    writeProofJsonl(repo, rec.id, [rec]);
+    const exp = run(["proof", "export", rec.id], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/looks like a secret/.test(exp.stderr), exp.stderr);
+    assert.ok(!exp.stderr.includes(stripe), "secret absence is independent of the error phrase");
+    assert.ok(!exp.stdout.includes(stripe));
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals", "dec-nested-extra.packet.json")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: unsupported version does not echo the raw value", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "ver-echo");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "ver-echo", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const stripe = "sk_live_" + "ABCDEFGHIJKLMNOP1234";
+    const rec = v1ProofLine({ id: "dec-ver" });
+    rec.version = stripe;
+    writeProofJsonl(repo, rec.id, [rec]);
+    const exp = run(["proof", "export", rec.id], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(!exp.stderr.includes(stripe), "unvalidated version must not be interpolated");
+    assert.ok(!exp.stdout.includes(stripe));
+    assert.ok(/looks like a secret|unsupported version/.test(exp.stderr), exp.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: deleting prevDigest after the chain starts is a failure, not unbound", async () => {
+  const { appendProofRecord, buildProofRecord } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "drop-link");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "drop-link", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "dec-drop",
+      decision: { outcome: "escalate", ruleId: null, reason: "wait", escalateTo: "Alex" },
+      descriptor: { action: "db.write", resource: "customers", actor: "bot", dataClass: "internal", model: "m" },
+      now: "2026-09-09T12:00:00.000Z",
+    });
+    appendProofRecord(repo, rec);
+    const resolution = buildProofRecord({
+      kind: "resolution",
+      id: "dec-drop",
+      decision: { outcome: "allow", ruleId: null, reason: "Alex allowed this action", escalateTo: null },
+      descriptor: { action: "db.write", actor: "bot", model: "m", dataClass: "internal" },
+      now: "2026-09-09T12:05:00.000Z",
+      extra: { by: "Alex", resolves: "dec-drop", resolution: "allow" },
+    });
+    const abs = appendProofRecord(repo, resolution);
+    const ok = run(["proof", "export", "dec-drop"], repo);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.ok(/Chain: intact/.test(ok.stdout), ok.stdout);
+    const packetAbs = path.join(repo, ".getadvantage", "approvals", "dec-drop.packet.json");
+    const htmlAbs = path.join(repo, ".getadvantage", "approvals", "dec-drop.html");
+    rmSync(packetAbs, { force: true });
+    rmSync(htmlAbs, { force: true });
+
+    const lines = readFileSync(abs, "utf8").split(/\n/);
+    const first = JSON.parse(lines[0]);
+    first.outcome = "allow";
+    const second = JSON.parse(lines[1]);
+    delete second.prevDigest;
+    writeFileSync(abs, JSON.stringify(first) + "\n" + JSON.stringify(second) + "\n", "utf8");
+    const broken = run(["proof", "export", "dec-drop"], repo);
+    assert.equal(broken.code, 1, broken.stderr);
+    assert.ok(/missing its previous-line digest at line 2|write checkpoint|untrusted/.test(broken.stderr), broken.stderr);
+    assert.ok(!/Chain: intact/.test(broken.stdout), broken.stdout);
+    if (existsSync(packetAbs)) {
+      const packet = JSON.parse(readFileSync(packetAbs, "utf8"));
+      assert.notEqual(packet.chain.status, "verified");
+      assert.notEqual(packet.chain.ok, true);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: malformed prevDigest after the chain starts is a failure", async () => {
+  const { appendProofRecord, buildProofRecord } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "bad-link");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "bad-link", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "dec-bad-link",
+      decision: { outcome: "block", ruleId: "r1", reason: "no", escalateTo: null },
+      descriptor: { action: "x", resource: "y", actor: "bot", dataClass: "public" },
+      now: "2026-09-09T12:00:00.000Z",
+    });
+    appendProofRecord(repo, rec);
+    const rec2 = buildProofRecord({
+      kind: "resolution",
+      id: "dec-bad-link",
+      decision: { outcome: "allow", ruleId: null, reason: "Alex allowed this action", escalateTo: null },
+      descriptor: { action: "x", actor: "bot", dataClass: "public" },
+      now: "2026-09-09T12:01:00.000Z",
+      extra: { by: "Alex", resolves: "dec-bad-link", resolution: "allow" },
+    });
+    const abs = appendProofRecord(repo, rec2);
+    const lines = readFileSync(abs, "utf8").split(/\n/);
+    const second = JSON.parse(lines[1]);
+    second.prevDigest = "not-a-digest";
+    writeFileSync(abs, lines[0] + "\n" + JSON.stringify(second) + "\n", "utf8");
+    const broken = run(["proof", "export", "dec-bad-link"], repo);
+    assert.equal(broken.code, 1, broken.stderr);
+    assert.ok(/missing its previous-line digest at line 2|write checkpoint|untrusted/.test(broken.stderr), broken.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: write-time tip rejects a flipped terminal line", async () => {
+  const { appendProofRecord, buildProofRecord } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "tip");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "tip", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "dec-tip",
+      decision: { outcome: "block", ruleId: "r1", reason: "no", escalateTo: null },
+      descriptor: { action: "x", resource: "y", actor: "bot", dataClass: "public", model: "m" },
+      now: "2026-09-09T12:00:00.000Z",
+    });
+    const abs = appendProofRecord(repo, rec);
+    const lines = readFileSync(abs, "utf8").split(/\n/);
+    const first = JSON.parse(lines[0]);
+    first.outcome = "allow";
+    writeFileSync(abs, JSON.stringify(first) + "\n", "utf8");
+    const broken = run(["proof", "export", "dec-tip"], repo);
+    assert.equal(broken.code, 1, broken.stderr);
+    assert.ok(/write checkpoint|untrusted/.test(broken.stderr), broken.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: 10001 lines are refused", async () => {
+  const { PROOF_EXPORT_MAX_LINES } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "cap");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "cap", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    assert.equal(PROOF_EXPORT_MAX_LINES, 10000);
+    const line = JSON.stringify(v1ProofLine({ id: "dec-cap" }));
+    write(repo, path.join(".getadvantage", "approvals", "dec-cap.jsonl"), (line + "\n").repeat(10001));
+    const r = run(["proof", "export", "dec-cap"], repo);
+    assert.equal(r.code, 1, r.stderr);
+    assert.ok(/more than 10000 lines/.test(r.stderr), r.stderr);
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals", "dec-cap.packet.json")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: oversized line is refused on export and on write", async () => {
+  const { appendProofRecord, buildProofRecord, PROOF_RECORD_MAX_BYTES } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "huge");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "huge", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const rec = v1ProofLine({ id: "dec-huge" });
+    rec.reason = "n".repeat(PROOF_RECORD_MAX_BYTES);
+    writeProofJsonl(repo, rec.id, [rec]);
+    const exp = run(["proof", "export", rec.id], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/over .* bytes|too large/.test(exp.stderr), exp.stderr);
+
+    const rec2 = buildProofRecord({
+      kind: "decision",
+      id: "dec-huge-w",
+      decision: { outcome: "block", ruleId: "r1", reason: "no", escalateTo: null },
+      descriptor: { action: "x", resource: "y", actor: "bot", dataClass: "public" },
+      now: "2026-09-09T12:00:00.000Z",
+    });
+    rec2.reason = "n".repeat(PROOF_RECORD_MAX_BYTES);
+    assert.throws(() => appendProofRecord(repo, rec2), /too large/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: UTF-8 character across a 64KiB chunk hashes original bytes", async () => {
+  const { jsonlLineDigest } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "utf8");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "utf8", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const prefix =
+      '{"version":1,"kind":"decision","id":"dec-utf8","outcome":"block","ruleId":"r1","reason":"';
+    const suffix =
+      '","escalateTo":null,"approver":"r1","model":"m","dataClass":"public","actor":"bot","action":"x","resourceDigest":"' +
+      "ab".repeat(32) +
+      '","summaryDigest":null,"createdAt":"2026-09-09T00:00:00.000Z"}';
+    const acute = Buffer.from("é", "utf8");
+    const pad = 65535 - Buffer.byteLength(prefix);
+    assert.ok(pad > 0, "prefix must sit before the 64KiB boundary");
+    const line1 = Buffer.concat([Buffer.from(prefix, "utf8"), Buffer.alloc(pad, 0x61), acute, Buffer.from(suffix, "utf8")]);
+    assert.equal(line1[65535], 0xc3);
+    assert.equal(line1[65536], 0xa9);
+    JSON.parse(line1.toString("utf8"));
+    const d1 = jsonlLineDigest(line1);
+    const line2 = Buffer.from(
+      JSON.stringify({
+        ...v1ProofLine({ id: "dec-utf8", kind: "resolution", outcome: "allow", by: "Alex", approver: "Alex" }),
+        prevDigest: d1,
+      }),
+      "utf8",
+    );
+    const abs = path.join(repo, ".getadvantage", "approvals", "dec-utf8.jsonl");
+    mkdirSync(path.dirname(abs), { recursive: true });
+    writeFileSync(abs, Buffer.concat([line1, Buffer.from("\n"), line2, Buffer.from("\n")]));
+    const exp = run(["proof", "export", "dec-utf8", "--json"], repo);
+    assert.equal(exp.code, 0, exp.stderr);
+    const packet = JSON.parse(exp.stdout);
+    assert.equal(packet.chain.status, "partial");
+    assert.equal(packet.records[0].lineDigest, d1);
+    assert.equal(packet.records[1].chainBound, true);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: concurrent resolve serializes the chain", async () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "race");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "race", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    assert.equal(asked.code, 2, asked.stderr);
+    const id = JSON.parse(asked.stdout).id;
+    const [a, b] = await Promise.all([
+      runAsync(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo),
+      runAsync(["approve", "--resolve", id, "--deny", "--by", "Blair"], repo),
+    ]);
+    assert.equal(a.code, 0, a.stderr);
+    assert.equal(b.code, 0, b.stderr);
+    const exp = run(["proof", "export", id, "--json"], repo);
+    assert.equal(exp.code, 0, exp.stderr);
+    const packet = JSON.parse(exp.stdout);
+    assert.equal(packet.chain.lineCount, 3);
+    assert.equal(packet.chain.status, "verified");
+    assert.equal(packet.chain.ok, true);
+    assert.equal(packet.chain.boundCount, 3);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: source.sha256 matches the bytes that were parsed", async () => {
+  const { exportProofRecord } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "sha");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "sha", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    writeProofJsonl(repo, "dec-sha", [v1ProofLine({ id: "dec-sha" })]);
+    const abs = path.join(repo, ".getadvantage", "approvals", "dec-sha.jsonl");
+    const expected = createHash("sha256").update(readFileSync(abs)).digest("hex");
+    const result = exportProofRecord(repo, "dec-sha", { now: "2026-09-09T10:00:00.000Z" });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.packet.source.sha256, expected);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: HTML write failure does not publish a new packet", async () => {
+  const { exportProofRecord } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "partial");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "partial", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    writeProofJsonl(repo, "dec-partial", [v1ProofLine({ id: "dec-partial", model: "first" })]);
+    const first = exportProofRecord(repo, "dec-partial", { now: "2026-09-09T10:00:00.000Z" });
+    assert.equal(first.ok, true, first.error);
+    const packetAbs = first.jsonAbs;
+    const htmlAbs = first.htmlAbs;
+    const before = readFileSync(packetAbs, "utf8");
+    rmSync(htmlAbs, { force: true });
+    mkdirSync(htmlAbs);
+    writeProofJsonl(repo, "dec-partial", [v1ProofLine({ id: "dec-partial", model: "second" })]);
+    const second = exportProofRecord(repo, "dec-partial", { now: "2026-09-09T11:00:00.000Z" });
+    assert.equal(second.ok, false, "html dest directory must fail the pair");
+    assert.equal(existsSync(packetAbs), true);
+    const after = readFileSync(packetAbs, "utf8");
+    assert.equal(after, before, "prior packet must be preserved");
+    assert.ok(!after.includes("second"));
+    const cli = run(["proof", "export", "dec-partial"], repo);
+    assert.equal(cli.code, 1, cli.stderr);
+    assert.ok(/partial local copy|Could not write|Nothing was written/.test(cli.stderr), cli.stderr);
+    if (/Nothing was written/.test(cli.stderr)) {
+      assert.ok(!/A partial local copy/.test(cli.stderr) || after === before);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: latest after resolve keeps model and dataClass from the decision", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "latest");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "latest", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      [
+        "approve",
+        "--json",
+        "--action",
+        "db.write",
+        "--resource",
+        "customers",
+        "--actor",
+        "bot",
+        "--data-class",
+        "internal",
+        "--model",
+        "gpt-6-astra",
+      ],
+      repo,
+    );
+    assert.equal(asked.code, 2, asked.stderr);
+    const id = JSON.parse(asked.stdout).id;
+    const resolved = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.equal(resolved.code, 0, resolved.stderr);
+    const exp = run(["proof", "export", id, "--json"], repo);
+    assert.equal(exp.code, 0, exp.stderr);
+    const packet = JSON.parse(exp.stdout);
+    assert.equal(packet.latest.outcome, "allow");
+    assert.equal(packet.latest.approver, "Alex");
+    assert.equal(packet.latest.model, "gpt-6-astra");
+    assert.equal(packet.latest.dataClass, "internal");
+    const last = packet.records[packet.records.length - 1];
+    assert.equal(last.kind, "resolution");
+    assert.equal(last.model, "gpt-6-astra");
+    assert.equal(last.dataTouched.dataClass, "internal");
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: approvals directory junction is refused at the filesystem", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "junc");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "junc", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const marker = path.join(repo, ".getadvantage");
+    mkdirSync(marker, { recursive: true });
+    const outside = path.join(base, "outside");
+    mkdirSync(outside, { recursive: true });
+    const approvals = path.join(marker, "approvals");
+    const linked = spawnSync("cmd", ["/c", "mklink", "/J", approvals, outside], { encoding: "utf8" });
+    assert.equal(linked.status, 0, `mklink /J must work on this host: ${(linked.stderr || linked.stdout || "").trim()}`);
+    assert.equal(lstatSync(approvals).isSymbolicLink(), true);
+    writeProofJsonl(repo, "dec-junc", [v1ProofLine({ id: "dec-junc" })]);
+    assert.equal(existsSync(path.join(outside, "dec-junc.jsonl")), true);
+    const exp = run(["proof", "export", "dec-junc"], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/tries to leave \.getadvantage\/approvals|not a local record name/.test(exp.stderr), exp.stderr);
+    assert.equal(existsSync(path.join(outside, "dec-junc.packet.json")), false);
+    assert.equal(existsSync(path.join(outside, "dec-junc.html")), false);
   } finally {
     cleanup(base);
   }
