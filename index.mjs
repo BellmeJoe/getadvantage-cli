@@ -69,7 +69,7 @@ import { buildSarif, writeSarifFile } from "./sarif.mjs";
 import { runIntent, printIntentHelp, INTENT_LIMITATION } from "./intent.mjs";
 import { buildFeedbackUrl } from "./feedback.mjs";
 import { runPolicyGate, printGateHelp } from "./gate.mjs";
-import { runApprove, printApproveHelp } from "./approve.mjs";
+import { runApprove, printApproveHelp, runProof, printProofHelp } from "./approve.mjs";
 import os from "node:os";
 
 function parseArgs(argv) {
@@ -603,6 +603,10 @@ async function main() {
       printApproveHelp();
       process.exit(0);
     }
+    if (topic === "proof") {
+      printProofHelp();
+      process.exit(0);
+    }
     // `intent --help` / `intent help` already covered when cmd is intent below.
     printHelp();
     process.exit(0);
@@ -706,6 +710,34 @@ async function main() {
     const code = runApprove({
       cwd: process.cwd(),
       flags,
+      emitJson: restore
+        ? (doc) => {
+            jsonDoc = doc;
+          }
+        : null,
+    });
+    if (restore && jsonDoc) emitJson(restore, jsonDoc);
+    else if (restore) restore();
+    process.exit(code);
+  }
+
+  // `proof export` reads a local approval record. Same dispatch class as
+  // approve: before classifyGitCwd(), so a missing record gets a proof
+  // message instead of the generic check dead-end. Not in printHelp().
+  if (cmd === "proof") {
+    const PROOF_FLAGS = new Set(["json", "help", "version"]);
+    const unknown = Object.keys(flags).filter((k) => !PROOF_FLAGS.has(k));
+    if (unknown.length > 0) {
+      console.error(c.red(`✗ Unknown flag${unknown.length > 1 ? "s" : ""}: ${unknown.map((f) => `--${f}`).join(", ")}`));
+      console.error(c.gray(`  Run \`${binName()} help proof\` to see the flags \`proof\` accepts.`));
+      process.exit(1);
+    }
+    const restore = flags.json ? routeHumanOutputToStderr() : null;
+    let jsonDoc = null;
+    const code = runProof({
+      cwd: process.cwd(),
+      flags,
+      positional,
       emitJson: restore
         ? (doc) => {
             jsonDoc = doc;
@@ -1070,7 +1102,7 @@ async function main() {
   const known = [
     "ship", "check", "map", "brief", "handoff", "init", "switch", "models", "gauge",
     "ledger", "mcp", "fan-out", "fan-in", "demo", "architecture", "login", "logout",
-    "github-action", "intent", "deploy", "feedback", "gate", "approve", "help", "version",
+    "github-action", "intent", "deploy", "feedback", "gate", "approve", "proof", "help", "version",
   ];
   void positional; // parseArgs exposes full positional list for future multi-arg cmds
   const suggestion = didYouMean(cmd, known);

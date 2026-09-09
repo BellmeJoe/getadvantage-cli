@@ -330,6 +330,11 @@ uses the repository this server was started in, and refuses a `cwd` in another
 repository. Start a server in each repository whose policy should authorize
 actions.
 
+`getadvantage approve` writes a local record under `.getadvantage/approvals/`.
+`getadvantage proof export <id>` prints a local copy of one of those records.
+Both are in this checkout. Neither is in the published package until a release.
+Nothing is uploaded. There is no hosted page. Do not treat the copy as a finished handoff.
+
 ## Land the fleet safely (fan-out / fan-in)
 
 Because your brain lives in the repo, you can run **several models at once** on

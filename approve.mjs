@@ -31,14 +31,25 @@
 //
 // Zero dependencies. Node built-ins only. ESM.
 
-import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { pathMatchesGlob, isPolicyPathInIndex } from "./policy.mjs";
 import {
   binName,
   c,
   classifyGitCwd,
+  cliVersion,
   markerFileForWrite,
   MARKER_DIR,
   readGitIndexText,
@@ -60,6 +71,11 @@ export const MATCH_KEYS = Object.freeze([
 export const EXIT = Object.freeze({ allow: 0, block: 1, escalate: 2 });
 /** Proof fields stored in the clear so an owner can read what happened. */
 export const PROOF_PLAIN_FIELDS = Object.freeze(["action", "actor", "model", "dataClass"]);
+/** First packet contract. Integer `version: 1` on a JSONL line is the 0.15.3 body, not this string. */
+export const PROOF_PACKET_SCHEMA = "getadvantage.proof.packet.v1";
+export const PROOF_GENESIS_DIGEST = "0".repeat(64);
+export const PROOF_EXPORT_MAX_LINES = 10000;
+const PROOF_RECORD_VERSIONS = new Set([1, 2]);
 const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
 // Conservative shapes only — refuse these in cleartext proof fields rather
@@ -466,9 +482,10 @@ export function loadApprovalsPolicy(cwd) {
   return { ok: true, policy, source: rel, warnings, error: null };
 }
 
-function approvalsAbs(cwd, file) {
-  const abs = markerFileForWrite(cwd, path.join(APPROVALS_SUBDIR, file));
-  mkdirSync(path.dirname(abs), { recursive: true });
+function approvalsAbs(cwd, file, opts = {}) {
+  const rel = path.join(APPROVALS_SUBDIR, file);
+  const abs = opts.create === false ? path.join(cwd, MARKER_DIR, rel) : markerFileForWrite(cwd, rel);
+  if (opts.create !== false) mkdirSync(path.dirname(abs), { recursive: true });
   const root = path.resolve(path.join(cwd, MARKER_DIR, APPROVALS_SUBDIR));
   const resolved = path.resolve(abs);
   const prefix = root.endsWith(path.sep) ? root : root + path.sep;
@@ -478,8 +495,8 @@ function approvalsAbs(cwd, file) {
   return resolved;
 }
 
-export function proofPathForId(cwd, id) {
-  return approvalsAbs(cwd, `${sanitizeRecordId(id)}.jsonl`);
+export function proofPathForId(cwd, id, opts = {}) {
+  return approvalsAbs(cwd, `${sanitizeRecordId(id)}.jsonl`, opts);
 }
 
 /**
@@ -528,10 +545,61 @@ export function buildProofRecord({ kind, id, decision, descriptor, now, extra })
   return rec;
 }
 
+export function jsonlLineDigest(raw) {
+  return createHash("sha256").update(String(raw ?? ""), "utf8").digest("hex");
+}
+
+function sha256File(abs) {
+  const CHUNK = 64 * 1024;
+  const fd = openSync(abs, "r");
+  try {
+    const st = fstatSync(fd);
+    const h = createHash("sha256");
+    let pos = 0;
+    while (pos < st.size) {
+      const n = Math.min(CHUNK, st.size - pos);
+      const buf = Buffer.alloc(n);
+      readSync(fd, buf, 0, n, pos);
+      pos += n;
+      h.update(buf);
+    }
+    return h.digest("hex");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function lastJsonlLine(abs) {
+  if (!existsSync(abs)) return null;
+  const fd = openSync(abs, "r");
+  try {
+    const st = fstatSync(fd);
+    if (st.size === 0) return null;
+    const max = Math.min(st.size, 256 * 1024);
+    const buf = Buffer.alloc(max);
+    readSync(fd, buf, 0, max, st.size - max);
+    let text = buf.toString("utf8");
+    if (text.endsWith("\n")) text = text.slice(0, -1);
+    if (text.endsWith("\r")) text = text.slice(0, -1);
+    const idxN = text.lastIndexOf("\n");
+    const idxR = text.lastIndexOf("\r");
+    const idx = Math.max(idxN, idxR);
+    const line = idx === -1 ? text : text.slice(idx + 1);
+    return line.length > 0 ? line : null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function appendProofRecord(cwd, record) {
   const id = sanitizeRecordId(record?.id);
   const abs = proofPathForId(cwd, id);
-  appendFileSync(abs, JSON.stringify(record) + "\n", "utf8");
+  const prevLine = lastJsonlLine(abs);
+  const rec = {
+    ...record,
+    prevDigest: prevLine ? jsonlLineDigest(prevLine) : PROOF_GENESIS_DIGEST,
+  };
+  appendFileSync(abs, JSON.stringify(rec) + "\n", "utf8");
   return abs;
 }
 
@@ -541,6 +609,395 @@ export function readProofLines(cwd, id) {
   const raw = readFileSync(abs, "utf8");
   const lines = raw.split(/\r?\n/).filter((l) => l.length > 0);
   return { abs, raw, lines };
+}
+
+function* iterateJsonlLines(abs) {
+  const CHUNK = 64 * 1024;
+  const fd = openSync(abs, "r");
+  try {
+    const st = fstatSync(fd);
+    let carry = "";
+    let pos = 0;
+    let lineNo = 0;
+    while (pos < st.size) {
+      const n = Math.min(CHUNK, st.size - pos);
+      const buf = Buffer.alloc(n);
+      readSync(fd, buf, 0, n, pos);
+      pos += n;
+      carry += buf.toString("utf8");
+      let nl;
+      while ((nl = carry.indexOf("\n")) !== -1) {
+        let raw = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+        lineNo += 1;
+        yield { lineNo, raw, truncated: false };
+      }
+    }
+    if (carry.length > 0) {
+      let raw = carry;
+      if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+      lineNo += 1;
+      yield { lineNo, raw, truncated: true };
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function idLooksLikePath(raw) {
+  const s = asString(raw);
+  if (!s) return false;
+  if (s.includes("..") || s.includes("/") || s.includes("\\")) return true;
+  if (/^[a-zA-Z]:/.test(s)) return true;
+  try {
+    if (path.isAbsolute(s)) return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+function deriveApproverKind(rec) {
+  if (nonempty(rec?.kind) === "resolution" || nonempty(rec?.by)) return "person";
+  if (nonempty(rec?.ruleId)) return "policy";
+  if (nonempty(rec?.approver) === "default") return "default";
+  return null;
+}
+
+function credentialInValue(value) {
+  const s = asString(value);
+  if (!s) return false;
+  return fieldLooksLikeCredential(s);
+}
+
+/**
+ * Name of the first string field on a stored record that looks like a secret,
+ * or null. Walks own enumerable keys (hostile extra keys included). Nested
+ * objects are not walked: the 0.15.3 line is flat.
+ */
+export function credentialRecordField(rec) {
+  if (rec == null || typeof rec !== "object" || Array.isArray(rec)) return null;
+  const desc = {
+    action: rec.action,
+    actor: rec.actor,
+    model: rec.model,
+    dataClass: rec.dataClass,
+  };
+  const named = credentialProofField(desc, { by: rec.by });
+  if (named) return named;
+  for (const key of Object.keys(rec)) {
+    if (credentialInValue(rec[key])) return key;
+  }
+  return null;
+}
+
+function projectProofRecord(rec, seq, lineDigestHex, chainBound) {
+  const dataClass = nonempty(rec.dataClass) || "unknown";
+  return {
+    seq,
+    sourceVersion: typeof rec.version === "number" && Number.isFinite(rec.version) ? rec.version : 1,
+    chainBound,
+    lineDigest: lineDigestHex,
+    prevDigest: typeof rec.prevDigest === "string" ? rec.prevDigest : null,
+    kind: rec.kind || null,
+    id: rec.id || null,
+    outcome: rec.outcome || null,
+    ruleId: rec.ruleId ?? null,
+    reason: rec.reason || null,
+    escalateTo: rec.escalateTo ?? null,
+    approver: rec.approver ?? null,
+    approverKind: deriveApproverKind(rec),
+    model: rec.model ?? null,
+    actor: rec.actor ?? null,
+    action: rec.action ?? null,
+    dataTouched: {
+      dataClass,
+      resourceDigest: rec.resourceDigest ?? null,
+    },
+    summaryDigest: rec.summaryDigest ?? null,
+    createdAt: rec.createdAt || null,
+    by: rec.by || null,
+    resolves: rec.resolves || null,
+    resolution: rec.resolution || null,
+  };
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderProofHtml(packet) {
+  const rows = (packet.records || []).slice(0, 20);
+  const more =
+    (packet.records || []).length > rows.length
+      ? `<p>Showing ${rows.length} of ${packet.chain.lineCount} lines. The JSON packet has every line.</p>`
+      : "";
+  const tr = rows
+    .map((ev) => {
+      const who = ev.approverKind === "person" ? ev.approver || ev.by || "" : ev.approver || ev.approverKind || "";
+      return `<tr><td>${escapeHtml(ev.createdAt || "")}</td><td>${escapeHtml(ev.outcome || "")}</td><td>${escapeHtml(who)}</td><td>${escapeHtml(ev.model || "")}</td><td>${escapeHtml(ev.dataTouched?.dataClass || "unknown")}</td><td>${escapeHtml(ev.dataTouched?.resourceDigest || "digest only")}</td></tr>`;
+    })
+    .join("");
+  const limits = (packet.limitations || []).map((l) => `<li>${escapeHtml(l)}</li>`).join("");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>getAdvantage proof record</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:24px;color:#111;background:#fff}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:14px;word-break:break-all}
+.note{margin-top:16px;color:#333}
+</style>
+</head>
+<body>
+<h1>getAdvantage proof record</h1>
+<p>This page was written on this machine by getadvantage proof export. It is not hosted. There is no public URL.</p>
+<p>Id: ${escapeHtml(packet.id)} · Lines: ${escapeHtml(String(packet.chain?.lineCount ?? 0))} · Chain: ${packet.chain?.ok ? "intact" : "not intact"} · Unsigned lines: ${escapeHtml(String(packet.chain?.unboundCount ?? 0))}</p>
+<table>
+<thead><tr><th>When</th><th>Outcome</th><th>Who</th><th>Model</th><th>Data class</th><th>Resource digest</th></tr></thead>
+<tbody>${tr}</tbody>
+</table>
+${more}
+<ul>${limits}</ul>
+<p class="note">Local files: ${escapeHtml(packet.source?.path || "")} · ${escapeHtml(packet.humanPage?.path || "")}. Open the page file in a browser on this machine. It is not published.</p>
+</body>
+</html>
+`;
+}
+
+/**
+ * Read `.getadvantage/approvals/<id>.jsonl` without loading the file as one
+ * string. v1 lines (no prevDigest) export. A stored prevDigest that does not
+ * match the previous line fails closed and names the line.
+ *
+ * @returns {{ ok: true, packet: object, html: string, jsonRel: string, htmlRel: string, jsonAbs: string, htmlAbs: string } | { ok: false, error: string, next: string, line?: number, field?: string }}
+ */
+export function exportProofRecord(cwd, rawId, opts = {}) {
+  const now = opts.now || new Date().toISOString();
+  const raw = asString(rawId);
+  if (!nonempty(raw)) {
+    return {
+      ok: false,
+      error: "Need an id (the record id printed by getadvantage approve).",
+      next: `Run \`${binName()} help proof\` to see what this command accepts.`,
+    };
+  }
+  if (idLooksLikePath(raw)) {
+    return {
+      ok: false,
+      error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
+      next: "pass the record id printed by getadvantage approve, not a file path",
+    };
+  }
+  const id = sanitizeRecordId(raw);
+  let abs;
+  try {
+    abs = proofPathForId(cwd, id, { create: false });
+  } catch {
+    return {
+      ok: false,
+      error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
+      next: "pass the record id printed by getadvantage approve, not a file path",
+    };
+  }
+  if (!existsSync(abs)) {
+    return {
+      ok: false,
+      error: `No approval record named ${id} was found under .getadvantage/approvals/.`,
+      next: "run getadvantage approve for the action, then re-run proof export with that record id",
+    };
+  }
+
+  const projected = [];
+  let prev = PROOF_GENESIS_DIGEST;
+  let boundCount = 0;
+  let unboundCount = 0;
+  let lineCount = 0;
+  try {
+    for (const { lineNo, raw: lineRaw, truncated } of iterateJsonlLines(abs)) {
+      if (lineCount >= PROOF_EXPORT_MAX_LINES) {
+        return {
+          ok: false,
+          error: `The approval record ${id} has more than ${PROOF_EXPORT_MAX_LINES} lines, so it was not exported.`,
+          next: "split the work into a new approve run; this export stays bounded",
+          line: lineNo,
+        };
+      }
+      if (!lineRaw || truncated) {
+        return {
+          ok: false,
+          error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
+          next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
+          line: lineNo,
+        };
+      }
+      let rec;
+      try {
+        rec = JSON.parse(lineRaw);
+      } catch {
+        return {
+          ok: false,
+          error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
+          next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
+          line: lineNo,
+        };
+      }
+      if (rec == null || typeof rec !== "object" || Array.isArray(rec)) {
+        return {
+          ok: false,
+          error: `The approval record ${id} is truncated at line ${lineNo}, so it was not exported.`,
+          next: `do not edit .getadvantage/approvals/${id}.jsonl; re-run getadvantage approve to write a new record`,
+          line: lineNo,
+        };
+      }
+      const ver = own(rec, "version");
+      if (ver != null && (typeof ver !== "number" || !PROOF_RECORD_VERSIONS.has(ver))) {
+        return {
+          ok: false,
+          error: `The approval record ${id} has unsupported version ${ver} at line ${lineNo}, so it was not exported.`,
+          next: "this export reads version 1 records written by 0.15.3 and version 2 lines with a previous-line digest",
+          line: lineNo,
+        };
+      }
+      const bad = credentialRecordField(rec);
+      if (bad) {
+        return {
+          ok: false,
+          error: `The ${bad} value looks like a secret, so it was not exported.`,
+          next: "pass a name, not a key. If this record is already stored, do not copy it; say only the field name",
+          line: lineNo,
+          field: bad,
+        };
+      }
+      const digest = jsonlLineDigest(lineRaw);
+      const storedPrev = own(rec, "prevDigest");
+      const chainBound = typeof storedPrev === "string" && storedPrev.length > 0;
+      if (chainBound) {
+        if (storedPrev !== prev) {
+          return {
+            ok: false,
+            error: `The approval record ${id} does not match its previous line at line ${lineNo}, so it was not exported.`,
+            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            line: lineNo,
+          };
+        }
+        boundCount += 1;
+      } else {
+        unboundCount += 1;
+      }
+      const event = projectProofRecord(rec, projected.length, digest, chainBound);
+      if (event.dataTouched.dataClass === "allowed" || event.dataTouched.dataClass === "allow") {
+        event.dataTouched.dataClass = "unknown";
+      }
+      projected.push(event);
+      prev = digest;
+      lineCount += 1;
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      error: `Could not read the approval record (${msg}).`,
+      next: "check that the file is readable, then re-run proof export",
+    };
+  }
+
+  if (lineCount === 0) {
+    return {
+      ok: false,
+      error: `No approval record named ${id} was found under .getadvantage/approvals/.`,
+      next: "run getadvantage approve for the action, then re-run proof export with that record id",
+    };
+  }
+
+  const jsonRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.packet.json`;
+  const htmlRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.html`;
+  const contentDigest = createHash("sha256").update(JSON.stringify(projected), "utf8").digest("hex");
+  const latest = projected[projected.length - 1];
+  const packet = {
+    schemaVersion: PROOF_PACKET_SCHEMA,
+    kind: "getadvantage.proof.packet",
+    id,
+    timeVaryingFields: ["exportedAt"],
+    exportedAt: now,
+    cliVersion: cliVersion(),
+    source: {
+      path: `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.jsonl`,
+      sha256: sha256File(abs),
+      lineCount,
+    },
+    resourceNaming: "digest-only",
+    compatibility: {
+      recordVersions: [1, 2],
+      promise:
+        "A reader may rely on id, kind, outcome, approver, approverKind, model, dataTouched.dataClass, dataTouched.resourceDigest, createdAt, lineDigest, and chain.ok. Version 1 records written by 0.15.3 export. Missing dataClass becomes unknown. Resource plaintext is never present. prevDigest is additive; its absence means the line is unsigned.",
+    },
+    chain: {
+      algorithm: "sha256",
+      encoding: "hex",
+      hashed: "utf8 jsonl line without trailing newline",
+      genesis: PROOF_GENESIS_DIGEST,
+      ok: true,
+      boundCount,
+      unboundCount,
+      lineCount,
+    },
+    contentDigest,
+    records: projected,
+    humanPage: {
+      path: htmlRel,
+      hosted: false,
+      url: null,
+    },
+    limitations: [
+      "Local files only. Not a hosted page. There is no public URL.",
+      "The resource match string is not stored. dataClass names the class; resourceDigest identifies the resource.",
+      "Version 1 lines have no write-time prevDigest. chain.ok covers lines that store prevDigest.",
+      "A name on --by is a name string, not a cryptographic identity.",
+      "Not in the published package until a release.",
+    ],
+    latest: {
+      outcome: latest?.outcome ?? null,
+      dataClass: latest?.dataTouched?.dataClass || "unknown",
+      model: latest?.model ?? null,
+      createdAt: latest?.createdAt ?? null,
+      approver: latest?.approver ?? null,
+    },
+  };
+
+  let jsonAbs;
+  let htmlAbs;
+  try {
+    jsonAbs = approvalsAbs(cwd, `${id}.packet.json`, { create: true });
+    htmlAbs = approvalsAbs(cwd, `${id}.html`, { create: true });
+  } catch {
+    return {
+      ok: false,
+      error: "That id is not a local record name (it tries to leave .getadvantage/approvals/).",
+      next: "pass the record id printed by getadvantage approve, not a file path",
+    };
+  }
+  const html = renderProofHtml(packet);
+  try {
+    writeFileSync(jsonAbs, JSON.stringify(packet, null, 2) + "\n", "utf8");
+    writeFileSync(htmlAbs, html, "utf8");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      error: `Could not write the local copy (${msg}).`,
+      next: "check that .getadvantage/approvals/ is writable, then re-run proof export",
+    };
+  }
+  return { ok: true, packet, html, jsonRel, htmlRel, jsonAbs, htmlAbs };
 }
 
 function descriptorFromFlags(flags, invocationCwd) {
@@ -690,6 +1147,121 @@ export function printApproveHelp() {
   console.log("");
   console.log("Exit codes: allowed 0 · blocked 1 · wait 2 · usage/config error 1.");
   console.log("Not a proxy. Not always on. Does not change the policy on its own.");
+}
+
+export function printProofHelp() {
+  const bin = binName();
+  console.log(`${c.bold("proof")} - write a local copy of one approval record. Not in the published package until a release.`);
+  console.log("");
+  console.log("Usage");
+  console.log(`  ${bin} proof export <id>`);
+  console.log(`  ${bin} proof export <id> --json`);
+  console.log("");
+  console.log("Reads `.getadvantage/approvals/<id>.jsonl` on this machine. Nothing is uploaded.");
+  console.log("There is no hosted page. A broken or secret-shaped record is refused.");
+  console.log("");
+  console.log("Exit codes: printed 0 · refused 1.");
+}
+
+function proofFail(msg, next) {
+  console.error(c.red(`✗ ${msg}`));
+  console.error("Nothing was written.");
+  if (next) console.error(c.gray(`  → ${next}`));
+  return 1;
+}
+
+function outcomeLabel(outcome) {
+  if (outcome === "allow") return "allowed";
+  if (outcome === "block") return "blocked";
+  if (outcome === "escalate") return "waiting on a person";
+  return outcome || "unknown";
+}
+
+function printProofScreen({ packet, jsonRel, htmlRel }) {
+  const latest = packet.latest || {};
+  console.log("getAdvantage - local approval record");
+  console.log("");
+  console.log(`Id: ${packet.id}`);
+  console.log(`Lines: ${packet.chain.lineCount}`);
+  console.log(`Chain: ${packet.chain.unboundCount === packet.chain.lineCount ? "unsigned" : "intact"}`);
+  console.log(`Data class: ${latest.dataClass || "unknown"}`);
+  console.log(`Outcome: ${outcomeLabel(latest.outcome)}`);
+  console.log(`Wrote: ${jsonRel}`);
+  console.log(`Page: ${htmlRel}`);
+  console.log("This is a local copy. Nothing was uploaded. There is no hosted page.");
+}
+
+/**
+ * CLI entry for `getadvantage proof`. Returns an exit code. Never throws.
+ *
+ * @param {{ cwd?: string, flags?: Record<string, unknown>, positional?: string[], now?: string, emitJson?: ((doc: object) => void)|null }} opts
+ */
+export function runProof(opts = {}) {
+  try {
+    const flags = opts.flags || {};
+    const positional = Array.isArray(opts.positional) ? opts.positional : [];
+    const invocationCwd = opts.cwd || process.cwd();
+    const emitJson = typeof opts.emitJson === "function" ? opts.emitJson : null;
+    const now = opts.now || new Date().toISOString();
+
+    if (flags.help) {
+      printProofHelp();
+      return 0;
+    }
+
+    const sub = positional[1] || "";
+    const idArg = positional[2];
+    if (!sub || sub === "help") {
+      printProofHelp();
+      return 0;
+    }
+    if (sub !== "export") {
+      return proofFail(
+        `Unknown proof subcommand: ${sub}.`,
+        `Run \`${binName()} proof export <id>\` to write a local copy.`,
+      );
+    }
+    if (!nonempty(idArg)) {
+      return proofFail(
+        "Need an id (the record id printed by getadvantage approve).",
+        `Run \`${binName()} help proof\` to see what this command accepts.`,
+      );
+    }
+
+    const gitCwd = classifyGitCwd(invocationCwd);
+    const repoCwd = gitCwd.kind === "worktree" ? gitCwd.root : invocationCwd;
+
+    const result = exportProofRecord(repoCwd, idArg, { now });
+    if (!result.ok) {
+      if (emitJson) {
+        emitJson({
+          command: "proof",
+          action: "export",
+          outcome: null,
+          exitCode: 1,
+          id: nonempty(idArg) ? sanitizeRecordId(idArg) : null,
+          reason: result.error,
+          generatedAt: now,
+        });
+      }
+      return proofFail(result.error, result.next);
+    }
+
+    printProofScreen({
+      packet: result.packet,
+      jsonRel: result.jsonRel,
+      htmlRel: result.htmlRel,
+    });
+    if (emitJson) {
+      emitJson(result.packet);
+    }
+    return 0;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(c.red(`✗ Could not finish the proof export (${msg}).`));
+    console.error("Nothing was written.");
+    return 1;
+  }
 }
 
 function makeId(now, nonce) {
