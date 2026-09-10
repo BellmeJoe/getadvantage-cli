@@ -218,7 +218,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -19955,7 +19955,7 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    453,
+    460,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
@@ -19965,7 +19965,9 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449);
   // L2 repair-4 P1 added --json credential omit + ledger hardlink (451);
   // L2 repair-4 P2 added earlier-line append refuse (452);
-  // L2 repair-5 P1 added MCP protocol-error name omit (453).
+  // L2 repair-5 P1 added MCP protocol-error name omit (453);
+  // L2 repair-5 sweep added tip/html hardlink, tip/html dangling junction,
+  // MCP isError cwd omit, lock dangling junction, and proof subcommand omit (460).
   // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
@@ -23405,13 +23407,14 @@ scenario("proof: hardlink at tip.tmp does not overwrite an outside file", () => 
       }
     }
     if (!planted) {
-      return;
+      assert.fail("could not plant a hardlink of tip.tmp (symlink fallback is not this test)");
     }
     const before = readFileSync(outside, "utf8");
     const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
     const after = existsSync(outside) ? readFileSync(outside, "utf8") : "MISSING";
     assert.equal(after, before, `outside sentinel was overwritten:\n${after}\nresolve: ${r.code} ${r.stderr}`);
     assert.ok(!after.includes("tipDigest"), after);
+    assert.notEqual(r.code, 0, `hardlinked tip.tmp must refuse, got exit ${r.code} ${r.stderr}`);
   } finally {
     cleanup(base);
   }
@@ -23638,6 +23641,256 @@ scenario("proof: hardlink at the ledger file does not overwrite an outside file"
     assert.match(src, /function appendLedgerLine/);
     assert.match(src, /fst\.nlink > 1/);
     assert.match(src, /PROOF_SHARED_INODE/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+function plantHardlink(existingAbs, newAbs) {
+  try {
+    linkSync(existingAbs, newAbs);
+    if (existsSync(newAbs) && lstatSync(existingAbs).nlink > 1) return true;
+  } catch {
+    /* continue */
+  }
+  if (process.platform === "win32") {
+    const linked = spawnSync("cmd", ["/c", "mklink", "/H", newAbs, existingAbs], { encoding: "utf8" });
+    if (linked.status === 0 && existsSync(newAbs) && lstatSync(existingAbs).nlink > 1) return true;
+  }
+  return false;
+}
+
+function plantDanglingJunction(linkAbs, missingTargetAbs) {
+  try {
+    unlinkSync(linkAbs);
+  } catch {
+    /* missing */
+  }
+  try {
+    symlinkSync(missingTargetAbs, linkAbs, "junction");
+    const st = lstatSync(linkAbs);
+    return st.isSymbolicLink() && !existsSync(linkAbs);
+  } catch {
+    return false;
+  }
+}
+
+scenario("mcp: isError tool result omits a credential-shaped cwd", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mcp-cwd-cred");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "mcp-cwd-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const K = "sk_live_" + "C".repeat(20);
+    const mcp = mcpInitAndCall(repo, "map", { cwd: path.join(base, K) });
+    assert.equal(mcp.status, 0, mcp.stderr);
+    assert.ok(!mcp.stdout.includes(K), `isError stdout echoed the refused cwd:\n${mcp.stdout}`);
+    assert.ok(!mcp.stderr.includes(K), `isError stderr echoed the refused cwd:\n${mcp.stderr}`);
+    const tool = mcpToolText(mcp.replies, 2);
+    assert.equal(tool.rpcError, null, JSON.stringify(tool.rpcError));
+    assert.equal(tool.isError, true);
+    assert.ok(typeof tool.text === "string");
+    assert.ok(!tool.text.includes(K));
+    const src = readFileSync(path.join(__dirname, "..", "mcp.mjs"), "utf8");
+    assert.match(src, /function scrubRpcResult/);
+    assert.match(src, /if \(!result\.isError\) return result/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: hardlink at the tip file does not overwrite an outside file", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-tip-hl");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-tip-hl", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const tip = `${abs}.tip`;
+    assert.ok(existsSync(tip), tip);
+    const outside = path.join(base, "sentinel-tip.txt");
+    if (!plantHardlink(tip, outside)) {
+      assert.fail("could not plant a hardlink of the tip file");
+    }
+    const before = readFileSync(outside, "utf8");
+    const ledgerBefore = readFileSync(abs, "utf8");
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    const after = existsSync(outside) ? readFileSync(outside, "utf8") : "MISSING";
+    assert.equal(after, before, `outside sentinel was overwritten:\n${after}\nresolve: ${r.code} ${r.stderr}`);
+    assert.notEqual(r.code, 0, `hardlinked tip must refuse, got exit ${r.code} ${r.stderr}`);
+    assert.ok(/shares storage with another name|escaped \.getadvantage\/approvals/.test(r.stderr), r.stderr);
+    assert.equal(readFileSync(abs, "utf8"), ledgerBefore);
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /assertUnsharedInode\(st\)/);
+    assert.match(src, /function assertSafeWriteTarget/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: hardlink at html and packet dest does not overwrite an outside file", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-html-hl");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-html-hl", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const exp1 = run(["proof", "export", id], repo);
+    assert.equal(exp1.code, 0, exp1.stderr);
+    const htmlAbs = path.join(repo, ".getadvantage", "approvals", `${id}.html`);
+    const jsonAbs = path.join(repo, ".getadvantage", "approvals", `${id}.packet.json`);
+    assert.ok(existsSync(htmlAbs), htmlAbs);
+    assert.ok(existsSync(jsonAbs), jsonAbs);
+    const htmlOut = path.join(base, "sentinel-html.txt");
+    const jsonOut = path.join(base, "sentinel-packet.txt");
+    if (!plantHardlink(htmlAbs, htmlOut) || !plantHardlink(jsonAbs, jsonOut)) {
+      assert.fail("could not plant a hardlink of the html or packet dest");
+    }
+    const htmlBefore = readFileSync(htmlOut, "utf8");
+    const jsonBefore = readFileSync(jsonOut, "utf8");
+    const exp2 = run(["proof", "export", id], repo);
+    assert.notEqual(exp2.code, 0, `hardlinked export dest must refuse, got exit ${exp2.code} ${exp2.stderr}`);
+    assert.equal(readFileSync(htmlOut, "utf8"), htmlBefore);
+    assert.equal(readFileSync(jsonOut, "utf8"), jsonBefore);
+    assert.ok(/shares storage with another name|escaped \.getadvantage\/approvals|Could not write/.test(exp2.stderr), exp2.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: dangling junction at the tip is refused", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-tip-dangle");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-tip-dangle", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const tip = `${abs}.tip`;
+    const missing = path.join(base, "no-such-tip-target");
+    if (!plantDanglingJunction(tip, missing)) {
+      assert.fail("could not plant a dangling junction at the tip");
+    }
+    const ledgerBefore = readFileSync(abs, "utf8");
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.notEqual(r.code, 0, `dangling tip junction must refuse, got exit ${r.code} ${r.stderr}`);
+    assert.ok(/escaped \.getadvantage\/approvals|shares storage|write checkpoint|not allowed/.test(r.stderr), r.stderr);
+    assert.equal(readFileSync(abs, "utf8"), ledgerBefore);
+    assert.equal(existsSync(missing), false, "dangling junction target must not have been created");
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /if \(isSymlinkOrReparse\(tipAbs\)\) throw escapedApprovalsError/);
+    assert.ok(!/existsSync\(tipAbs\) && isSymlinkOrReparse\(tipAbs\)/.test(src));
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: dangling junction at html dest is refused", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-html-dangle");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-html-dangle", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const exp1 = run(["proof", "export", id], repo);
+    assert.equal(exp1.code, 0, exp1.stderr);
+    const htmlAbs = path.join(repo, ".getadvantage", "approvals", `${id}.html`);
+    const jsonAbs = path.join(repo, ".getadvantage", "approvals", `${id}.packet.json`);
+    const jsonBefore = readFileSync(jsonAbs, "utf8");
+    const missing = path.join(base, "no-such-html-target");
+    if (!plantDanglingJunction(htmlAbs, missing)) {
+      assert.fail("could not plant a dangling junction at the html dest");
+    }
+    const exp2 = run(["proof", "export", id], repo);
+    assert.notEqual(exp2.code, 0, `dangling html junction must refuse, got exit ${exp2.code} ${exp2.stderr}`);
+    assert.ok(
+      /not a local record name|tries to leave|Could not write|shares storage/.test(exp2.stderr),
+      exp2.stderr,
+    );
+    assert.equal(existsSync(missing), false, "dangling junction target must not have been created");
+    assert.ok(!existsSync(path.join(missing, `${id}.html`)));
+    assert.equal(readFileSync(jsonAbs, "utf8"), jsonBefore);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: dangling junction at the lock is refused", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-lock-dangle");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-lock-dangle", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const lock = `${abs}.lock`;
+    const missing = path.join(base, "no-such-lock-target");
+    if (!plantDanglingJunction(lock, missing)) {
+      assert.fail("could not plant a dangling junction at the lock");
+    }
+    const ledgerBefore = readFileSync(abs, "utf8");
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.notEqual(r.code, 0, `dangling lock junction must refuse, got exit ${r.code} ${r.stderr}`);
+    assert.equal(existsSync(missing), false, "dangling lock target must not have been created");
+    assert.ok(!existsSync(path.join(missing, "created-by-wx")));
+    assert.equal(readFileSync(abs, "utf8"), ledgerBefore);
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /if \(isSymlinkOrReparse\(lockPath\)\) throw escapedApprovalsError/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: unknown subcommand omits a credential-shaped name", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "proof-sub-cred");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "proof-sub-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const K = "sk_live_" + "D".repeat(20);
+    const r = run(["proof", K, "--json"], repo);
+    assert.equal(r.code, 1, r.stderr);
+    assert.ok(!r.stdout.includes(K), r.stdout);
+    assert.ok(!r.stderr.includes(K), r.stderr);
+    const doc = JSON.parse(r.stdout);
+    assert.equal(doc.command, "proof");
+    assert.equal(doc.exitCode, 1);
+    assert.ok(doc.action == null);
+    assert.ok(!JSON.stringify(doc).includes(K));
+    assert.match(r.stderr, /Unknown proof subcommand: that name/);
   } finally {
     cleanup(base);
   }

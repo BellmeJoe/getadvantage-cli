@@ -601,9 +601,9 @@ function lstatOrNull(abs) {
 }
 
 /**
- * Refuse reparse points, directories, and paths that leave approvals.
- * Hardlinks (nlink > 1) are unlinked by name only after this check: the
- * other name is not our write target, so we never open a shared inode.
+ * Refuse reparse points, directories, shared inodes, and paths that leave
+ * approvals. A leftover name that shares storage is not unlinked and is
+ * not opened: the other name is not our write target.
  */
 function assertSafeWriteTarget(cwd, abs, { mustNotExist = false } = {}) {
   assertApprovalsContainment(cwd, abs);
@@ -615,6 +615,7 @@ function assertSafeWriteTarget(cwd, abs, { mustNotExist = false } = {}) {
     err.code = "PROOF_OUTPUT_IS_DIR";
     throw err;
   }
+  assertUnsharedInode(st);
   if (mustNotExist) {
     const err = new Error("output path already exists");
     err.code = "EEXIST";
@@ -694,13 +695,13 @@ function assertApprovalsContainment(cwd, abs) {
   const root = path.resolve(marker, APPROVALS_SUBDIR);
   const resolved = path.resolve(abs);
   if (!containedIn(resolved, root)) throw escapedApprovalsError();
-  if (existsSync(marker) && isSymlinkOrReparse(marker)) {
+  if (isSymlinkOrReparse(marker)) {
     if (!containedIn(realExisting(marker), path.resolve(cwd))) throw escapedApprovalsError();
   }
-  if (existsSync(root) && isSymlinkOrReparse(root)) throw escapedApprovalsError();
+  if (isSymlinkOrReparse(root)) throw escapedApprovalsError();
   const parent = path.dirname(resolved);
-  if (existsSync(parent) && isSymlinkOrReparse(parent)) throw escapedApprovalsError();
-  if (existsSync(abs) && isSymlinkOrReparse(abs)) throw escapedApprovalsError();
+  if (isSymlinkOrReparse(parent)) throw escapedApprovalsError();
+  if (isSymlinkOrReparse(abs)) throw escapedApprovalsError();
   if (existsSync(abs)) {
     const realAbs = realExisting(abs);
     const realRoot = existsSync(root) ? realExisting(root) : root;
@@ -718,9 +719,10 @@ function approvalsAbs(cwd, file, opts = {}) {
   if (!containedIn(abs, root)) throw escapedApprovalsError();
   if (opts.create !== false) {
     const marker = path.resolve(cwd, MARKER_DIR);
-    if (!existsSync(marker)) mkdirSync(marker, { recursive: true });
-    if (existsSync(root) && isSymlinkOrReparse(root)) throw escapedApprovalsError();
-    if (!existsSync(root)) mkdirSync(root, { recursive: true });
+    if (isSymlinkOrReparse(marker)) throw escapedApprovalsError();
+    if (!lstatOrNull(marker)) mkdirSync(marker, { recursive: true });
+    if (isSymlinkOrReparse(root)) throw escapedApprovalsError();
+    if (!lstatOrNull(root)) mkdirSync(root, { recursive: true });
   }
   assertApprovalsContainment(cwd, abs);
   return abs;
@@ -810,8 +812,8 @@ function tipPathFor(abs) {
 
 function readTipFile(abs) {
   const p = tipPathFor(abs);
-  if (!existsSync(p)) return null;
   if (isSymlinkOrReparse(p)) throw escapedApprovalsError();
+  if (!existsSync(p)) return null;
   try {
     const j = JSON.parse(readFileSync(p, "utf8"));
     if (!j || typeof j !== "object" || Array.isArray(j)) return { corrupt: true };
@@ -886,6 +888,7 @@ function withProofLock(abs, fn) {
       throw err;
     }
     try {
+      if (isSymlinkOrReparse(lockPath)) throw escapedApprovalsError();
       fd = openSync(lockPath, "wx");
       break;
     } catch (e) {
@@ -982,6 +985,7 @@ function ledgerStat(abs) {
 function rollbackLedgerToSize(abs, prevSize, created) {
   try {
     const st = lstatOrNull(abs);
+    if (st && st.isSymbolicLink()) return false;
     if (st && typeof st.nlink === "number" && st.nlink > 1) return false;
     if (created || prevSize <= 0) {
       unlinkSync(abs);
@@ -1109,9 +1113,9 @@ export function appendProofRecord(cwd, record) {
   const abs = proofPathForId(cwd, id);
   return withProofLock(abs, () => {
     assertApprovalsContainment(cwd, abs);
-    if (existsSync(abs) && isSymlinkOrReparse(abs)) throw escapedApprovalsError();
+    if (isSymlinkOrReparse(abs)) throw escapedApprovalsError();
     const tipAbs = tipPathFor(abs);
-    if (existsSync(tipAbs) && isSymlinkOrReparse(tipAbs)) throw escapedApprovalsError();
+    if (isSymlinkOrReparse(tipAbs)) throw escapedApprovalsError();
 
     const st = ledgerStat(abs);
     if (st && st.isDirectory()) {
@@ -2263,8 +2267,17 @@ export function runProof(opts = {}) {
       return 0;
     }
     if (sub !== "export") {
+      const shown = fieldLooksLikeCredential(sub) ? "that name" : sub;
+      emitErrorJson(emitJson, {
+        command: "proof",
+        action: fieldLooksLikeCredential(sub) ? null : shown,
+        outcome: null,
+        exitCode: 1,
+        reason: `Unknown proof subcommand: ${shown}.`,
+        generatedAt: now,
+      });
       return proofFail(
-        `Unknown proof subcommand: ${sub}.`,
+        `Unknown proof subcommand: ${shown}.`,
         `Run \`${binName()} proof export <id>\` to write a local copy.`,
       );
     }
