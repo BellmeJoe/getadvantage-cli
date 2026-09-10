@@ -338,14 +338,15 @@ compatible with, including nothing from npm `0.15.3`. The copy says
 every line is bound and the write checkpoint matches. A missing link after the
 chain starts is refused, not treated as unsigned. Lines with no previous-line
 digest export as unverified; unverified is not a trustworthy unsigned history.
-Nested secret-shaped values are refused; a caller who passes an array still
-gets a refusal if any nested string looks like a key, and the key is not copied
-into the error, including the `--json` error document. A name that matches the
-leaked-secret catalogue `check` uses, passed as an MCP tool, method, or
-property name, is refused and is not copied into the JSON-RPC error message.
-Ordinary names stay in the error. Successful tool results that are repo content
-the owner asked to read are not walked by that gate. An approval file that
-shares storage with another name is not written. Both commands are in this
+A nested value that matches a listed secret pattern is refused, and the match
+is not copied into the error, including the `--json` error document. A name
+that matches a listed secret pattern, passed as an MCP tool, method, or
+property name, is not copied into the JSON-RPC error message; a name that does
+not match is still named, so the agent can see what failed. Successful MCP
+reads still return repo content, which may include secrets the owner asked to
+read. This name scrub is not `check`: `check` uses lookbehind anchors and
+validators; a prefixed shape can miss there and still be withheld here. An
+approval file that shares storage with another name is not written. Both commands are in this
 checkout. Neither is in the published package until a release. Nothing is
 uploaded. There is no hosted page. Do not treat the copy as a finished handoff.
 

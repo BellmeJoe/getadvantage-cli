@@ -23664,13 +23664,22 @@ scenario("mcp: protocol errors omit every SECRET_PATTERNS shape from stdout", as
     const mcp = runMcpJsonRpc(repo, messages);
     assert.equal(mcp.status, 0, mcp.stderr);
     for (const { id, sample } of shapes) {
+      const escaped = JSON.stringify(sample).slice(1, -1);
       assert.ok(
         !mcp.stdout.includes(sample),
-        `${id} leaked on protocol stdout:\n${mcp.stdout}`,
+        `${id} leaked raw on protocol stdout:\n${mcp.stdout}`,
+      );
+      assert.ok(
+        !mcp.stdout.includes(escaped),
+        `${id} leaked json-escaped on protocol stdout:\n${mcp.stdout}`,
       );
       assert.ok(
         !mcp.stderr.includes(sample),
-        `${id} leaked on protocol stderr:\n${mcp.stderr}`,
+        `${id} leaked raw on protocol stderr:\n${mcp.stderr}`,
+      );
+      assert.ok(
+        !mcp.stderr.includes(escaped),
+        `${id} leaked json-escaped on protocol stderr:\n${mcp.stderr}`,
       );
     }
     const unknownTool = mcpReply(mcp.replies, 400);
@@ -23697,13 +23706,13 @@ scenario("mcp: protocol errors omit every SECRET_PATTERNS shape from stdout", as
     assert.equal(first, null, "first scrub of the same shape must refuse");
     assert.equal(second, null, "second scrub of the same shape must refuse (lastIndex reset)");
     const approveSrc = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
-    assert.match(approveSrc, /import \{ SECRET_PATTERNS \} from "\.\/checks\.mjs"/);
+    assert.match(approveSrc, /import \{ SECRET_PATTERNS \} from "\.\/scan\.mjs"/);
     assert.match(approveSrc, /for \(const p of SECRET_PATTERNS\)/);
     assert.match(approveSrc, /p\.re\.lastIndex = 0/);
     assert.match(approveSrc, /function shapeRegex/);
     assert.doesNotMatch(approveSrc, /const CREDENTIAL_FIELD_RE/);
     const { SECRET_PATTERNS } = await import(
-      pathToFileURL(path.join(__dirname, "..", "checks.mjs")).href + `?cat=${Date.now()}`
+      pathToFileURL(path.join(__dirname, "..", "scan.mjs")).href + `?cat=${Date.now()}`
     );
     const covered = new Set(shapes.map((s) => s.id).filter((id) => id !== "stripe-live-prefix"));
     for (const p of SECRET_PATTERNS) {
@@ -23879,6 +23888,36 @@ scenario("mcp: isError tool result omits a credential-shaped cwd", () => {
     assert.ok(!tool.text.includes(K));
     const src = readFileSync(path.join(__dirname, "..", "mcp.mjs"), "utf8");
     assert.match(src, /function scrubRpcResult/);
+    assert.match(src, /if \(!result\.isError\) return result/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: operational tool messages omit a credential-shaped directory name", () => {
+  const base = freshBase();
+  try {
+    const K = "npm_" + "D".repeat(36);
+    const repo = path.join(base, K);
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "mcp-dir-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const handoff = mcpInitAndCall(repo, "get_handoff", {});
+    assert.equal(handoff.status, 0, handoff.stderr);
+    assert.ok(!handoff.stdout.includes(K), `get_handoff stdout echoed the directory name:\n${handoff.stdout}`);
+    assert.ok(!handoff.stderr.includes(K), `get_handoff stderr echoed the directory name:\n${handoff.stderr}`);
+    const empty = mcpToolText(handoff.replies, 2);
+    assert.equal(empty.rpcError, null, JSON.stringify(empty.rpcError));
+    assert.equal(empty.isError, false);
+    assert.match(empty.text, /No HANDOFF\.md yet in this repository/);
+    assert.ok(!empty.text.includes(K));
+    const src = readFileSync(path.join(__dirname, "..", "mcp.mjs"), "utf8");
+    assert.doesNotMatch(src, /Checks crashed: \$\{error\.stack/);
+    assert.doesNotMatch(src, /in \$\{cwd\}/);
+    assert.doesNotMatch(src, /Map failed: \$\{error\.message/);
+    assert.doesNotMatch(src, /Architecture scan failed: \$\{error\.message/);
+    assert.match(src, /isError: true, text: "Checks crashed\."/);
+    assert.match(src, /A thrown stack and an interpolated cwd are not repo content/);
     assert.match(src, /if \(!result\.isError\) return result/);
   } finally {
     cleanup(base);

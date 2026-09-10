@@ -51,7 +51,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { pathMatchesGlob, isPolicyPathInIndex } from "./policy.mjs";
-import { SECRET_PATTERNS } from "./checks.mjs";
+import { SECRET_PATTERNS } from "./scan.mjs";
 import {
   binName,
   c,
@@ -91,10 +91,10 @@ const PROOF_CRED_WALK_MAX_DEPTH = 16;
 const PROOF_RECORD_VERSIONS = new Set([1, 2]);
 const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
-// Field/name scrub keys off the shipped SECRET_PATTERNS catalogue
-// (scan.mjs, re-exported by checks.mjs). A private 8-pattern list here
-// was the two-catalogue defect: `check` blocked an npm token while MCP
-// stdout printed it. Do not copy patterns; import the catalogue.
+// Field/name scrub keys off the shipped SECRET_PATTERNS catalogue in
+// scan.mjs (checks.mjs re-exports the same array). A private 8-pattern
+// list here was the two-catalogue defect: `check` blocked an npm token
+// while MCP stdout printed it. Do not copy patterns; import the catalogue.
 //
 // Catalogue regexes stay untouched (alnum lookaround anchors, /g,
 // validate). This matcher clones each pattern, resets lastIndex on both

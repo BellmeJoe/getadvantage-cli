@@ -545,7 +545,10 @@ const TOOL_IMPL = {
     }
     const body = readTextSafe(briefAbs);
     if (body == null) {
-      return `Could not read or generate ${DEFAULT_OUT} in ${cwd}.`;
+      return {
+        isError: true,
+        text: `Could not read or generate ${DEFAULT_OUT} in this repository.`,
+      };
     }
     return body;
   },
@@ -555,7 +558,10 @@ const TOOL_IMPL = {
     captureStdout(() => runBrief({ cwd }));
     const body = readTextSafe(briefAbs);
     if (body == null) {
-      return `Refreshed, but could not read ${DEFAULT_OUT} back from ${cwd}.`;
+      return {
+        isError: true,
+        text: `Refreshed, but could not read ${DEFAULT_OUT} back from this repository.`,
+      };
     }
     return `Refreshed ${DEFAULT_OUT}.\n\n${body}`;
   },
@@ -564,7 +570,7 @@ const TOOL_IMPL = {
     const handoffAbs = path.join(cwd, DEFAULT_HANDOFF);
     const body = readTextSafe(handoffAbs);
     if (body == null) {
-      return `No ${DEFAULT_HANDOFF} yet in ${cwd}. Use the save_handoff tool to create one (it records where work left off so the next session picks up with no loss).`;
+      return `No ${DEFAULT_HANDOFF} yet in this repository. Use the save_handoff tool to create one (it records where work left off so the next session picks up with no loss).`;
     }
     return body;
   },
@@ -576,7 +582,10 @@ const TOOL_IMPL = {
     const log = text.trim();
     if (result !== 0 || body == null) {
       // runHandoff refuses to clobber a foreign HANDOFF.md (returns 1) — relay it.
-      return `Handoff did not complete.\n${log || "(no output)"}`;
+      return {
+        isError: true,
+        text: "Handoff did not complete.",
+      };
     }
     return `${log ? log + "\n\n" : ""}--- ${DEFAULT_HANDOFF} ---\n\n${body}`;
   },
@@ -591,7 +600,8 @@ const TOOL_IMPL = {
       }),
     );
     if (error) {
-      return `Checks crashed: ${error.stack || error}`;
+      logErr(`check crashed: ${error.stack || error}`);
+      return { isError: true, text: "Checks crashed." };
     }
     const verdict = result && result.exitCode === 0 ? "GO" : "NO-GO";
     const log = text.trim();
@@ -601,7 +611,10 @@ const TOOL_IMPL = {
   map(cwd) {
     // ONE implementation: the same renderMap the CLI `map` command uses.
     const { text, error } = captureStdout(() => renderMap(cwd));
-    if (error) return `Map failed: ${error.message || error}`;
+    if (error) {
+      logErr(`map failed: ${error && error.message ? error.message : error}`);
+      return { isError: true, text: "Map failed." };
+    }
     return text.trim() || "(no map output)";
   },
 
@@ -609,7 +622,10 @@ const TOOL_IMPL = {
     const { text, error } = captureStdout(() =>
       runArchitecture({ cwd, top: args && typeof args.top === "number" ? args.top : undefined }),
     );
-    if (error) return `Architecture scan failed: ${error.message || error}`;
+    if (error) {
+      logErr(`architecture failed: ${error && error.message ? error.message : error}`);
+      return { isError: true, text: "Architecture scan failed." };
+    }
     return text.trim() || "(no architecture output)";
   },
 
@@ -684,9 +700,18 @@ function refusedText(fallback) {
 /**
  * Last gate on the protocol channel. Caller-controlled names (tool, method,
  * property, JSON-RPC id) are interpolated into error messages upstream;
- * this walk drops credential-shaped keys and nulls credential-shaped
- * strings so the literal never reaches stdout. Successful tool result
- * bodies are not walked: those are repo content the owner asked to read.
+ * this walk drops listed-pattern keys and nulls listed-pattern strings
+ * on error objects and isError tool results before they are written.
+ *
+ * Successful tool result bodies are not walked: those are repo content
+ * the owner asked to read (brief, map, check log, architecture report).
+ * A thrown stack and an interpolated cwd are not repo content. Those
+ * paths return isError:true so this gate walks them, and they no longer
+ * interpolate cwd, e.message, or error.stack onto the protocol channel.
+ * Shapes the catalogue does not list (for example 64-hex `0x…`) are not
+ * withheld here. index.mjs `Unknown flag: --${f}` is the same class on
+ * the CLI door; that file is out of scope this lane and is disclosed,
+ * not fixed.
  */
 function scrubRpcOutbound(obj) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
