@@ -21051,9 +21051,46 @@ scenario("approve: check and gate output on a clean fixture stay GO / PASS", () 
 // ---------------------------------------------------------------------------
 // 65. L1 approval agent stage B — MCP tool approve_action (TEST_FILTER=approve_action)
 // ---------------------------------------------------------------------------
-function runMcpJsonRpc(cwd, messages) {
+/** Samples assembled so this file does not plant contiguous scan hits. */
+function catalogueProtocolShapes() {
+  const a20 = "A".repeat(20);
+  return [
+    { id: "anthropic", sample: "sk-ant-" + "a1" + "A".repeat(18) },
+    { id: "openai", sample: "sk-" + "F".repeat(20) },
+    { id: "stripe-live", sample: "sk_live_" + a20 },
+    { id: "stripe-live-prefix", sample: "xsk_live_" + a20 },
+    { id: "stripe-restricted", sample: "rk_live_" + a20 },
+    { id: "aws", sample: "AKIA" + "C".repeat(16) },
+    { id: "github-pat", sample: "ghp_" + "B".repeat(36) },
+    { id: "github-fine", sample: "github_pat_" + "D".repeat(22) },
+    { id: "google-oauth", sample: "GOCSPX-" + "E".repeat(20) },
+    { id: "slack", sample: "xoxb-" + "1".repeat(10) },
+    { id: "sendgrid", sample: "SG." + "Aa1Bb2Cc3Dd4Ee5F" + "." + "Gg6Hh7Ii8Jj9Kk0L" },
+    { id: "stripe-webhook", sample: "whsec_" + a20 },
+    { id: "vercel-token", sample: "vcp_" + "a1b2c3d4e5f6g7h8i9j0" },
+    { id: "kv-rest", sample: "KV_REST_API_" + "TOKEN" + "=" + "syn_kv_rest_token_value_001" },
+    { id: "getadvantage-key", sample: "adv_live_" + "a".repeat(16) },
+    { id: "npm-token", sample: "npm_" + "D".repeat(36) },
+    {
+      id: "jwt",
+      sample: "eyJ" + "hbGciOiJub25lIn0" + "." + "eyJzdWIiOiJ4In0" + "." + "signaturepartxx",
+    },
+    { id: "db-url-password", sample: "postgres://u:" + "password12" + "@db.example.com" },
+    { id: "bearer", sample: "Bearer " + "Aa1" + "bbbbbbbbbbbbbbbbb" },
+    {
+      id: "private-key",
+      sample: "-----BEGIN " + "PRIVATE KEY" + "-----\nMIIB\n-----END " + "PRIVATE KEY" + "-----",
+    },
+    {
+      id: "private-key-incomplete",
+      sample: "-----BEGIN " + "RSA " + "PRIVATE KEY" + "-----",
+    },
+  ];
+}
+
+function runMcpJsonRpc(cwd, messages, indexPath = INDEX) {
   const input = messages.map((m) => JSON.stringify(m)).join("\n") + "\n";
-  const r = spawnSync(process.execPath, [INDEX, "mcp"], {
+  const r = spawnSync(process.execPath, [indexPath, "mcp"], {
     cwd,
     input,
     encoding: "utf8",
@@ -23594,6 +23631,154 @@ scenario("mcp: protocol errors omit a credential-shaped name from stdout", () =>
     assert.match(src, /function writeMessage/);
     assert.match(src, /JSON\.stringify\(scrubRpcOutbound\(obj\)\)/);
     assert.match(src, /omitCredentialShaped\(obj\.error\)/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: protocol errors omit every SECRET_PATTERNS shape from stdout", async () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mcp-cat-cred");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "mcp-cat-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const shapes = catalogueProtocolShapes();
+    const messages = [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }];
+    for (let i = 0; i < shapes.length; i++) {
+      const sample = shapes[i].sample;
+      messages.push({ jsonrpc: "2.0", id: 100 + i, method: "tools/call", params: { name: sample, arguments: {} } });
+      messages.push({ jsonrpc: "2.0", id: 200 + i, method: sample, params: {} });
+    }
+    const npmSample = shapes.find((s) => s.id === "npm-token").sample;
+    messages.push({ jsonrpc: "2.0", id: 300, method: "tools/call", params: { name: npmSample, arguments: {} } });
+    messages.push({ jsonrpc: "2.0", id: 301, method: "tools/call", params: { name: npmSample, arguments: {} } });
+    messages.push({ jsonrpc: "2.0", id: 400, method: "tools/call", params: { name: "not-a-tool", arguments: {} } });
+    messages.push({
+      jsonrpc: "2.0",
+      id: 401,
+      method: "tools/call",
+      params: { name: "approve_action", arguments: { bogus: "x" } },
+    });
+    messages.push({ jsonrpc: "2.0", id: 402, method: "not-a-method", params: {} });
+    const mcp = runMcpJsonRpc(repo, messages);
+    assert.equal(mcp.status, 0, mcp.stderr);
+    for (const { id, sample } of shapes) {
+      assert.ok(
+        !mcp.stdout.includes(sample),
+        `${id} leaked on protocol stdout:\n${mcp.stdout}`,
+      );
+      assert.ok(
+        !mcp.stderr.includes(sample),
+        `${id} leaked on protocol stderr:\n${mcp.stderr}`,
+      );
+    }
+    const unknownTool = mcpReply(mcp.replies, 400);
+    assert.ok(unknownTool.error, JSON.stringify(unknownTool));
+    assert.match(unknownTool.error.message, /Unknown tool: not-a-tool/);
+    const bogusProp = mcpReply(mcp.replies, 401);
+    assert.ok(bogusProp.error, JSON.stringify(bogusProp));
+    assert.match(String(bogusProp.error.message), /bogus/);
+    const unknownMethod = mcpReply(mcp.replies, 402);
+    assert.ok(unknownMethod.error, JSON.stringify(unknownMethod));
+    assert.match(unknownMethod.error.message, /Method not found: not-a-method/);
+    const firstNpm = mcpReply(mcp.replies, 300);
+    const secondNpm = mcpReply(mcp.replies, 301);
+    assert.ok(firstNpm.error, JSON.stringify(firstNpm));
+    assert.ok(secondNpm.error, JSON.stringify(secondNpm));
+    assert.ok(!JSON.stringify(firstNpm).includes(npmSample));
+    assert.ok(!JSON.stringify(secondNpm).includes(npmSample));
+    const { omitCredentialShaped } = await import(
+      pathToFileURL(path.join(__dirname, "..", "approve.mjs")).href + `?cat=${Date.now()}`
+    );
+    const twice = "npm_" + "E".repeat(36);
+    const first = omitCredentialShaped(twice);
+    const second = omitCredentialShaped(twice);
+    assert.equal(first, null, "first scrub of the same shape must refuse");
+    assert.equal(second, null, "second scrub of the same shape must refuse (lastIndex reset)");
+    const approveSrc = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(approveSrc, /import \{ SECRET_PATTERNS \} from "\.\/checks\.mjs"/);
+    assert.match(approveSrc, /for \(const p of SECRET_PATTERNS\)/);
+    assert.match(approveSrc, /p\.re\.lastIndex = 0/);
+    assert.match(approveSrc, /function shapeRegex/);
+    assert.doesNotMatch(approveSrc, /const CREDENTIAL_FIELD_RE/);
+    const { SECRET_PATTERNS } = await import(
+      pathToFileURL(path.join(__dirname, "..", "checks.mjs")).href + `?cat=${Date.now()}`
+    );
+    const covered = new Set(shapes.map((s) => s.id).filter((id) => id !== "stripe-live-prefix"));
+    for (const p of SECRET_PATTERNS) {
+      assert.ok(covered.has(p.id), `table missing catalogue id ${p.id}`);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: swapping the scrub back to the 8-pattern list restores leaks", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mcp-cat-mut");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "mcp-cat-mut", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const scratch = path.join(base, "scratch-product");
+    writePackScratch(scratch, { includeTests: false });
+    const approvePath = path.join(scratch, "approve.mjs");
+    const original = readFileSync(approvePath, "utf8");
+    const eightFn = `function fieldLooksLikeCredential(value) {
+  const s = asString(value);
+  if (!s) return false;
+  const CREDENTIAL_FIELD_RE = [
+    /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/,
+    /(?<![A-Za-z0-9])sk_live_[0-9A-Za-z]{16,}/,
+    /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9\\-_]{16,}/,
+    /(?<![A-Za-z0-9])sk-proj-[A-Za-z0-9\\-_]{16,}/,
+    /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}/,
+    /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}(?![A-Za-z0-9])/,
+    /(?<![A-Za-z0-9])adv_live_[a-z0-9]{16,}(?![A-Za-z0-9])/,
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  ];
+  for (const re of CREDENTIAL_FIELD_RE) {
+    re.lastIndex = 0;
+    if (re.test(s)) return true;
+  }
+  return false;
+}`;
+    const mutated = original.replace(
+      /function fieldLooksLikeCredential\(value\) \{[\s\S]*?\n\}/,
+      eightFn,
+    );
+    assert.ok(mutated !== original, "mutation must change approve.mjs");
+    assert.ok(mutated.includes("CREDENTIAL_FIELD_RE"), "mutation must restore the 8-pattern list");
+    assert.ok(!/for \(const p of SECRET_PATTERNS\)/.test(mutated), "mutation must drop the catalogue walk");
+    writeFileSync(approvePath, mutated);
+    const npmSample = "npm_" + "D".repeat(36);
+    const openaiSample = "sk-" + "F".repeat(20);
+    const prefixSample = "xsk_live_" + "B".repeat(20);
+    const stripeSample = "sk_live_" + "A".repeat(20);
+    const mcp = runMcpJsonRpc(
+      repo,
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: npmSample, arguments: {} } },
+        { jsonrpc: "2.0", id: 3, method: npmSample, params: {} },
+        { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: openaiSample, arguments: {} } },
+        { jsonrpc: "2.0", id: 5, method: openaiSample, params: {} },
+        { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: prefixSample, arguments: {} } },
+        { jsonrpc: "2.0", id: 7, method: prefixSample, params: {} },
+        { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: stripeSample, arguments: {} } },
+        { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "not-a-tool", arguments: {} } },
+      ],
+      path.join(scratch, "index.mjs"),
+    );
+    assert.equal(mcp.status, 0, mcp.stderr);
+    assert.ok(mcp.stdout.includes(npmSample), `8-pattern mutant must leak npm token:\n${mcp.stdout}`);
+    assert.ok(mcp.stdout.includes(openaiSample), `8-pattern mutant must leak openai shape:\n${mcp.stdout}`);
+    assert.ok(mcp.stdout.includes(prefixSample), `8-pattern mutant must leak prefixed stripe:\n${mcp.stdout}`);
+    assert.ok(!mcp.stdout.includes(stripeSample), `plain stripe must still be in the 8-list:\n${mcp.stdout}`);
+    const benign = mcpReply(mcp.replies, 9);
+    assert.match(benign.error.message, /Unknown tool: not-a-tool/);
+    assert.equal(readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8").includes("CREDENTIAL_FIELD_RE"), false);
   } finally {
     cleanup(base);
   }

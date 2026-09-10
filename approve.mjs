@@ -51,6 +51,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { pathMatchesGlob, isPolicyPathInIndex } from "./policy.mjs";
+import { SECRET_PATTERNS } from "./checks.mjs";
 import {
   binName,
   c,
@@ -90,23 +91,19 @@ const PROOF_CRED_WALK_MAX_DEPTH = 16;
 const PROOF_RECORD_VERSIONS = new Set([1, 2]);
 const OUTCOMES = new Set(["allow", "block", "escalate"]);
 const ID_MAX = 80;
-// Conservative shapes only — refuse these in cleartext proof fields rather
-// than persist them. Do not import scan.mjs; this door must not widen the
-// secret catalogue. Anchors are alnum lookarounds, not `\b`: `_` is a JS
-// word char, so `\b` misses ordinary `PREFIX_sk_live_…` names (the 0.14.2
-// scanner defect). Letter/digit adjacency (`xAKIA…`) is a disclosed miss,
-// same as the scanner. sk-proj and adv_live are shapes the scanner already
-// recognizes; they are not a new catalogue.
-const CREDENTIAL_FIELD_RE = [
-  /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/,
-  /(?<![A-Za-z0-9])sk_live_[0-9A-Za-z]{16,}/,
-  /(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9\-_]{16,}/,
-  /(?<![A-Za-z0-9])sk-proj-[A-Za-z0-9\-_]{16,}/,
-  /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}/,
-  /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}(?![A-Za-z0-9])/,
-  /(?<![A-Za-z0-9])adv_live_[a-z0-9]{16,}(?![A-Za-z0-9])/,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-];
+// Field/name scrub keys off the shipped SECRET_PATTERNS catalogue
+// (scan.mjs, re-exported by checks.mjs). A private 8-pattern list here
+// was the two-catalogue defect: `check` blocked an npm token while MCP
+// stdout printed it. Do not copy patterns; import the catalogue.
+//
+// Catalogue regexes stay untouched (alnum lookaround anchors, /g,
+// validate). This matcher clones each pattern, resets lastIndex on both
+// the original and the clone (a /g regex carries lastIndex across calls),
+// and drops only the leading alnum-lookbehind so a field that is the
+// shape with a one-char prefix (`xsk_live_…`) is refused because it is
+// the shape, not because a lookbehind happened to fire. Lookahead stays.
+// validate() is not applied: this is redaction, same stance as
+// feedback.mjs, so a digit-less `sk-` still cannot ride an error channel.
 
 function own(obj, key) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return undefined;
@@ -126,12 +123,22 @@ function nonempty(v) {
   return s.length > 0 ? s : "";
 }
 
+function shapeRegex(p) {
+  const source = p.re.source.replace(/^\(\?<!\[A-Za-z0-9\]\)/, "");
+  return new RegExp(source, p.re.flags);
+}
+
 function fieldLooksLikeCredential(value) {
   const s = asString(value);
   if (!s) return false;
-  for (const re of CREDENTIAL_FIELD_RE) {
+  for (const p of SECRET_PATTERNS) {
+    p.re.lastIndex = 0;
+    const re = shapeRegex(p);
     re.lastIndex = 0;
-    if (re.test(s)) return true;
+    const hit = re.test(s);
+    re.lastIndex = 0;
+    p.re.lastIndex = 0;
+    if (hit) return true;
   }
   return false;
 }
