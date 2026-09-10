@@ -19955,7 +19955,7 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    451,
+    452,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
@@ -19963,7 +19963,8 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   // added 12 (408); stage B repair added HB8 + policy-read + proof-write +
   // map-cwd-local (412); r2 added policy-read I/O (413); L2 proof export
   // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449);
-  // L2 repair-4 added --json credential omit + ledger hardlink (451).
+  // L2 repair-4 P1 added --json credential omit + ledger hardlink (451);
+  // L2 repair-4 P2 added earlier-line append refuse (452).
   // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
@@ -23015,10 +23016,47 @@ scenario("proof: source.sha256 matches the bytes that were parsed", async () => 
     const result = exportProofRecord(repo, "dec-sha", { now: "2026-09-09T10:00:00.000Z" });
     assert.equal(result.ok, true, result.error);
     assert.equal(result.packet.source.sha256, expected);
+    const abs = path.join(repo, ".getadvantage", "approvals", "dec-sha.jsonl");
+    const edited = JSON.parse(body);
+    edited.action = "db.delete";
+    writeFileSync(abs, JSON.stringify(edited) + "\n");
+    const reread = createHash("sha256").update(readFileSync(abs)).digest("hex");
+    assert.notEqual(reread, expected, "changing-source fixture must actually change the file hash");
+    assert.equal(result.packet.source.sha256, expected, "export hash is the parsed bytes, not a later reread");
+    assert.equal(result.packet.records[0].action, "db.write");
     const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
     assert.match(src, /iterateJsonlLines\(abs, fileHash\)/);
     assert.match(src, /const sourceSha256 = fileHash\.digest\("hex"\)/);
     assert.doesNotMatch(src, /sourceSha256[\s\S]{0,120}readFileSync\(abs\)/);
+    assert.doesNotMatch(src, /sha256:\s*createHash\([\s\S]{0,120}readFileSync\(abs\)/);
+    assert.doesNotMatch(src, /source\.sha256[\s\S]{0,200}readFileSync\(abs\)/);
+
+    const original = src;
+    const utilHref = pathToFileURL(path.join(__dirname, "..", "util.mjs")).href;
+    const policyHref = pathToFileURL(path.join(__dirname, "..", "policy.mjs")).href;
+    const neutered = original
+      .replaceAll('from "./util.mjs"', `from ${JSON.stringify(utilHref)}`)
+      .replaceAll('from "./policy.mjs"', `from ${JSON.stringify(policyHref)}`)
+      .replace(
+        'const sourceSha256 = fileHash.digest("hex");',
+        'writeFileSync(abs, readFileSync(abs) + "TAMPER\\n"); const sourceSha256 = createHash("sha256").update(readFileSync(abs)).digest("hex");',
+      );
+    assert.ok(neutered !== original, "mutation must change the source");
+    const scratchDir = path.join(base, "scratch-approve");
+    mkdirSync(scratchDir, { recursive: true });
+    writeFileSync(path.join(scratchDir, "approve.mjs"), neutered);
+    const mut = await import(pathToFileURL(path.join(scratchDir, "approve.mjs")).href + `?mut=${Date.now()}`);
+    writeProofJsonl(repo, "dec-sha-mut", [v1ProofLine({ id: "dec-sha-mut" })]);
+    const bodyMut = JSON.stringify(v1ProofLine({ id: "dec-sha-mut" })) + "\n";
+    const expectedMut = createHash("sha256").update(bodyMut, "utf8").digest("hex");
+    const mutResult = mut.exportProofRecord(repo, "dec-sha-mut", { now: "2026-09-09T10:00:00.000Z" });
+    assert.equal(mutResult.ok, true, mutResult.error);
+    assert.notEqual(
+      mutResult.packet.source.sha256,
+      expectedMut,
+      "reread-after-parse mutant must not match the parsed bytes",
+    );
+    assert.equal(readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8"), original);
   } finally {
     cleanup(base);
   }
@@ -23419,6 +23457,43 @@ scenario("proof: multiline model stays on one first-screen line", () => {
     assert.equal(exp.code, 0, exp.stderr);
     assert.ok(stdoutLines(exp.stdout) <= 12, `first screen lines: ${stdoutLines(exp.stdout)}\n${exp.stdout}`);
     assert.ok(/Model: m extra/.test(exp.stdout), exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: append refuses when an earlier line was tampered and the tail still matches", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p2-tail");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p2-tail", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const first = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.equal(first.code, 0, first.stderr);
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const before = readFileSync(abs, "utf8");
+    const lines = before.split(/\n/).filter((l) => l.length > 0);
+    assert.equal(lines.length, 2, before);
+    const firstRec = JSON.parse(lines[0]);
+    firstRec.action = "db.delete";
+    writeFileSync(abs, JSON.stringify(firstRec) + "\n" + lines[1] + "\n");
+    const second = run(["approve", "--resolve", id, "--allow", "--by", "Blair"], repo);
+    assert.equal(second.code, 1, second.stderr);
+    assert.ok(/write checkpoint|does not match|not allowed/.test(second.stderr), second.stderr);
+    const after = readFileSync(abs, "utf8");
+    assert.ok(!/Blair/.test(after), after);
+    assert.equal(after.split(/\n/).filter((l) => l.length > 0).length, 2);
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /function assertLedgerHistory/);
+    assert.match(src, /appendLedgerLine\(cwd, abs, buf, fileExists\);/);
+    assert.match(src, /try \{\s*appendLedgerLine/s);
   } finally {
     cleanup(base);
   }

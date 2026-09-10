@@ -639,9 +639,37 @@ function exclusiveWriteFile(cwd, abs, data) {
     throw e;
   }
   try {
-    writeSync(fd, buf, 0, buf.length, 0);
+    let offset = 0;
+    while (offset < buf.length) {
+      const n = writeSync(fd, buf, offset, buf.length - offset, offset);
+      if (!n) {
+        const err = new Error("The output file could not be fully written.");
+        err.code = "PROOF_SHORT_WRITE";
+        throw err;
+      }
+      offset += n;
+    }
+  } catch (e) {
+    try {
+      closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+    fd = null;
+    try {
+      unlinkSync(abs);
+    } catch {
+      /* ignore */
+    }
+    throw e;
   } finally {
-    closeSync(fd);
+    if (fd != null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 
@@ -794,12 +822,14 @@ function writeTipFile(cwd, abs, tip) {
   assertSafeWriteTarget(cwd, p);
   exclusiveWriteFile(cwd, tmp, JSON.stringify(tip) + "\n");
   try {
-    const destSt = lstatOrNull(p);
-    if (destSt) {
-      if (destSt.isSymbolicLink() || destSt.isDirectory()) throw escapedApprovalsError();
-      unlinkSync(p);
+    const bak = publishReplace(cwd, tmp, p);
+    if (bak) {
+      try {
+        unlinkSync(bak);
+      } catch {
+        /* ignore */
+      }
     }
-    renameSync(tmp, p);
   } catch (e) {
     try {
       unlinkSync(tmp);
@@ -1008,6 +1038,59 @@ function lastLineHasPrevDigest(prevLine) {
   }
 }
 
+/**
+ * Walk every ledger line with the same prevDigest rules as export. A matching
+ * tail checkpoint is not enough: tampered earlier context must not be copied
+ * into a successful append.
+ */
+function assertLedgerHistory(abs) {
+  let prev = PROOF_GENESIS_DIGEST;
+  let chainStarted = false;
+  for (const { rawBytes, truncated, tooLarge } of iterateJsonlLines(abs)) {
+    if (tooLarge || truncated || !rawBytes) {
+      throw checkpointError(
+        "The approval record does not match its write checkpoint, so this action was not allowed.",
+      );
+    }
+    const text = decodeUtf8Line(rawBytes);
+    if (!text) {
+      throw checkpointError(
+        "The approval record does not match its write checkpoint, so this action was not allowed.",
+      );
+    }
+    let rec;
+    try {
+      rec = JSON.parse(text);
+    } catch {
+      throw checkpointError(
+        "The approval record does not match its write checkpoint, so this action was not allowed.",
+      );
+    }
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) {
+      throw checkpointError(
+        "The approval record does not match its write checkpoint, so this action was not allowed.",
+      );
+    }
+    const storedPrev = own(rec, "prevDigest");
+    const wellFormed = isWellFormedPrevDigest(storedPrev);
+    if (chainStarted) {
+      if (!wellFormed || storedPrev !== prev) {
+        throw checkpointError(
+          "The approval record does not match its write checkpoint, so this action was not allowed.",
+        );
+      }
+    } else if (storedPrev != null && storedPrev !== "") {
+      if (!wellFormed || storedPrev !== prev) {
+        throw checkpointError(
+          "The approval record does not match its write checkpoint, so this action was not allowed.",
+        );
+      }
+      chainStarted = true;
+    }
+    prev = jsonlLineDigest(rawBytes);
+  }
+}
+
 export function appendProofRecord(cwd, record) {
   const id = sanitizeRecordId(record?.id);
   if (fieldLooksLikeCredential(id) || fieldLooksLikeCredential(asString(record?.id))) {
@@ -1057,6 +1140,7 @@ export function appendProofRecord(cwd, record) {
     const actualCount = fileExists ? countJsonlLines(abs) : 0;
     const actualTail = prevLine && prevLine.bytes ? jsonlLineDigest(prevLine.bytes) : null;
     const chained = lastLineHasPrevDigest(prevLine);
+    if (fileExists) assertLedgerHistory(abs);
 
     if (fileExists) {
       if (tip && !isTipStructurallyValid(tip)) {
@@ -1103,8 +1187,8 @@ export function appendProofRecord(cwd, record) {
     const lineCount = actualCount + 1;
     const prevSize = fileExists ? st.size : 0;
     const created = !fileExists;
-    appendLedgerLine(cwd, abs, buf, fileExists);
     try {
+      appendLedgerLine(cwd, abs, buf, fileExists);
       writeTipFile(cwd, abs, {
         v: 1,
         lineCount,
@@ -1375,6 +1459,13 @@ function publishReplace(cwd, tmp, dest) {
   return null;
 }
 
+function restoreFromBakIfPresent(dest) {
+  const bak = `${dest}.bak`;
+  const bakSt = lstatOrNull(bak);
+  if (!bakSt || bakSt.isDirectory() || bakSt.isSymbolicLink()) return true;
+  return restoreFromBak(dest);
+}
+
 function restoreFromBak(dest) {
   const bak = `${dest}.bak`;
   const bakSt = lstatOrNull(bak);
@@ -1442,15 +1533,22 @@ function writeProofOutputs(cwd, id, packet, html) {
     } catch {
       /* ignore */
     }
-    let jsonRestored = true;
-    let htmlRestored = true;
-    if (jsonPublished) jsonRestored = restoreFromBak(jsonAbs);
-    if (htmlPublished) htmlRestored = restoreFromBak(htmlAbs);
+    const jsonRestored = jsonPublished
+      ? restoreFromBak(jsonAbs)
+      : restoreFromBakIfPresent(jsonAbs);
+    const htmlRestored = htmlPublished
+      ? restoreFromBak(htmlAbs)
+      : restoreFromBakIfPresent(htmlAbs);
+    const jsonPresent = !!lstatOrNull(jsonAbs);
+    const htmlPresent = !!lstatOrNull(htmlAbs);
+    const jsonBakSt = lstatOrNull(`${jsonAbs}.bak`);
+    const htmlBakSt = lstatOrNull(`${htmlAbs}.bak`);
+    const leftoverBak = (st) => !!(st && !st.isDirectory() && !st.isSymbolicLink());
     let published = "none";
-    if (jsonPublished && htmlPublished) {
-      published = jsonRestored && htmlRestored ? "none" : "partial";
-    } else if (jsonPublished) {
-      published = jsonRestored ? "none" : "partial";
+    if (jsonPublished || htmlPublished) {
+      published = jsonRestored && htmlRestored && jsonPresent && htmlPresent ? "none" : "partial";
+    } else if (leftoverBak(jsonBakSt) || leftoverBak(htmlBakSt) || jsonPresent !== htmlPresent) {
+      published = "partial";
     }
     const err = e instanceof Error ? e : new Error(String(e));
     err.published = published;
