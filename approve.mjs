@@ -33,7 +33,6 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import {
-  appendFileSync,
   closeSync,
   existsSync,
   fstatSync,
@@ -142,6 +141,30 @@ function diagnosticFieldName(key) {
   const s = typeof key === "string" ? key : "";
   if (!/^[A-Za-z0-9._-]{1,80}$/.test(s) || fieldLooksLikeCredential(s)) return "record";
   return s;
+}
+
+/**
+ * Machine-readable error bodies must not reintroduce a value the human path
+ * already refused. Walks the document and replaces credential-shaped strings
+ * with null. Used by CLI `--json` error documents and MCP JSON result blocks.
+ */
+export function omitCredentialShaped(value) {
+  if (typeof value === "string") return fieldLooksLikeCredential(value) ? null : value;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return fieldLooksLikeCredential(String(value)) ? null : value;
+  }
+  if (Array.isArray(value)) return value.map(omitCredentialShaped);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value)) out[key] = omitCredentialShaped(value[key]);
+    return out;
+  }
+  return value;
+}
+
+function emitErrorJson(emitJson, doc) {
+  if (typeof emitJson !== "function") return;
+  emitJson(omitCredentialShaped(doc));
 }
 
 /**
@@ -538,6 +561,19 @@ function escapedApprovalsError() {
   return new Error("approval record path escaped .getadvantage/approvals/");
 }
 
+function sharedInodeError() {
+  const err = new Error(
+    "The approval record shares storage with another name, so this action was not allowed.",
+  );
+  err.code = "PROOF_SHARED_INODE";
+  return err;
+}
+
+function assertUnsharedInode(st) {
+  if (!st) return;
+  if (typeof st.nlink === "number" && st.nlink > 1) throw sharedInodeError();
+}
+
 function checkpointError(message) {
   const err = new Error(message);
   err.code = "PROOF_CHECKPOINT";
@@ -910,12 +946,16 @@ function ledgerStat(abs) {
 
 function rollbackLedgerToSize(abs, prevSize, created) {
   try {
+    const st = lstatOrNull(abs);
+    if (st && typeof st.nlink === "number" && st.nlink > 1) return false;
     if (created || prevSize <= 0) {
       unlinkSync(abs);
       return true;
     }
     const fd = openSync(abs, "r+");
     try {
+      const fst = fstatSync(fd);
+      if (typeof fst.nlink === "number" && fst.nlink > 1) return false;
       ftruncateSync(fd, prevSize);
     } finally {
       closeSync(fd);
@@ -923,6 +963,36 @@ function rollbackLedgerToSize(abs, prevSize, created) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Write one ledger line. New files are exclusive-create (`wx`). Existing
+ * files are opened, fstat'd, and refused when nlink > 1 so a same-volume
+ * hardlink cannot smuggle the append onto an outside name.
+ */
+function appendLedgerLine(cwd, abs, buf, fileExists) {
+  if (!fileExists) {
+    exclusiveWriteFile(cwd, abs, buf);
+    return;
+  }
+  const fd = openSync(abs, "r+");
+  try {
+    const fst = fstatSync(fd);
+    if (typeof fst.nlink === "number" && fst.nlink > 1) throw sharedInodeError();
+    let offset = 0;
+    const start = fst.size;
+    while (offset < buf.length) {
+      const n = writeSync(fd, buf, offset, buf.length - offset, start + offset);
+      if (!n) {
+        const err = new Error("The approval record could not be fully written.");
+        err.code = "PROOF_SHORT_WRITE";
+        throw err;
+      }
+      offset += n;
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -961,6 +1031,7 @@ export function appendProofRecord(cwd, record) {
       err.code = "PROOF_OUTPUT_IS_DIR";
       throw err;
     }
+    assertUnsharedInode(st);
     const fileExists = !!(st && st.isFile());
     const tip = readTipFile(abs);
     const tipPresent = existsSync(tipAbs);
@@ -1032,7 +1103,7 @@ export function appendProofRecord(cwd, record) {
     const lineCount = actualCount + 1;
     const prevSize = fileExists ? st.size : 0;
     const created = !fileExists;
-    appendFileSync(abs, buf);
+    appendLedgerLine(cwd, abs, buf, fileExists);
     try {
       writeTipFile(cwd, abs, {
         v: 1,
@@ -2106,17 +2177,23 @@ export function runProof(opts = {}) {
 
     const result = exportProofRecord(repoCwd, idArg, { now });
     if (!result.ok) {
-      if (emitJson) {
-        emitJson({
-          command: "proof",
-          action: "export",
-          outcome: null,
-          exitCode: 1,
-          id: nonempty(idArg) ? sanitizeRecordId(idArg) : null,
-          reason: result.error,
-          generatedAt: now,
-        });
+      const errorDoc = {
+        command: "proof",
+        action: "export",
+        outcome: null,
+        exitCode: 1,
+        reason: result.error,
+        generatedAt: now,
+      };
+      const safeId = nonempty(idArg) ? sanitizeRecordId(idArg) : null;
+      if (
+        safeId &&
+        !fieldLooksLikeCredential(idArg) &&
+        !fieldLooksLikeCredential(safeId)
+      ) {
+        errorDoc.id = safeId;
       }
+      emitErrorJson(emitJson, errorDoc);
       return proofFail(result.error, result.next, result.published);
     }
 
@@ -2133,6 +2210,14 @@ export function runProof(opts = {}) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(c.red(`✗ Could not finish the proof export (${msg}).`));
     console.error("Nothing was written.");
+    emitErrorJson(typeof opts.emitJson === "function" ? opts.emitJson : null, {
+      command: "proof",
+      action: "export",
+      outcome: null,
+      exitCode: 1,
+      reason: msg,
+      generatedAt: opts.now || new Date().toISOString(),
+    });
     return 1;
   }
 }
@@ -2183,15 +2268,13 @@ export function runApprove(opts = {}) {
     const gitCwd = classifyGitCwd(invocationCwd);
     if (gitCwd.kind !== "worktree") {
       printNonGit();
-      if (emitJson) {
-        emitJson({
-          command: "approve",
-          outcome: null,
-          exitCode: 1,
-          reason: "not a git worktree",
-          generatedAt: now,
-        });
-      }
+      emitErrorJson(emitJson, {
+        command: "approve",
+        outcome: null,
+        exitCode: 1,
+        reason: "not a git worktree",
+        generatedAt: now,
+      });
       return 1;
     }
     const repoCwd = gitCwd.root;
@@ -2208,6 +2291,15 @@ export function runApprove(opts = {}) {
         return usageError("A named person is required to resolve an escalation (--by <name>).");
       }
       if (credentialProofField({}, { by: nonempty(by) })) {
+        emitErrorJson(emitJson, {
+          command: "approve",
+          action: "resolve",
+          outcome: null,
+          exitCode: 1,
+          reason:
+            "The --by value looks like a secret, so it was not stored and this action was not allowed. Pass a person's name, not a key.",
+          generatedAt: now,
+        });
         return usageError(
           "The --by value looks like a secret, so it was not stored and this action was not allowed. Pass a person's name, not a key.",
         );
@@ -2219,6 +2311,15 @@ export function runApprove(opts = {}) {
       }
       const id = sanitizeRecordId(idRaw);
       if (fieldLooksLikeCredential(idRaw) || fieldLooksLikeCredential(id)) {
+        emitErrorJson(emitJson, {
+          command: "approve",
+          action: "resolve",
+          outcome: null,
+          exitCode: 1,
+          reason:
+            "The id value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.",
+          generatedAt: now,
+        });
         return usageError(
           "The id value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.",
         );
@@ -2284,6 +2385,13 @@ export function runApprove(opts = {}) {
     }
     const credField = credentialProofField(descriptor);
     if (credField) {
+      emitErrorJson(emitJson, {
+        command: "approve",
+        outcome: null,
+        exitCode: 1,
+        reason: `The ${diagnosticFieldName(credField)} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
+        generatedAt: now,
+      });
       return usageError(
         `The ${credField} value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.`,
       );
@@ -2293,15 +2401,13 @@ export function runApprove(opts = {}) {
     if (!loaded.ok) {
       console.error(c.red(`✗ ${loaded.error}`));
       console.error("The action was not allowed.");
-      if (emitJson) {
-        emitJson({
-          command: "approve",
-          outcome: null,
-          exitCode: 1,
-          reason: loaded.error,
-          generatedAt: now,
-        });
-      }
+      emitErrorJson(emitJson, {
+        command: "approve",
+        outcome: null,
+        exitCode: 1,
+        reason: loaded.error,
+        generatedAt: now,
+      });
       return 1;
     }
 
@@ -2329,13 +2435,29 @@ export function runApprove(opts = {}) {
     return EXIT[decision.outcome] ?? 1;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const catchJson = typeof opts.emitJson === "function" ? opts.emitJson : null;
+    const catchNow = opts.now || new Date().toISOString();
     if (e && e.code === "PROOF_PARTIAL_WRITE") {
       console.error(c.red(`✗ ${msg}`));
       console.error("The ledger line was written. Treat this record as incomplete.");
+      emitErrorJson(catchJson, {
+        command: "approve",
+        outcome: null,
+        exitCode: 1,
+        reason: msg,
+        generatedAt: catchNow,
+      });
       return 1;
     }
     console.error(c.red(`✗ Could not finish the approval decision (${msg}).`));
     console.error("The action was not allowed.");
+    emitErrorJson(catchJson, {
+      command: "approve",
+      outcome: null,
+      exitCode: 1,
+      reason: msg,
+      generatedAt: catchNow,
+    });
     return 1;
   }
 }

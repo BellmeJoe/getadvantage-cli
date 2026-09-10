@@ -47,6 +47,7 @@ import {
   EXIT,
   MATCH_KEYS,
   credentialProofField,
+  omitCredentialShaped,
 } from "./approve.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -342,13 +343,15 @@ function makeDecisionId(now, nonce) {
 }
 
 function machineBlock(fields) {
-  return JSON.stringify({
-    decision: fields.decision,
-    id: fields.id,
-    reason: fields.reason,
-    escalateTo: fields.escalateTo ?? null,
-    exitCode: fields.exitCode,
-  });
+  return JSON.stringify(
+    omitCredentialShaped({
+      decision: fields.decision,
+      id: fields.id,
+      reason: fields.reason,
+      escalateTo: fields.escalateTo ?? null,
+      exitCode: fields.exitCode,
+    }),
+  );
 }
 
 function noteFromWarning(w) {
@@ -416,12 +419,15 @@ function formatApproveActionText({ decision, id, warnings }) {
 }
 
 function toolFailureText(reason) {
+  const safe = omitCredentialShaped({ ok: false, error: reason, id: null, exitCode: 1 });
+  const why =
+    typeof safe.error === "string" && safe.error ? safe.error : "The action was not allowed.";
   const lines = [
     "The action was not allowed.",
-    `Why: ${reason}`,
+    `Why: ${why}`,
     "Nothing ran. This is not a recorded decision.",
     "",
-    JSON.stringify({ ok: false, error: reason, id: null, exitCode: 1 }),
+    JSON.stringify(safe),
   ];
   return lines.join("\n");
 }
@@ -485,14 +491,17 @@ function runApproveActionMcp(cwd, args) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (e && e.code === "PROOF_PARTIAL_WRITE") {
+      const safe = omitCredentialShaped({ ok: false, error: msg, id, exitCode: 1 });
+      const why =
+        typeof safe.error === "string" && safe.error ? safe.error : "The action was not completed.";
       return {
         isError: true,
         text: [
           "The action was not completed.",
-          `Why: ${msg}`,
+          `Why: ${why}`,
           "A ledger line was written. This is an incomplete recorded decision.",
           "",
-          JSON.stringify({ ok: false, error: msg, id, exitCode: 1 }),
+          JSON.stringify(safe),
         ].join("\n"),
       };
     }
@@ -770,8 +779,11 @@ async function handleToolsCall(id, params) {
     return rpcResult(id, { content: [{ type: "text", text: String(text) }] });
   } catch (e) {
     logErr(`tool ${name} failed: ${e.stack || e}`);
+    const raw = e && e.message ? e.message : String(e);
+    const safeMsg = omitCredentialShaped(raw);
+    const shown = typeof safeMsg === "string" && safeMsg ? safeMsg : "the action was not allowed";
     return rpcResult(id, {
-      content: [{ type: "text", text: `Tool "${name}" failed: ${e.message || e}` }],
+      content: [{ type: "text", text: `Tool "${name}" failed: ${shown}` }],
       isError: true,
     });
   }

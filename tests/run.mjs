@@ -218,7 +218,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -19955,14 +19955,15 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    449,
+    451,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
   // the suite. 379 was the pre-L1 base; stage A added 17 (396); stage B
   // added 12 (408); stage B repair added HB8 + policy-read + proof-write +
   // map-cwd-local (412); r2 added policy-read I/O (413); L2 proof export
-  // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449).
+  // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449);
+  // L2 repair-4 added --json credential omit + ledger hardlink (451).
   // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
@@ -23418,6 +23419,97 @@ scenario("proof: multiline model stays on one first-screen line", () => {
     assert.equal(exp.code, 0, exp.stderr);
     assert.ok(stdoutLines(exp.stdout) <= 12, `first screen lines: ${stdoutLines(exp.stdout)}\n${exp.stdout}`);
     assert.ok(/Model: m extra/.test(exp.stdout), exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: --json export rejection omits a credential-shaped id", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "json-cred");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "json-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const K = "sk_live_" + "A".repeat(20);
+    const exp = run(["proof", "export", K, "--json"], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/looks like a secret/.test(exp.stderr), exp.stderr);
+    assert.ok(!exp.stderr.includes(K), "human path must not echo the refused id");
+    assert.ok(!exp.stdout.includes(K), "JSON error document must not echo the refused id");
+    const doc = JSON.parse(exp.stdout);
+    assert.equal(doc.command, "proof");
+    assert.equal(doc.action, "export");
+    assert.equal(doc.exitCode, 1);
+    assert.equal(doc.id, undefined);
+    assert.equal(Object.prototype.hasOwnProperty.call(doc, "id") && doc.id != null, false);
+    assert.ok(!JSON.stringify(doc).includes(K));
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /function emitErrorJson/);
+    assert.match(src, /omitCredentialShaped\(doc\)/);
+    assert.match(src, /if \(\s*safeId &&\s*!fieldLooksLikeCredential\(idArg\)/);
+
+    const by = "sk_live_" + "B".repeat(20);
+    const resolve = run(["approve", "--json", "--resolve", K, "--allow", "--by", "Alex"], repo);
+    assert.equal(resolve.code, 1, resolve.stderr);
+    assert.ok(!resolve.stdout.includes(K), resolve.stdout);
+    assert.ok(!resolve.stderr.includes(K), resolve.stderr);
+    if (resolve.stdout.trim()) {
+      const resolveDoc = JSON.parse(resolve.stdout);
+      assert.ok(!JSON.stringify(resolveDoc).includes(K));
+      assert.ok(resolveDoc.id == null);
+    }
+    const byRefuse = run(["approve", "--json", "--resolve", "dec-any", "--allow", "--by", by], repo);
+    assert.equal(byRefuse.code, 1, byRefuse.stderr);
+    assert.ok(!byRefuse.stdout.includes(by), byRefuse.stdout);
+    assert.ok(!byRefuse.stderr.includes(by), byRefuse.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: hardlink at the ledger file does not overwrite an outside file", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1-ledger-hl");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1-ledger-hl", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const outside = path.join(base, "sentinel-ledger.txt");
+    let planted = false;
+    try {
+      linkSync(abs, outside);
+      planted = existsSync(outside) && lstatSync(abs).nlink > 1;
+    } catch {
+      planted = false;
+    }
+    if (!planted && process.platform === "win32") {
+      const linked = spawnSync("cmd", ["/c", "mklink", "/H", outside, abs], { encoding: "utf8" });
+      planted = linked.status === 0 && existsSync(outside) && lstatSync(abs).nlink > 1;
+    }
+    if (!planted) {
+      assert.fail("could not plant a hardlink of the ledger (symlink fallback is not this test)");
+    }
+    const before = readFileSync(outside);
+    const beforeText = before.toString("utf8");
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    const after = existsSync(outside) ? readFileSync(outside) : Buffer.from("MISSING");
+    const afterText = after.toString("utf8");
+    assert.equal(afterText, beforeText, `outside sentinel was overwritten:\n${afterText}\nresolve: ${r.code} ${r.stderr}`);
+    assert.notEqual(r.code, 0, `hardlinked ledger must refuse, got exit ${r.code} ${r.stderr}`);
+    assert.ok(!/original record was not changed/.test(r.stdout + r.stderr), r.stdout + r.stderr);
+    assert.ok(/shares storage with another name|escaped \.getadvantage\/approvals/.test(r.stderr), r.stderr);
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /function appendLedgerLine/);
+    assert.match(src, /fst\.nlink > 1/);
+    assert.match(src, /PROOF_SHARED_INODE/);
   } finally {
     cleanup(base);
   }
