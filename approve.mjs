@@ -37,6 +37,7 @@ import {
   closeSync,
   existsSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -44,8 +45,10 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import path from "node:path";
 import { pathMatchesGlob, isPolicyPathInIndex } from "./policy.mjs";
@@ -74,12 +77,14 @@ export const MATCH_KEYS = Object.freeze([
 export const EXIT = Object.freeze({ allow: 0, block: 1, escalate: 2 });
 /** Proof fields stored in the clear so an owner can read what happened. */
 export const PROOF_PLAIN_FIELDS = Object.freeze(["action", "actor", "model", "dataClass"]);
-/** First packet contract. Integer `version: 1` on a JSONL line is the 0.15.3 body, not this string. */
+/** First packet contract. Integer `version: 1` is this checkout's line body, not a released schema. */
 export const PROOF_PACKET_SCHEMA = "getadvantage.proof.packet.v1";
 export const PROOF_GENESIS_DIGEST = "0".repeat(64);
 export const PROOF_EXPORT_MAX_LINES = 10000;
 /** One byte ceiling for a JSONL line on both write and read. Hash the complete line. */
 export const PROOF_RECORD_MAX_BYTES = 256 * 1024;
+/** Cumulative export budget so 10k lines at the per-line cap cannot allocate a single string. */
+export const PROOF_EXPORT_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const PROOF_LOCK_WAIT_MS = 10_000;
 const PROOF_LOCK_STALE_MS = 30_000;
 const PROOF_CRED_WALK_MAX_DEPTH = 16;
@@ -533,6 +538,84 @@ function escapedApprovalsError() {
   return new Error("approval record path escaped .getadvantage/approvals/");
 }
 
+function checkpointError(message) {
+  const err = new Error(message);
+  err.code = "PROOF_CHECKPOINT";
+  return err;
+}
+
+function partialWriteError(message) {
+  const err = new Error(message);
+  err.code = "PROOF_PARTIAL_WRITE";
+  return err;
+}
+
+function lstatOrNull(abs) {
+  try {
+    return lstatSync(abs);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+/**
+ * Refuse reparse points, directories, and paths that leave approvals.
+ * Hardlinks (nlink > 1) are unlinked by name only after this check: the
+ * other name is not our write target, so we never open a shared inode.
+ */
+function assertSafeWriteTarget(cwd, abs, { mustNotExist = false } = {}) {
+  assertApprovalsContainment(cwd, abs);
+  const st = lstatOrNull(abs);
+  if (!st) return null;
+  if (st.isSymbolicLink()) throw escapedApprovalsError();
+  if (st.isDirectory()) {
+    const err = new Error("output path is a directory");
+    err.code = "PROOF_OUTPUT_IS_DIR";
+    throw err;
+  }
+  if (mustNotExist) {
+    const err = new Error("output path already exists");
+    err.code = "EEXIST";
+    throw err;
+  }
+  return st;
+}
+
+function removeLeftoverWriteTarget(cwd, abs) {
+  const st = assertSafeWriteTarget(cwd, abs);
+  if (!st) return;
+  unlinkSync(abs);
+}
+
+/** Create `abs` exclusively (`wx`) and write `data`. Never follows a reparse. */
+function exclusiveWriteFile(cwd, abs, data) {
+  removeLeftoverWriteTarget(cwd, abs);
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+  let fd;
+  try {
+    fd = openSync(abs, "wx");
+  } catch (e) {
+    if (e && e.code === "EEXIST") {
+      const st = lstatOrNull(abs);
+      if (st && st.isSymbolicLink()) throw escapedApprovalsError();
+    }
+    throw e;
+  }
+  try {
+    writeSync(fd, buf, 0, buf.length, 0);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function isTipStructurallyValid(tip) {
+  if (!tip || typeof tip !== "object" || Array.isArray(tip) || tip.corrupt) return false;
+  if (!Number.isInteger(tip.lineCount) || tip.lineCount < 1) return false;
+  if (!isWellFormedPrevDigest(tip.tipDigest)) return false;
+  return true;
+}
+
 /**
  * Containment is a filesystem fact, not a string prefix. Refuse symlinks and
  * directory junctions on the approvals root, the output path, and its parent.
@@ -669,13 +752,17 @@ function readTipFile(abs) {
   }
 }
 
-function writeTipFile(abs, tip) {
+function writeTipFile(cwd, abs, tip) {
   const p = tipPathFor(abs);
-  if (existsSync(p) && isSymlinkOrReparse(p)) throw escapedApprovalsError();
   const tmp = `${p}.tmp`;
-  writeFileSync(tmp, JSON.stringify(tip) + "\n", "utf8");
+  assertSafeWriteTarget(cwd, p);
+  exclusiveWriteFile(cwd, tmp, JSON.stringify(tip) + "\n");
   try {
-    if (existsSync(p)) unlinkSync(p);
+    const destSt = lstatOrNull(p);
+    if (destSt) {
+      if (destSt.isSymbolicLink() || destSt.isDirectory()) throw escapedApprovalsError();
+      unlinkSync(p);
+    }
     renameSync(tmp, p);
   } catch (e) {
     try {
@@ -718,32 +805,50 @@ function withProofLock(abs, fn) {
   const lockPath = `${abs}.lock`;
   const start = Date.now();
   let fd;
+  let staleUnremoved = false;
   for (;;) {
+    if (Date.now() - start > PROOF_LOCK_WAIT_MS) {
+      const err = staleUnremoved
+        ? new Error("a stale approval lock could not be removed; delete the .lock path and retry")
+        : new Error("another approve is writing this record; retry in a moment");
+      err.code = staleUnremoved ? "PROOF_LOCK_STALE" : "PROOF_LOCK_TIMEOUT";
+      throw err;
+    }
     try {
       fd = openSync(lockPath, "wx");
       break;
     } catch (e) {
-      if (!e || e.code !== "EEXIST") throw e;
+      const code = e && e.code;
+      if (code !== "EEXIST" && code !== "EISDIR" && code !== "EPERM") throw e;
       let stale = false;
       try {
         const st = lstatSync(lockPath);
         if (Date.now() - st.mtimeMs > PROOF_LOCK_STALE_MS) stale = true;
+        if (st.isDirectory()) stale = true;
       } catch {
         stale = true;
       }
       if (stale) {
+        let removed = false;
         try {
           unlinkSync(lockPath);
+          removed = true;
         } catch {
-          /* raced */
+          /* directory or raced */
         }
+        if (!removed) {
+          try {
+            rmdirSync(lockPath);
+            removed = true;
+          } catch {
+            /* still there */
+          }
+        }
+        staleUnremoved = !removed;
+        sleepMs(20);
         continue;
       }
-      if (Date.now() - start > PROOF_LOCK_WAIT_MS) {
-        const err = new Error("another approve is writing this record; retry in a moment");
-        err.code = "PROOF_LOCK_TIMEOUT";
-        throw err;
-      }
+      staleUnremoved = false;
       sleepMs(20);
     }
   }
@@ -794,18 +899,115 @@ function lastJsonlLine(abs) {
   }
 }
 
+function ledgerStat(abs) {
+  try {
+    return lstatSync(abs);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return null;
+    throw e;
+  }
+}
+
+function rollbackLedgerToSize(abs, prevSize, created) {
+  try {
+    if (created || prevSize <= 0) {
+      unlinkSync(abs);
+      return true;
+    }
+    const fd = openSync(abs, "r+");
+    try {
+      ftruncateSync(fd, prevSize);
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function lastLineHasPrevDigest(prevLine) {
+  if (!prevLine || prevLine.tooLarge || !prevLine.bytes) return false;
+  const text = decodeUtf8Line(prevLine.bytes);
+  if (!text) return false;
+  try {
+    const rec = JSON.parse(text);
+    return isWellFormedPrevDigest(own(rec, "prevDigest"));
+  } catch {
+    return false;
+  }
+}
+
 export function appendProofRecord(cwd, record) {
   const id = sanitizeRecordId(record?.id);
+  if (fieldLooksLikeCredential(id) || fieldLooksLikeCredential(asString(record?.id))) {
+    const err = new Error(
+      "The id value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.",
+    );
+    err.code = "PROOF_CREDENTIAL_FIELD";
+    err.field = "id";
+    throw err;
+  }
   const abs = proofPathForId(cwd, id);
   return withProofLock(abs, () => {
     assertApprovalsContainment(cwd, abs);
     if (existsSync(abs) && isSymlinkOrReparse(abs)) throw escapedApprovalsError();
+    const tipAbs = tipPathFor(abs);
+    if (existsSync(tipAbs) && isSymlinkOrReparse(tipAbs)) throw escapedApprovalsError();
+
+    const st = ledgerStat(abs);
+    if (st && st.isDirectory()) {
+      const err = new Error("output path is a directory");
+      err.code = "PROOF_OUTPUT_IS_DIR";
+      throw err;
+    }
+    const fileExists = !!(st && st.isFile());
+    const tip = readTipFile(abs);
+    const tipPresent = existsSync(tipAbs);
+
+    if (!fileExists && tipPresent) {
+      throw checkpointError(
+        "The approval record is missing but a write checkpoint is present, so this action was not allowed.",
+      );
+    }
+    if (fileExists && st.size === 0) {
+      throw checkpointError(
+        "The approval record is empty, so this action was not allowed. Run getadvantage approve to write a new record.",
+      );
+    }
+
     const prevLine = lastJsonlLine(abs);
     if (prevLine && prevLine.tooLarge) {
       const err = new Error("The previous approval line is too large to chain.");
       err.code = "PROOF_RECORD_TOO_LARGE";
       throw err;
     }
+
+    const actualCount = fileExists ? countJsonlLines(abs) : 0;
+    const actualTail = prevLine && prevLine.bytes ? jsonlLineDigest(prevLine.bytes) : null;
+    const chained = lastLineHasPrevDigest(prevLine);
+
+    if (fileExists) {
+      if (tip && !isTipStructurallyValid(tip)) {
+        throw checkpointError(
+          "The approval record does not match its write checkpoint, so this action was not allowed.",
+        );
+      }
+      if (chained) {
+        if (!isTipStructurallyValid(tip) || tip.tipDigest !== actualTail || tip.lineCount !== actualCount) {
+          throw checkpointError(
+            "The approval record does not match its write checkpoint, so this action was not allowed.",
+          );
+        }
+      } else if (isTipStructurallyValid(tip)) {
+        if (tip.tipDigest !== actualTail || tip.lineCount !== actualCount) {
+          throw checkpointError(
+            "The approval record does not match its write checkpoint, so this action was not allowed.",
+          );
+        }
+      }
+    }
+
     const rec = {
       ...record,
       prevDigest: prevLine ? jsonlLineDigest(prevLine.bytes) : PROOF_GENESIS_DIGEST,
@@ -826,20 +1028,26 @@ export function appendProofRecord(cwd, record) {
       err.code = "PROOF_RECORD_TOO_LARGE";
       throw err;
     }
-    let lineCount = 1;
-    const tip = readTipFile(abs);
-    if (tip && !tip.corrupt && Number.isInteger(tip.lineCount) && tip.lineCount >= 0) {
-      lineCount = tip.lineCount + 1;
-    } else if (existsSync(abs)) {
-      lineCount = countJsonlLines(abs) + 1;
-    }
+
+    const lineCount = actualCount + 1;
+    const prevSize = fileExists ? st.size : 0;
+    const created = !fileExists;
     appendFileSync(abs, buf);
-    writeTipFile(abs, {
-      v: 1,
-      lineCount,
-      tipDigest: jsonlLineDigest(buf.subarray(0, buf.length - 1)),
-      bytes: buf.length - 1,
-    });
+    try {
+      writeTipFile(cwd, abs, {
+        v: 1,
+        lineCount,
+        tipDigest: jsonlLineDigest(buf.subarray(0, buf.length - 1)),
+      });
+    } catch (e) {
+      const rolled = rollbackLedgerToSize(abs, prevSize, created);
+      if (!rolled) {
+        throw partialWriteError(
+          "The decision was written but the write checkpoint could not be updated. Treat this record as incomplete.",
+        );
+      }
+      throw e;
+    }
     return abs;
   });
 }
@@ -927,7 +1135,7 @@ function deriveApproverKind(rec) {
 
 function credentialInTree(value, field, depth) {
   if (value == null) return null;
-  if (depth > PROOF_CRED_WALK_MAX_DEPTH) return null;
+  if (depth > PROOF_CRED_WALK_MAX_DEPTH) return field;
   if (typeof value === "string") {
     return fieldLooksLikeCredential(value) ? field : null;
   }
@@ -1064,17 +1272,20 @@ function readDecisionContext(abs) {
   return ctx;
 }
 
-function publishReplace(tmp, dest) {
-  if (existsSync(dest) && isSymlinkOrReparse(dest)) throw escapedApprovalsError();
-  if (existsSync(dest) && lstatSync(dest).isDirectory()) {
-    throw new Error("output path is a directory");
-  }
+function publishReplace(cwd, tmp, dest) {
+  assertSafeWriteTarget(cwd, dest);
+  assertSafeWriteTarget(cwd, tmp);
+  const bak = `${dest}.bak`;
   if (existsSync(dest)) {
-    const bak = `${dest}.bak`;
-    try {
+    const bakSt = lstatOrNull(bak);
+    if (bakSt) {
+      if (bakSt.isSymbolicLink()) throw escapedApprovalsError();
+      if (bakSt.isDirectory()) {
+        const err = new Error("output path is a directory");
+        err.code = "PROOF_OUTPUT_IS_DIR";
+        throw err;
+      }
       unlinkSync(bak);
-    } catch {
-      /* no bak */
     }
     renameSync(dest, bak);
     try {
@@ -1095,9 +1306,11 @@ function publishReplace(tmp, dest) {
 
 function restoreFromBak(dest) {
   const bak = `${dest}.bak`;
-  if (existsSync(bak)) {
+  const bakSt = lstatOrNull(bak);
+  if (bakSt && !bakSt.isDirectory() && !bakSt.isSymbolicLink()) {
     try {
-      if (existsSync(dest)) unlinkSync(dest);
+      const destSt = lstatOrNull(dest);
+      if (destSt && !destSt.isDirectory() && !destSt.isSymbolicLink()) unlinkSync(dest);
     } catch {
       /* ignore */
     }
@@ -1109,8 +1322,9 @@ function restoreFromBak(dest) {
     }
   }
   try {
-    if (existsSync(dest)) unlinkSync(dest);
-    return true;
+    const destSt = lstatOrNull(dest);
+    if (destSt && !destSt.isDirectory() && !destSt.isSymbolicLink()) unlinkSync(dest);
+    return !bakSt;
   } catch {
     return false;
   }
@@ -1124,22 +1338,16 @@ function writeProofOutputs(cwd, id, packet, html) {
   const jsonRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.packet.json`;
   const htmlRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.html`;
   let jsonPublished = false;
+  let htmlPublished = false;
   let jsonBak = null;
   let htmlBak = null;
   try {
-    for (const p of [jsonTmp, htmlTmp, jsonAbs, htmlAbs]) {
-      if (existsSync(p) && isSymlinkOrReparse(p)) throw escapedApprovalsError();
-    }
-    for (const p of [jsonAbs, htmlAbs]) {
-      if (existsSync(p) && lstatSync(p).isDirectory()) {
-        throw new Error("output path is a directory");
-      }
-    }
-    writeFileSync(jsonTmp, JSON.stringify(packet, null, 2) + "\n", "utf8");
-    writeFileSync(htmlTmp, html, "utf8");
-    jsonBak = publishReplace(jsonTmp, jsonAbs);
+    exclusiveWriteFile(cwd, jsonTmp, JSON.stringify(packet, null, 2) + "\n");
+    exclusiveWriteFile(cwd, htmlTmp, html);
+    jsonBak = publishReplace(cwd, jsonTmp, jsonAbs);
     jsonPublished = true;
-    htmlBak = publishReplace(htmlTmp, htmlAbs);
+    htmlBak = publishReplace(cwd, htmlTmp, htmlAbs);
+    htmlPublished = true;
     for (const bak of [jsonBak, htmlBak]) {
       if (bak) {
         try {
@@ -1152,18 +1360,26 @@ function writeProofOutputs(cwd, id, packet, html) {
     return { jsonAbs, htmlAbs, jsonRel, htmlRel, published: "both" };
   } catch (e) {
     try {
-      unlinkSync(jsonTmp);
+      const st = lstatOrNull(jsonTmp);
+      if (st && !st.isDirectory() && !st.isSymbolicLink()) unlinkSync(jsonTmp);
     } catch {
       /* ignore */
     }
     try {
-      unlinkSync(htmlTmp);
+      const st = lstatOrNull(htmlTmp);
+      if (st && !st.isDirectory() && !st.isSymbolicLink()) unlinkSync(htmlTmp);
     } catch {
       /* ignore */
     }
+    let jsonRestored = true;
+    let htmlRestored = true;
+    if (jsonPublished) jsonRestored = restoreFromBak(jsonAbs);
+    if (htmlPublished) htmlRestored = restoreFromBak(htmlAbs);
     let published = "none";
-    if (jsonPublished) {
-      published = restoreFromBak(jsonAbs) ? "none" : "partial";
+    if (jsonPublished && htmlPublished) {
+      published = jsonRestored && htmlRestored ? "none" : "partial";
+    } else if (jsonPublished) {
+      published = jsonRestored ? "none" : "partial";
     }
     const err = e instanceof Error ? e : new Error(String(e));
     err.published = published;
@@ -1274,6 +1490,15 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     };
   }
   const id = sanitizeRecordId(raw);
+  if (fieldLooksLikeCredential(raw) || fieldLooksLikeCredential(id)) {
+    return {
+      ok: false,
+      error: "The id value looks like a secret, so it was not exported.",
+      next: "pass a name, not a key. If this record is already stored, do not copy it; say only the field name",
+      field: "id",
+      published: "none",
+    };
+  }
   let abs;
   try {
     abs = proofPathForId(cwd, id, { create: false });
@@ -1292,6 +1517,35 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     };
   }
 
+  try {
+    return withProofLock(abs, () =>
+      finishProofExport(cwd, id, abs, now),
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (e && (e.code === "PROOF_LOCK_TIMEOUT" || e.code === "PROOF_LOCK_STALE")) {
+      return {
+        ok: false,
+        error: msg,
+        next: "retry in a moment",
+        published: "none",
+      };
+    }
+    const escaped = /escaped \.getadvantage\/approvals/.test(msg);
+    return {
+      ok: false,
+      error: escaped
+        ? "That id is not a local record name (it tries to leave .getadvantage/approvals/)."
+        : `Could not read the approval record (${msg}).`,
+      next: escaped
+        ? "pass the record id printed by getadvantage approve, not a file path"
+        : "check that the file is readable, then re-run proof export",
+      published: "none",
+    };
+  }
+}
+
+function finishProofExport(cwd, id, abs, now) {
   const projected = [];
   let prev = PROOF_GENESIS_DIGEST;
   let boundCount = 0;
@@ -1299,6 +1553,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
   let lineCount = 0;
   let chainStarted = false;
   let lastLineDigest = null;
+  let totalBytes = 0;
   const fileHash = createHash("sha256");
   try {
     if (isSymlinkOrReparse(abs)) {
@@ -1323,6 +1578,16 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
         return {
           ok: false,
           error: `The approval record ${id} has a line over ${PROOF_RECORD_MAX_BYTES} bytes at line ${lineNo}, so it was not exported.`,
+          next: "split the work into a new approve run; this export stays bounded",
+          line: lineNo,
+          published: "none",
+        };
+      }
+      totalBytes += rawBytes ? rawBytes.length : 0;
+      if (totalBytes > PROOF_EXPORT_MAX_TOTAL_BYTES) {
+        return {
+          ok: false,
+          error: `The approval record ${id} is larger than ${PROOF_EXPORT_MAX_TOTAL_BYTES} bytes, so it was not exported.`,
           next: "split the work into a new approve run; this export stays bounded",
           line: lineNo,
           published: "none",
@@ -1397,7 +1662,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
         return {
           ok: false,
           error: `The approval record ${id} has an unsupported version at line ${lineNo}, so it was not exported.`,
-          next: "this export reads version 1 records written by 0.15.3 and version 2 lines with a previous-line digest",
+          next: "this export accepts integer version 1 or 2. There is no released approval schema. Lines with no prevDigest export as unverified",
           line: lineNo,
           published: "none",
         };
@@ -1410,7 +1675,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
           return {
             ok: false,
             error: `The approval record ${id} is missing its previous-line digest at line ${lineNo}, so it was not exported.`,
-            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            next: "treat this file as untrusted; do not copy it; run getadvantage approve to write a new record id",
             line: lineNo,
             published: "none",
           };
@@ -1419,7 +1684,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
           return {
             ok: false,
             error: `The approval record ${id} does not match its previous line at line ${lineNo}, so it was not exported.`,
-            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            next: "treat this file as untrusted; do not copy it; run getadvantage approve to write a new record id",
             line: lineNo,
             published: "none",
           };
@@ -1432,7 +1697,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
           return {
             ok: false,
             error: `The approval record ${id} does not match its previous line at line ${lineNo}, so it was not exported.`,
-            next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+            next: "treat this file as untrusted; do not copy it; run getadvantage approve to write a new record id",
             line: lineNo,
             published: "none",
           };
@@ -1475,25 +1740,21 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
   }
 
   const sourceSha256 = fileHash.digest("hex");
+  let tipMatched = false;
   try {
     const tip = readTipFile(abs);
-    if (tip && tip.corrupt) {
-      return {
-        ok: false,
-        error: `The approval record ${id} does not match its write checkpoint, so it was not exported.`,
-        next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
-        published: "none",
-      };
-    }
-    if (tip && Number.isInteger(tip.lineCount) && typeof tip.tipDigest === "string") {
-      if (tip.lineCount !== lineCount || tip.tipDigest !== lastLineDigest) {
+    const tipAbs = tipPathFor(abs);
+    const tipPresent = existsSync(tipAbs);
+    if (tipPresent) {
+      if (!isTipStructurallyValid(tip) || tip.lineCount !== lineCount || tip.tipDigest !== lastLineDigest) {
         return {
           ok: false,
           error: `The approval record ${id} does not match its write checkpoint, so it was not exported.`,
-          next: "treat this file as untrusted; do not copy it; re-run getadvantage approve to write a new record",
+          next: "treat this file as untrusted; do not copy it; run getadvantage approve to write a new record id",
           published: "none",
         };
       }
+      tipMatched = true;
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1511,7 +1772,10 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
   const jsonRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.packet.json`;
   const htmlRel = `${MARKER_DIR}/${APPROVALS_SUBDIR}/${id}.html`;
   const contentDigest = createHash("sha256").update(JSON.stringify(projected), "utf8").digest("hex");
-  const chainStatus = chainStatusOf(boundCount, unboundCount, lineCount);
+  let chainStatus = chainStatusOf(boundCount, unboundCount, lineCount);
+  if (chainStatus === "verified" && !tipMatched) {
+    chainStatus = "unverified";
+  }
   const packet = {
     schemaVersion: PROOF_PACKET_SCHEMA,
     kind: "getadvantage.proof.packet",
@@ -1528,7 +1792,7 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     compatibility: {
       recordVersions: [1, 2],
       promise:
-        "A reader may rely on id, kind, outcome, approver, approverKind, model, dataTouched.dataClass, dataTouched.resourceDigest, createdAt, lineDigest, chain.status, and chain.ok. Version 1 records written by 0.15.3 export as unverified. Missing dataClass becomes unknown. Resource plaintext is never present. chain.status is unverified, partial, or verified. chain.ok is true only when every line after the chain starts is bound. Chain: intact prints only for verified.",
+        "A reader may rely on id, kind, outcome, approver, approverKind, model, dataTouched.dataClass, dataTouched.resourceDigest, createdAt, lineDigest, chain.status, and chain.ok. This checkout writes integer version 1 with a previous-line digest. Lines with no prevDigest export as unverified. There is no released approval schema; approve has never shipped. Missing dataClass becomes unknown. Resource plaintext is never present. chain.status is unverified, partial, or verified. chain.ok is true only when every line is bound and the write checkpoint matches. Chain: intact prints only for verified.",
     },
     chain: {
       algorithm: "sha256",
@@ -1551,13 +1815,27 @@ export function exportProofRecord(cwd, rawId, opts = {}) {
     limitations: [
       "Local files only. Not a hosted page. There is no public URL.",
       "The resource match string is not stored. dataClass names the class; resourceDigest identifies the resource.",
-      "Version 1 lines have no write-time prevDigest. chain.status unverified means no line is bound. partial means a v1 prefix then a bound suffix. verified means every line is bound. A missing prevDigest after the chain starts is a failure, not an unsigned line.",
-      "A write-time line-count and tip-digest checkpoint is stored beside the ledger. Export refuses a mismatch. An attacker who rewrites both the ledger and the checkpoint consistently is outside this check; export-time hashing alone cannot authenticate the terminal digest.",
+      "There is no released approval schema. Approve has never shipped. npm 0.15.3 did not write these records. This checkout writes version 1 with a previous-line digest. A line with no prevDigest is unbound and exports as unverified; that is a local unsigned import, not compatibility with a released v1.",
+      "chain.status unverified means no line is bound, or a bound file has no matching write checkpoint. partial means an unbound prefix then a bound suffix. verified means every line is bound and the write checkpoint matches the tail. A missing prevDigest after the chain starts is a failure, not an unsigned line. unverified is not a trustworthy unsigned history.",
+      "A write-time line-count and tip-digest checkpoint is stored beside the ledger. Export refuses a present checkpoint that disagrees with the file. A missing checkpoint is never verified. Deleting the tip and stripping every prevDigest is a downgrade, not a refusal: export exits 0, content may be rewritten, and the copy is labelled unverified with ok false.",
+      "An attacker who rewrites both the ledger and the checkpoint consistently still gets chain.status verified and the intact headline. Export-time hashing cannot authenticate the terminal digest. Write access to .getadvantage/approvals/ is enough.",
+      "A crash after the ledger line is appended and before the checkpoint is replaced can leave a matching gap; export then refuses. That is fail-closed, not a recovery path. Run getadvantage approve to write a new record id.",
       "A name on --by is a name string, not a cryptographic identity.",
       "Not in the published package until a release.",
     ],
     latest: latestFromProjected(projected),
   };
+
+  const packetSecret = credentialInTree(packet, "id", 0);
+  if (packetSecret) {
+    return {
+      ok: false,
+      error: "The id value looks like a secret, so it was not exported.",
+      next: "pass a name, not a key. If this record is already stored, do not copy it; say only the field name",
+      field: diagnosticFieldName(packetSecret),
+      published: "none",
+    };
+  }
 
   const html = renderProofHtml(packet);
   try {
@@ -1746,7 +2024,8 @@ export function printProofHelp() {
   console.log(`  ${bin} proof export <id> --json`);
   console.log("");
   console.log("Reads `.getadvantage/approvals/<id>.jsonl` on this machine. Nothing is uploaded.");
-  console.log("There is no hosted page. A broken chain or secret-shaped record is refused.");
+  console.log("There is no hosted page. A disagreeing chain or secret-shaped record is refused.");
+  console.log("There is no released approval schema. Lines with no previous-line digest export as unverified.");
   console.log("");
   console.log("Exit codes: printed 0 · refused 1.");
 }
@@ -1766,18 +2045,22 @@ function outcomeLabel(outcome) {
   return outcome || "unknown";
 }
 
+function oneTerminalLine(v) {
+  return asString(v).replace(/[\r\n]+/g, " ").trim();
+}
+
 function printProofScreen({ packet, jsonRel, htmlRel }) {
   const latest = packet.latest || {};
   console.log("getAdvantage - local approval record");
   console.log("");
-  console.log(`Id: ${packet.id}`);
+  console.log(`Id: ${oneTerminalLine(packet.id)}`);
   console.log(`Lines: ${packet.chain.lineCount}`);
   console.log(`Chain: ${chainStatusLabel(packet.chain)}`);
-  console.log(`Data class: ${latest.dataClass || "unknown"}`);
-  if (nonempty(latest.model)) console.log(`Model: ${latest.model}`);
-  console.log(`Outcome: ${outcomeLabel(latest.outcome)}`);
-  console.log(`Wrote: ${jsonRel}`);
-  console.log(`Page: ${htmlRel}`);
+  console.log(`Data class: ${oneTerminalLine(latest.dataClass || "unknown")}`);
+  if (nonempty(latest.model)) console.log(`Model: ${oneTerminalLine(latest.model)}`);
+  console.log(`Outcome: ${oneTerminalLine(outcomeLabel(latest.outcome))}`);
+  console.log(`Wrote: ${oneTerminalLine(jsonRel)}`);
+  console.log(`Page: ${oneTerminalLine(htmlRel)}`);
   console.log("This is a local copy. Nothing was uploaded. There is no hosted page.");
 }
 
@@ -1935,6 +2218,11 @@ export function runApprove(opts = {}) {
         return usageError("Say --allow or --deny (exactly one).");
       }
       const id = sanitizeRecordId(idRaw);
+      if (fieldLooksLikeCredential(idRaw) || fieldLooksLikeCredential(id)) {
+        return usageError(
+          "The id value looks like a secret, so it was not stored and this action was not allowed. Pass a name, not a key.",
+        );
+      }
       let existingAbs;
       try {
         existingAbs = proofPathForId(repoCwd, id, { create: false });
@@ -2041,6 +2329,11 @@ export function runApprove(opts = {}) {
     return EXIT[decision.outcome] ?? 1;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (e && e.code === "PROOF_PARTIAL_WRITE") {
+      console.error(c.red(`✗ ${msg}`));
+      console.error("The ledger line was written. Treat this record as incomplete.");
+      return 1;
+    }
     console.error(c.red(`✗ Could not finish the approval decision (${msg}).`));
     console.error("The action was not allowed.");
     return 1;

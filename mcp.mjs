@@ -484,6 +484,18 @@ function runApproveActionMcp(cwd, args) {
     appendProofRecord(cwd, record);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (e && e.code === "PROOF_PARTIAL_WRITE") {
+      return {
+        isError: true,
+        text: [
+          "The action was not completed.",
+          `Why: ${msg}`,
+          "A ledger line was written. This is an incomplete recorded decision.",
+          "",
+          JSON.stringify({ ok: false, error: msg, id, exitCode: 1 }),
+        ].join("\n"),
+      };
+    }
     return {
       isError: true,
       text: toolFailureText(

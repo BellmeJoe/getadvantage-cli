@@ -332,13 +332,17 @@ actions.
 
 `getadvantage approve` writes a local record under `.getadvantage/approvals/`.
 `getadvantage proof export <id>` prints a local copy of one of those records.
-The copy says **unverified**, **partial**, or **intact** for the hash chain:
-intact only when every line is bound. A missing link after the chain starts is
-refused, not treated as unsigned. Nested secret-shaped values are refused; a
-caller who passes an array still gets a refusal if any nested string looks like
-a key, and the key is not copied into the error. Both commands are in this
-checkout. Neither is in the published package until a release. Nothing is
-uploaded. There is no hosted page. Do not treat the copy as a finished handoff.
+Neither command has ever shipped: there is no released approval schema to be
+compatible with, including nothing from npm `0.15.3`. The copy says
+**unverified**, **partial**, or **intact** for the hash chain: intact only when
+every line is bound and the write checkpoint matches. A missing link after the
+chain starts is refused, not treated as unsigned. Lines with no previous-line
+digest export as unverified; unverified is not a trustworthy unsigned history.
+Nested secret-shaped values are refused; a caller who passes an array still
+gets a refusal if any nested string looks like a key, and the key is not copied
+into the error. Both commands are in this checkout. Neither is in the published
+package until a release. Nothing is uploaded. There is no hosted page. Do not
+treat the copy as a finished handoff.
 
 ## Land the fleet safely (fan-out / fan-in)
 

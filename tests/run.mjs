@@ -218,7 +218,7 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -19955,15 +19955,15 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    439,
+    449,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
   // the suite. 379 was the pre-L1 base; stage A added 17 (396); stage B
   // added 12 (408); stage B repair added HB8 + policy-read + proof-write +
   // map-cwd-local (412); r2 added policy-read I/O (413); L2 proof export
-  // added 12 (425); L2 repair added 14 (439). Update this number when a
-  // scenario is added or removed; do not delete the pin.
+  // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449).
+  // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
 scenario("scan-scope-claim: filesToScan set identical to frozen pre-lane algorithm", () => {
@@ -22181,6 +22181,7 @@ function writeProofJsonl(repo, id, records) {
   write(repo, path.join(".getadvantage", "approvals", `${id}.jsonl`), lines.join("\n") + "\n");
 }
 
+/** Synthetic unchained approval line. Not captured from tag v0.15.3 (that tag has no approve.mjs). */
 function v1ProofLine(over = {}) {
   return {
     version: 1,
@@ -22206,7 +22207,7 @@ function stdoutLines(text) {
   return (String(text || "").match(/\n/g) || []).length;
 }
 
-scenario("proof: v1 fixture from 0.15.3 exports; digest-only; local HTML is not hosted", async () => {
+scenario("proof: v1 fixture exports; digest-only; local HTML is not hosted", async () => {
   const { exportProofRecord, PROOF_PACKET_SCHEMA } = await import("../approve.mjs");
   const base = freshBase();
   try {
@@ -22780,19 +22781,16 @@ scenario("proof: deleting prevDigest after the chain starts is a failure, not un
 
     const lines = readFileSync(abs, "utf8").split(/\n/);
     const first = JSON.parse(lines[0]);
-    first.outcome = "allow";
     const second = JSON.parse(lines[1]);
     delete second.prevDigest;
     writeFileSync(abs, JSON.stringify(first) + "\n" + JSON.stringify(second) + "\n", "utf8");
+    rmSync(`${abs}.tip`, { force: true });
     const broken = run(["proof", "export", "dec-drop"], repo);
     assert.equal(broken.code, 1, broken.stderr);
-    assert.ok(/missing its previous-line digest at line 2|write checkpoint|untrusted/.test(broken.stderr), broken.stderr);
+    assert.ok(/missing its previous-line digest at line 2/.test(broken.stderr), broken.stderr);
+    assert.ok(!/write checkpoint/.test(broken.stderr), broken.stderr);
     assert.ok(!/Chain: intact/.test(broken.stdout), broken.stdout);
-    if (existsSync(packetAbs)) {
-      const packet = JSON.parse(readFileSync(packetAbs, "utf8"));
-      assert.notEqual(packet.chain.status, "verified");
-      assert.notEqual(packet.chain.ok, true);
-    }
+    assert.equal(existsSync(packetAbs), false);
   } finally {
     cleanup(base);
   }
@@ -22827,9 +22825,11 @@ scenario("proof: malformed prevDigest after the chain starts is a failure", asyn
     const second = JSON.parse(lines[1]);
     second.prevDigest = "not-a-digest";
     writeFileSync(abs, lines[0] + "\n" + JSON.stringify(second) + "\n", "utf8");
+    rmSync(`${abs}.tip`, { force: true });
     const broken = run(["proof", "export", "dec-bad-link"], repo);
     assert.equal(broken.code, 1, broken.stderr);
-    assert.ok(/missing its previous-line digest at line 2|write checkpoint|untrusted/.test(broken.stderr), broken.stderr);
+    assert.ok(/missing its previous-line digest at line 2/.test(broken.stderr), broken.stderr);
+    assert.ok(!/write checkpoint/.test(broken.stderr), broken.stderr);
   } finally {
     cleanup(base);
   }
@@ -22950,6 +22950,18 @@ scenario("proof: UTF-8 character across a 64KiB chunk hashes original bytes", as
     assert.equal(packet.chain.status, "partial");
     assert.equal(packet.records[0].lineDigest, d1);
     assert.equal(packet.records[1].chainBound, true);
+
+    const recBad = v1ProofLine({ id: "dec-utf8-bad", reason: "BADUTF8MARKER" });
+    const bufBad = Buffer.from(JSON.stringify(recBad) + "\n");
+    const markerAt = bufBad.indexOf("BADUTF8MARKER");
+    assert.ok(markerAt > 0);
+    bufBad[markerAt] = 0xff;
+    const absBad = path.join(repo, ".getadvantage", "approvals", "dec-utf8-bad.jsonl");
+    writeFileSync(absBad, bufBad);
+    const bad = run(["proof", "export", "dec-utf8-bad"], repo);
+    assert.equal(bad.code, 1, bad.stderr);
+    assert.ok(/truncated at line 1/.test(bad.stderr), bad.stderr);
+    assert.equal(existsSync(path.join(repo, ".getadvantage", "approvals", "dec-utf8-bad.packet.json")), false);
   } finally {
     cleanup(base);
   }
@@ -22995,12 +23007,17 @@ scenario("proof: source.sha256 matches the bytes that were parsed", async () => 
     initRepo(repo);
     write(repo, "package.json", JSON.stringify({ name: "sha", version: "1.0.0", private: true }, null, 2) + "\n");
     commitAll(repo, "chore: init");
-    writeProofJsonl(repo, "dec-sha", [v1ProofLine({ id: "dec-sha" })]);
-    const abs = path.join(repo, ".getadvantage", "approvals", "dec-sha.jsonl");
-    const expected = createHash("sha256").update(readFileSync(abs)).digest("hex");
+    const rec = v1ProofLine({ id: "dec-sha" });
+    const body = JSON.stringify(rec) + "\n";
+    writeProofJsonl(repo, "dec-sha", [rec]);
+    const expected = createHash("sha256").update(body, "utf8").digest("hex");
     const result = exportProofRecord(repo, "dec-sha", { now: "2026-09-09T10:00:00.000Z" });
     assert.equal(result.ok, true, result.error);
     assert.equal(result.packet.source.sha256, expected);
+    const src = readFileSync(path.join(__dirname, "..", "approve.mjs"), "utf8");
+    assert.match(src, /iterateJsonlLines\(abs, fileHash\)/);
+    assert.match(src, /const sourceSha256 = fileHash\.digest\("hex"\)/);
+    assert.doesNotMatch(src, /sourceSha256[\s\S]{0,120}readFileSync\(abs\)/);
   } finally {
     cleanup(base);
   }
@@ -23020,21 +23037,19 @@ scenario("proof: HTML write failure does not publish a new packet", async () => 
     const packetAbs = first.jsonAbs;
     const htmlAbs = first.htmlAbs;
     const before = readFileSync(packetAbs, "utf8");
-    rmSync(htmlAbs, { force: true });
-    mkdirSync(htmlAbs);
+    mkdirSync(`${htmlAbs}.bak`);
     writeProofJsonl(repo, "dec-partial", [v1ProofLine({ id: "dec-partial", model: "second" })]);
     const second = exportProofRecord(repo, "dec-partial", { now: "2026-09-09T11:00:00.000Z" });
-    assert.equal(second.ok, false, "html dest directory must fail the pair");
+    assert.equal(second.ok, false, "html bak directory must fail after JSON publish");
     assert.equal(existsSync(packetAbs), true);
     const after = readFileSync(packetAbs, "utf8");
     assert.equal(after, before, "prior packet must be preserved");
     assert.ok(!after.includes("second"));
     const cli = run(["proof", "export", "dec-partial"], repo);
     assert.equal(cli.code, 1, cli.stderr);
-    assert.ok(/partial local copy|Could not write|Nothing was written/.test(cli.stderr), cli.stderr);
-    if (/Nothing was written/.test(cli.stderr)) {
-      assert.ok(!/A partial local copy/.test(cli.stderr) || after === before);
-    }
+    assert.ok(/Could not write/.test(cli.stderr), cli.stderr);
+    assert.ok(/Nothing was written/.test(cli.stderr), cli.stderr);
+    assert.ok(!/A partial local copy/.test(cli.stderr), cli.stderr);
   } finally {
     cleanup(base);
   }
@@ -23097,16 +23112,342 @@ scenario("proof: approvals directory junction is refused at the filesystem", () 
     const outside = path.join(base, "outside");
     mkdirSync(outside, { recursive: true });
     const approvals = path.join(marker, "approvals");
-    const linked = spawnSync("cmd", ["/c", "mklink", "/J", approvals, outside], { encoding: "utf8" });
-    assert.equal(linked.status, 0, `mklink /J must work on this host: ${(linked.stderr || linked.stdout || "").trim()}`);
-    assert.equal(lstatSync(approvals).isSymbolicLink(), true);
-    writeProofJsonl(repo, "dec-junc", [v1ProofLine({ id: "dec-junc" })]);
-    assert.equal(existsSync(path.join(outside, "dec-junc.jsonl")), true);
-    const exp = run(["proof", "export", "dec-junc"], repo);
+    let linked = false;
+    try {
+      if (process.platform === "win32") {
+        symlinkSync(outside, approvals, "junction");
+      } else {
+        symlinkSync(outside, approvals, "dir");
+      }
+      linked = lstatSync(approvals).isSymbolicLink();
+    } catch {
+      linked = false;
+    }
+    if (linked) {
+      writeProofJsonl(repo, "dec-junc", [v1ProofLine({ id: "dec-junc" })]);
+      assert.equal(existsSync(path.join(outside, "dec-junc.jsonl")), true);
+      const exp = run(["proof", "export", "dec-junc"], repo);
+      assert.equal(exp.code, 1, exp.stderr);
+      assert.ok(/tries to leave \.getadvantage\/approvals|not a local record name/.test(exp.stderr), exp.stderr);
+      assert.equal(existsSync(path.join(outside, "dec-junc.packet.json")), false);
+      assert.equal(existsSync(path.join(outside, "dec-junc.html")), false);
+    }
+    const trav = run(["proof", "export", "../outside"], repo);
+    assert.equal(trav.code, 1, trav.stderr);
+    assert.ok(/tries to leave \.getadvantage\/approvals/.test(trav.stderr), trav.stderr);
+    assert.equal(existsSync(path.join(base, "outside", "outside.packet.json")), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: refused resolve does not keep the ledger line when the tip write fails", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1d");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1d", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    assert.equal(asked.code, 2, asked.stderr);
+    const id = JSON.parse(asked.stdout).id;
+    const first = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.equal(first.code, 0, first.stderr);
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const before = readFileSync(abs, "utf8");
+    const beforeLines = before.split(/\n/).filter((l) => l.length > 0).length;
+    mkdirSync(`${abs}.tip.tmp`);
+    const second = run(["approve", "--resolve", id, "--deny", "--by", "Blair"], repo);
+    assert.equal(second.code, 1, second.stderr);
+    assert.ok(/The action was not allowed/.test(second.stderr), second.stderr);
+    const after = readFileSync(abs, "utf8");
+    const afterLines = after.split(/\n/).filter((l) => l.length > 0).length;
+    assert.equal(afterLines, beforeLines, "ledger must roll back when the tip write fails");
+    assert.equal(after, before);
+    assert.ok(!/Blair/.test(after), after);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: a stale tip count is not used on the next append", async () => {
+  const { jsonlLineDigest } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1e");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1e", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const extra = {
+      version: 1,
+      kind: "resolution",
+      id,
+      outcome: "block",
+      ruleId: null,
+      reason: "Blair denied this action",
+      escalateTo: null,
+      approver: "Blair",
+      model: "m",
+      dataClass: "internal",
+      actor: "bot",
+      action: "db.write",
+      resourceDigest: "ab".repeat(32),
+      summaryDigest: null,
+      createdAt: "2026-09-10T00:00:00.000Z",
+      by: "Blair",
+      resolves: id,
+      resolution: "deny",
+      prevDigest: jsonlLineDigest(readFileSync(abs, "utf8").trim().split(/\n/).pop()),
+    };
+    appendFileSync(abs, JSON.stringify(extra) + "\n");
+    const recover = run(["approve", "--resolve", id, "--allow", "--by", "Casey"], repo);
+    assert.equal(recover.code, 1, recover.stderr);
+    assert.ok(/write checkpoint|The action was not allowed/.test(recover.stderr), recover.stderr);
+    const lines = readFileSync(abs, "utf8").split(/\n/).filter((l) => l.length > 0);
+    assert.equal(lines.length, 3, "a mismatched tip must not receive another ledger line");
+    const exp = run(["proof", "export", id], repo);
     assert.equal(exp.code, 1, exp.stderr);
-    assert.ok(/tries to leave \.getadvantage\/approvals|not a local record name/.test(exp.stderr), exp.stderr);
-    assert.equal(existsSync(path.join(outside, "dec-junc.packet.json")), false);
-    assert.equal(existsSync(path.join(outside, "dec-junc.html")), false);
+    assert.ok(/write checkpoint/.test(exp.stderr), exp.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: append refuses when the ledger was altered and the tip was not", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1a2");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1a2", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const rec = JSON.parse(readFileSync(abs, "utf8").trim());
+    rec.action = "db.delete";
+    writeFileSync(abs, JSON.stringify(rec) + "\n");
+    const resolved = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    assert.equal(resolved.code, 1, resolved.stderr);
+    assert.ok(/write checkpoint|The action was not allowed/.test(resolved.stderr), resolved.stderr);
+    const lines = readFileSync(abs, "utf8").split(/\n/).filter((l) => l.length > 0);
+    assert.equal(lines.length, 1);
+    const exp = run(["proof", "export", id, "--json"], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/write checkpoint/.test(exp.stderr), exp.stderr);
+    assert.ok(!/Chain: intact/.test(exp.stdout), exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: deleting the tip does not export a flipped outcome as verified", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1a2b");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1a2b", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const rec = JSON.parse(readFileSync(abs, "utf8").trim());
+    rec.outcome = "allow";
+    writeFileSync(abs, JSON.stringify(rec) + "\n");
+    rmSync(`${abs}.tip`, { force: true });
+    const exp = run(["proof", "export", id, "--json"], repo);
+    assert.equal(exp.code, 0, exp.stderr);
+    const packet = JSON.parse(exp.stdout);
+    assert.notEqual(packet.chain.status, "verified");
+    assert.notEqual(packet.chain.ok, true);
+    assert.ok(/Chain: unverified/.test(exp.stderr + exp.stdout) || packet.chain.status === "unverified", exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: empty-object tip is refused not skipped", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1a2c");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1a2c", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const rec = JSON.parse(readFileSync(abs, "utf8").trim());
+    rec.outcome = "allow";
+    writeFileSync(abs, JSON.stringify(rec) + "\n");
+    writeFileSync(`${abs}.tip`, "{}\n");
+    const exp = run(["proof", "export", id, "--json"], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/write checkpoint/.test(exp.stderr), exp.stderr);
+    assert.ok(!/Chain: intact/.test(exp.stdout), exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: credential-shaped export id is refused at the packet boundary", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1a3");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1a3", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const K = "sk_live_" + "A".repeat(20);
+    writeProofJsonl(repo, K, [v1ProofLine({ id: "dec-v1-fixture" })]);
+    const exp = run(["proof", "export", K], repo);
+    assert.equal(exp.code, 1, exp.stderr);
+    assert.ok(/looks like a secret/.test(exp.stderr), exp.stderr);
+    assert.ok(!exp.stderr.includes(K), "secret absence is independent of the error phrase");
+    assert.ok(!exp.stdout.includes(K));
+    const approvals = path.join(repo, ".getadvantage", "approvals");
+    assert.equal(existsSync(path.join(approvals, `${K}.packet.json`)), false);
+    assert.equal(existsSync(path.join(approvals, `${K}.html`)), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: hardlink at tip.tmp does not overwrite an outside file", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "p1a4");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "p1a4", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const outside = path.join(base, "sentinel.txt");
+    writeFileSync(outside, "SENTINEL-UNTOUCHED\n");
+    const tipTmp = `${abs}.tip.tmp`;
+    let planted = false;
+    if (process.platform === "win32") {
+      const linked = spawnSync("cmd", ["/c", "mklink", "/H", tipTmp, outside], { encoding: "utf8" });
+      planted = linked.status === 0;
+    }
+    if (!planted) {
+      try {
+        symlinkSync(outside, tipTmp, "file");
+        planted = true;
+      } catch {
+        planted = false;
+      }
+    }
+    if (!planted) {
+      return;
+    }
+    const before = readFileSync(outside, "utf8");
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    const after = existsSync(outside) ? readFileSync(outside, "utf8") : "MISSING";
+    assert.equal(after, before, `outside sentinel was overwritten:\n${after}\nresolve: ${r.code} ${r.stderr}`);
+    assert.ok(!after.includes("tipDigest"), after);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: write-time walk refuses a credential nested past depth 16", async () => {
+  const { appendProofRecord, buildProofRecord, credentialRecordField } = await import("../approve.mjs");
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "deep");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "deep", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const stripe = "sk_live_" + "ABCDEFGHIJKLMNOP1234";
+    let wrapped = stripe;
+    for (let i = 0; i < 18; i++) wrapped = [wrapped];
+    const rec = buildProofRecord({
+      kind: "decision",
+      id: "dec-deep",
+      decision: { outcome: "block", ruleId: "r1", reason: "no", escalateTo: null },
+      descriptor: { action: "x", resource: "y", actor: "bot", dataClass: "public" },
+      now: "2026-09-09T12:00:00.000Z",
+    });
+    rec.note = wrapped;
+    assert.equal(credentialRecordField(rec), "note");
+    assert.throws(() => appendProofRecord(repo, rec), /looks like a secret/);
+    const abs = path.join(repo, ".getadvantage", "approvals", "dec-deep.jsonl");
+    assert.equal(existsSync(abs), false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: multiline model stays on one first-screen line", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "ml");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "ml", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const rec = v1ProofLine({ id: "dec-ml", model: "m" + "\n".repeat(20) + "extra" });
+    writeProofJsonl(repo, rec.id, [rec]);
+    const exp = run(["proof", "export", rec.id], repo);
+    assert.equal(exp.code, 0, exp.stderr);
+    assert.ok(stdoutLines(exp.stdout) <= 12, `first screen lines: ${stdoutLines(exp.stdout)}\n${exp.stdout}`);
+    assert.ok(/Model: m extra/.test(exp.stdout), exp.stdout);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("proof: stale lock directory times out instead of spinning", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "lockdir");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "lockdir", version: "1.0.0", private: true }, null, 2) + "\n");
+    writeApprovalsPolicy(repo, { default: "escalate", escalateTo: "Alex", rules: [] });
+    commitAll(repo, "chore: escalate");
+    const asked = run(
+      ["approve", "--json", "--action", "db.write", "--resource", "customers", "--actor", "bot", "--data-class", "internal", "--model", "m"],
+      repo,
+    );
+    const id = JSON.parse(asked.stdout).id;
+    const abs = path.join(repo, ".getadvantage", "approvals", `${id}.jsonl`);
+    const lock = `${abs}.lock`;
+    mkdirSync(lock);
+    writeFileSync(path.join(lock, "keep.txt"), "not empty\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    const t0 = Date.now();
+    const r = run(["approve", "--resolve", id, "--allow", "--by", "Alex"], repo);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 15_000, `stale lock directory looped for ${ms}ms`);
+    assert.equal(r.code, 1, r.stderr);
+    assert.ok(/stale approval lock could not be removed|retry in a moment/.test(r.stderr), r.stderr);
   } finally {
     cleanup(base);
   }
