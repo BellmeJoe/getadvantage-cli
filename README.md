@@ -340,7 +340,9 @@ chain starts is refused, not treated as unsigned. Lines with no previous-line
 digest export as unverified; unverified is not a trustworthy unsigned history.
 Nested secret-shaped values are refused; a caller who passes an array still
 gets a refusal if any nested string looks like a key, and the key is not copied
-into the error, including the `--json` error document. A record file that
+into the error, including the `--json` error document. A secret-shaped name
+passed as an MCP tool, method, or property name is refused and is not copied
+into the JSON-RPC error message. A record file that
 shares storage with another name is not appended. Both commands are in this
 checkout. Neither is in the published package until a release. Nothing is
 uploaded. There is no hosted page. Do not treat the copy as a finished handoff.

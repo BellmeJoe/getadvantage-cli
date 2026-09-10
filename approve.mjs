@@ -145,8 +145,10 @@ function diagnosticFieldName(key) {
 
 /**
  * Machine-readable error bodies must not reintroduce a value the human path
- * already refused. Walks the document and replaces credential-shaped strings
- * with null. Used by CLI `--json` error documents and MCP JSON result blocks.
+ * already refused. Walks the document, drops credential-shaped keys (a name
+ * is an input too), and replaces credential-shaped strings with null. Used
+ * by CLI `--json` error documents, MCP JSON result blocks, and MCP protocol
+ * error objects.
  */
 export function omitCredentialShaped(value) {
   if (typeof value === "string") return fieldLooksLikeCredential(value) ? null : value;
@@ -156,7 +158,10 @@ export function omitCredentialShaped(value) {
   if (Array.isArray(value)) return value.map(omitCredentialShaped);
   if (value && typeof value === "object") {
     const out = {};
-    for (const key of Object.keys(value)) out[key] = omitCredentialShaped(value[key]);
+    for (const key of Object.keys(value)) {
+      if (fieldLooksLikeCredential(key)) continue;
+      out[key] = omitCredentialShaped(value[key]);
+    }
     return out;
   }
   return value;

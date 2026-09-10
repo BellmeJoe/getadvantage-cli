@@ -102,7 +102,10 @@ function captureStdout(fn) {
 /** Diagnostics → stderr ONLY (never stdout — that's the protocol channel). */
 function logErr(msg) {
   try {
-    process.stderr.write(`[getadvantage mcp] ${msg}\n`);
+    const raw = String(msg ?? "");
+    const scrubbed = omitCredentialShaped(raw);
+    const shown = typeof scrubbed === "string" && scrubbed ? scrubbed : "diagnostic withheld";
+    process.stderr.write(`[getadvantage mcp] ${shown}\n`);
   } catch {
     /* ignore */
   }
@@ -674,10 +677,67 @@ async function captureAsync(fn) {
 // ---------------------------------------------------------------------------
 // JSON-RPC plumbing
 // ---------------------------------------------------------------------------
+function refusedText(fallback) {
+  return typeof fallback === "string" && fallback ? fallback : "Request refused";
+}
+
+/**
+ * Last gate on the protocol channel. Caller-controlled names (tool, method,
+ * property, JSON-RPC id) are interpolated into error messages upstream;
+ * this walk drops credential-shaped keys and nulls credential-shaped
+ * strings so the literal never reaches stdout. Successful tool result
+ * bodies are not walked: those are repo content the owner asked to read.
+ */
+function scrubRpcOutbound(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return { jsonrpc: "2.0", error: { code: -32603, message: "Request refused" } };
+  }
+  const out = { jsonrpc: "2.0" };
+  if (Object.prototype.hasOwnProperty.call(obj, "id")) {
+    out.id = omitCredentialShaped(obj.id);
+  }
+  if (obj.error && typeof obj.error === "object" && !Array.isArray(obj.error)) {
+    const scrubbed = omitCredentialShaped(obj.error);
+    const err =
+      scrubbed && typeof scrubbed === "object" && !Array.isArray(scrubbed) ? { ...scrubbed } : {};
+    if (typeof obj.error.code === "number" && Number.isFinite(obj.error.code)) {
+      err.code = obj.error.code;
+    }
+    if (typeof err.message !== "string" || !err.message) {
+      err.message = refusedText("Request refused");
+    }
+    out.error = err;
+    return out;
+  }
+  if (Object.prototype.hasOwnProperty.call(obj, "result")) {
+    out.result = scrubRpcResult(obj.result);
+  }
+  return out;
+}
+
+function scrubRpcResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  if (!result.isError) return result;
+  const scrubbed = omitCredentialShaped(result);
+  if (!scrubbed || typeof scrubbed !== "object" || Array.isArray(scrubbed)) {
+    return { content: [{ type: "text", text: "The action was not allowed." }], isError: true };
+  }
+  if (Array.isArray(scrubbed.content)) {
+    scrubbed.content = scrubbed.content.map((c) => {
+      if (!c || typeof c !== "object") return c;
+      if (c.type === "text" && typeof c.text !== "string") {
+        return { ...c, text: "The action was not allowed." };
+      }
+      return c;
+    });
+  }
+  return scrubbed;
+}
+
 function writeMessage(obj) {
   // One JSON object per line on stdout — the ONLY thing allowed on stdout.
   try {
-    process.stdout.write(JSON.stringify(obj) + "\n");
+    process.stdout.write(JSON.stringify(scrubRpcOutbound(obj)) + "\n");
   } catch (e) {
     logErr(`failed to write response: ${e.message || e}`);
   }

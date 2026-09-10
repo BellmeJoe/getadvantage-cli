@@ -19955,7 +19955,7 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    452,
+    453,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
@@ -19964,7 +19964,8 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   // map-cwd-local (412); r2 added policy-read I/O (413); L2 proof export
   // added 12 (425); L2 repair added 14 (439); L2 repair-2 added 10 (449);
   // L2 repair-4 P1 added --json credential omit + ledger hardlink (451);
-  // L2 repair-4 P2 added earlier-line append refuse (452).
+  // L2 repair-4 P2 added earlier-line append refuse (452);
+  // L2 repair-5 P1 added MCP protocol-error name omit (453).
   // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
@@ -23538,6 +23539,58 @@ scenario("proof: --json export rejection omits a credential-shaped id", () => {
     assert.equal(byRefuse.code, 1, byRefuse.stderr);
     assert.ok(!byRefuse.stdout.includes(by), byRefuse.stdout);
     assert.ok(!byRefuse.stderr.includes(by), byRefuse.stderr);
+  } finally {
+    cleanup(base);
+  }
+});
+
+scenario("mcp: protocol errors omit a credential-shaped name from stdout", () => {
+  const base = freshBase();
+  try {
+    const repo = path.join(base, "mcp-proto-cred");
+    initRepo(repo);
+    write(repo, "package.json", JSON.stringify({ name: "mcp-proto-cred", version: "1.0.0", private: true }, null, 2) + "\n");
+    commitAll(repo, "chore: init");
+    const K = "sk_live_" + "A".repeat(20);
+    const mcp = runMcpJsonRpc(repo, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: K, arguments: {} } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "approve_action", arguments: { [K]: "x" } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "approve_action", arguments: { unexpected: K } } },
+      { jsonrpc: "2.0", id: 5, method: K, params: {} },
+      { jsonrpc: "2.0", method: K },
+      { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "not-a-tool", arguments: {} } },
+      { jsonrpc: "2.0", id: K, method: "ping", params: {} },
+    ]);
+    assert.equal(mcp.status, 0, mcp.stderr);
+    assert.ok(!mcp.stdout.includes(K), `protocol stdout echoed the refused name:\n${mcp.stdout}`);
+    assert.ok(!mcp.stderr.includes(K), `protocol stderr echoed the refused name:\n${mcp.stderr}`);
+    const unknownTool = mcpReply(mcp.replies, 2);
+    assert.ok(unknownTool.error, JSON.stringify(unknownTool));
+    assert.equal(unknownTool.error.code, -32602);
+    assert.equal(typeof unknownTool.error.message, "string");
+    assert.ok(!unknownTool.error.message.includes(K));
+    const extraProp = mcpReply(mcp.replies, 3);
+    assert.ok(extraProp.error, JSON.stringify(extraProp));
+    assert.equal(extraProp.error.code, -32602);
+    assert.ok(!String(extraProp.error.message).includes(K));
+    const extraVal = mcpReply(mcp.replies, 4);
+    assert.ok(extraVal.error, JSON.stringify(extraVal));
+    assert.ok(!JSON.stringify(extraVal).includes(K));
+    const unknownMethod = mcpReply(mcp.replies, 5);
+    assert.ok(unknownMethod.error, JSON.stringify(unknownMethod));
+    assert.equal(unknownMethod.error.code, -32601);
+    assert.ok(!String(unknownMethod.error.message).includes(K));
+    const benign = mcpReply(mcp.replies, 6);
+    assert.ok(benign.error, JSON.stringify(benign));
+    assert.match(benign.error.message, /Unknown tool: not-a-tool/);
+    const echoedId = mcp.replies.find((m) => m && m.id === K);
+    assert.equal(echoedId, undefined, `credential-shaped JSON-RPC id was echoed:\n${JSON.stringify(echoedId)}`);
+    const src = readFileSync(path.join(__dirname, "..", "mcp.mjs"), "utf8");
+    assert.match(src, /function scrubRpcOutbound/);
+    assert.match(src, /function writeMessage/);
+    assert.match(src, /JSON\.stringify\(scrubRpcOutbound\(obj\)\)/);
+    assert.match(src, /omitCredentialShaped\(obj\.error\)/);
   } finally {
     cleanup(base);
   }
