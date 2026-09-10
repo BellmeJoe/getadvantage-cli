@@ -123,7 +123,8 @@ function resolveRepo(args) {
   } catch {
     return {
       cwd: null,
-      error: `Not inside a git repository at ${start}. getAdvantage runs in your project's repo — pass a "cwd" inside a git repo.`,
+      error:
+        "Not inside a git repository. getAdvantage runs in your project's repo — pass a \"cwd\" inside a git repo.",
     };
   }
 }
@@ -160,7 +161,7 @@ function pinStartupRepo() {
     STARTUP_REPO = {
       root: null,
       display: null,
-      error: `Not inside a git repository at ${start}. getAdvantage runs in your project's repo.`,
+      error: "Not inside a git repository. getAdvantage runs in your project's repo.",
     };
   }
   return STARTUP_REPO;
@@ -705,9 +706,12 @@ function refusedText(fallback) {
  *
  * Successful tool result bodies are not walked: those are repo content
  * the owner asked to read (brief, map, check log, architecture report).
- * A thrown stack and an interpolated cwd are not repo content. Those
- * paths return isError:true so this gate walks them, and they no longer
- * interpolate cwd, e.message, or error.stack onto the protocol channel.
+ * A thrown stack is not repo content. resolveRepo / pinStartupRepo /
+ * brief-failure / check-crash / map / architecture no longer interpolate
+ * cwd, e.message, or error.stack into the protocol payload; they return
+ * a fixed sentence (and isError:true where they are failures) so a
+ * matcher miss cannot restore a path echo. This gate still walks error
+ * objects and isError results as belt-and-braces.
  * Shapes the catalogue does not list (for example 64-hex `0x…`) are not
  * withheld here. index.mjs `Unknown flag: --${f}` is the same class on
  * the CLI door; that file is out of scope this lane and is disclosed,

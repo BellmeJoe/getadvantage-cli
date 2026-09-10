@@ -23682,6 +23682,10 @@ scenario("mcp: protocol errors omit every SECRET_PATTERNS shape from stdout", as
         `${id} leaked json-escaped on protocol stderr:\n${mcp.stderr}`,
       );
     }
+    assert.ok(!mcp.stdout.includes("BEGIN PRIVATE KEY"), mcp.stdout);
+    assert.ok(!mcp.stdout.includes("MIIB"), mcp.stdout);
+    assert.ok(!mcp.stderr.includes("BEGIN PRIVATE KEY"), mcp.stderr);
+    assert.ok(!mcp.stderr.includes("MIIB"), mcp.stderr);
     const unknownTool = mcpReply(mcp.replies, 400);
     assert.ok(unknownTool.error, JSON.stringify(unknownTool));
     assert.match(unknownTool.error.message, /Unknown tool: not-a-tool/);
@@ -23886,9 +23890,12 @@ scenario("mcp: isError tool result omits a credential-shaped cwd", () => {
     assert.equal(tool.isError, true);
     assert.ok(typeof tool.text === "string");
     assert.ok(!tool.text.includes(K));
+    assert.match(tool.text, /Not inside a git repository/);
+    assert.doesNotMatch(tool.text, /Not inside a git repository at /);
     const src = readFileSync(path.join(__dirname, "..", "mcp.mjs"), "utf8");
     assert.match(src, /function scrubRpcResult/);
     assert.match(src, /if \(!result\.isError\) return result/);
+    assert.doesNotMatch(src, /Not inside a git repository at \$\{start\}/);
   } finally {
     cleanup(base);
   }
@@ -23917,7 +23924,7 @@ scenario("mcp: operational tool messages omit a credential-shaped directory name
     assert.doesNotMatch(src, /Map failed: \$\{error\.message/);
     assert.doesNotMatch(src, /Architecture scan failed: \$\{error\.message/);
     assert.match(src, /isError: true, text: "Checks crashed\."/);
-    assert.match(src, /A thrown stack and an interpolated cwd are not repo content/);
+    assert.match(src, /A thrown stack is not repo content/);
     assert.match(src, /if \(!result\.isError\) return result/);
   } finally {
     cleanup(base);
