@@ -426,6 +426,15 @@ function rewriteGateImports(src) {
     .replaceAll('from "./scan.mjs"', `from ${JSON.stringify(scanHref)}`);
 }
 
+/** Rewrite every same-dir `from "./…"` specifier to a product-tree file URL. */
+function rewriteRelativeImportsToProduct(src) {
+  const productDir = path.join(__dirname, "..");
+  return src.replace(/from "(\.\/[^"]+)"/g, (_, rel) => {
+    const href = pathToFileURL(path.resolve(productDir, rel)).href;
+    return `from ${JSON.stringify(href)}`;
+  });
+}
+
 /** Spawn the real CLI in a repo; capture code + both streams (never throws). */
 function run(args, cwd, envExtra) {
   const r = spawnSync(process.execPath, [INDEX, ...args], {
@@ -19955,7 +19964,7 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   );
   assert.equal(
     scenarios.length,
-    460,
+    463,
     `suite arithmetic: got ${scenarios.length}`,
   );
   // Pins the live scenario() count so a silent add/remove cannot drift
@@ -19968,6 +19977,8 @@ scenario("scan-scope-claim: frozen pre-lane builders still lie about untracked f
   // L2 repair-5 P1 added MCP protocol-error name omit (453);
   // L2 repair-5 sweep added tip/html hardlink, tip/html dangling junction,
   // MCP isError cwd omit, lock dangling junction, and proof subcommand omit (460).
+  // L2 repair-6 added MCP SECRET_PATTERNS protocol-error catalogue, 8-pattern
+  // scrub-swap leak restore, and operational tool credential-shaped cwd omit (463).
   // Update this number when a scenario is added or removed; do not delete the pin.
 });
 
@@ -23072,15 +23083,10 @@ scenario("proof: source.sha256 matches the bytes that were parsed", async () => 
     assert.doesNotMatch(src, /source\.sha256[\s\S]{0,200}readFileSync\(abs\)/);
 
     const original = src;
-    const utilHref = pathToFileURL(path.join(__dirname, "..", "util.mjs")).href;
-    const policyHref = pathToFileURL(path.join(__dirname, "..", "policy.mjs")).href;
-    const neutered = original
-      .replaceAll('from "./util.mjs"', `from ${JSON.stringify(utilHref)}`)
-      .replaceAll('from "./policy.mjs"', `from ${JSON.stringify(policyHref)}`)
-      .replace(
-        'const sourceSha256 = fileHash.digest("hex");',
-        'writeFileSync(abs, readFileSync(abs) + "TAMPER\\n"); const sourceSha256 = createHash("sha256").update(readFileSync(abs)).digest("hex");',
-      );
+    const neutered = rewriteRelativeImportsToProduct(original).replace(
+      'const sourceSha256 = fileHash.digest("hex");',
+      'writeFileSync(abs, readFileSync(abs) + "TAMPER\\n"); const sourceSha256 = createHash("sha256").update(readFileSync(abs)).digest("hex");',
+    );
     assert.ok(neutered !== original, "mutation must change the source");
     const scratchDir = path.join(base, "scratch-approve");
     mkdirSync(scratchDir, { recursive: true });
