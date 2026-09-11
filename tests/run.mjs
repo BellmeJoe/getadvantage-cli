@@ -15902,15 +15902,15 @@ scenario("feedback: regression pins — check first screen / SARIF / --json on c
   // After L1 stage B repair (approve_action cwd pin, HB8, operational
   // isError fixtures, HB6/HB7/A7 edits; startLines shifted); remeasured
   // via PRINT_PINS=1 / measureRegressionPins:
-  //   f9b4eecc633c0fd5 → df100b710e3c3880 (SARIF)
-  //   38bdf04230670672 → 0f123e6ac96fa174 (JSON excl. generatedAt)
+  //   f9b4eecc633c0fd5 → 9106a5b82494c082 (SARIF) (L2 r7 helper startLines)
+  //   38bdf04230670672 → f494d69d34f29617 (JSON excl. generatedAt)
   assert.ok(
-    pins.sarifHash.startsWith("df100b710e3c3880"),
+    pins.sarifHash.startsWith("9106a5b82494c082"),
     `SARIF sha256 prefix mismatch: ${pins.sarifPrefix} (full ${pins.sarifHash})`,
   );
 
   assert.ok(
-    pins.jsonHash.startsWith("0f123e6ac96fa174"),
+    pins.jsonHash.startsWith("f494d69d34f29617"),
     `JSON sha256 prefix mismatch: ${pins.jsonPrefix} (full ${pins.jsonHash})`,
   );
 });
@@ -17605,11 +17605,11 @@ scenario("arrival: print-pins harness matches feedback regression pins asserts",
   assert.equal(pins.verdictHeader, 53);
   assert.equal(pins.fileLineCount, 5);
   assert.ok(
-    pins.sarifHash.startsWith("df100b710e3c3880"),
+    pins.sarifHash.startsWith("9106a5b82494c082"),
     `print-pins SARIF prefix drift: ${pins.sarifPrefix} (remeasure + sync feedback pins)`,
   );
   assert.ok(
-    pins.jsonHash.startsWith("0f123e6ac96fa174"),
+    pins.jsonHash.startsWith("f494d69d34f29617"),
     `print-pins JSON prefix drift: ${pins.jsonPrefix} (remeasure + sync feedback pins)`,
   );
 });
